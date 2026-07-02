@@ -94,6 +94,7 @@ echo "STAGE 1/4: Running Security Setup (tools/security_setup.sh)"
 echo "============================================================================"
 echo "NOTE: This script will prompt you for confirmation (e.g., enabling UFW)."
 
+chmod +x tools/security_setup.sh
 ./tools/security_setup.sh
 
 # --- 3. Upstream RTKBase base installation ---
@@ -115,6 +116,7 @@ if [ ! -L "rtkbase" ]; then
     ln -s . rtkbase
 fi
 
+chmod +x tools/install.sh tools/copy_unit.sh 2>/dev/null || true
 ./tools/install.sh --all repo --rtkbase-repo main --user "${SUDO_USER:-$USER}" --start-services
 
 # --- 4. Final checklist ---
