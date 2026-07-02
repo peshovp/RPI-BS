@@ -1,0 +1,970 @@
+{% extends "base.html" %}
+
+{% block styles %}
+{{ super() }}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<style>
+    :root {
+        --gm-bg: #ffffff;
+        --gm-surface: #ffffff;
+        --gm-card: #ffffff;
+        --gm-border: #e5e7eb;
+        --gm-primary: #0d6efd; /* bootstrap primary */
+        --gm-secondary: #6c757d;
+        --gm-accent: #198754; /* bootstrap success */
+        --gm-text: #212529;
+        --gm-subtle: #6c757d;
+    }
+    
+    body {
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+        background: var(--gm-bg);
+        color: var(--gm-text);
+    }
+
+    .update-shell {
+        padding: 16px;
+    }
+
+    .update-shell > .row, .update-shell h2, .update-shell p, .update-shell hr {}
+    
+    .version-card {
+        border: 1px solid var(--gm-border);
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 16px;
+        background: var(--gm-card);
+        color: var(--gm-text);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+    
+    .version-card h3 {
+        color: var(--gm-text);
+        margin-bottom: 12px;
+        letter-spacing: 0;
+    }
+    
+    .version-info {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.92rem;
+    }
+    
+    .version-info .label {
+        opacity: 0.7;
+        margin-right: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.76rem;
+    }
+    
+    .commit-badge {
+        background-color: #f8f9fa;
+        padding: 5px 10px;
+        border-radius: 8px;
+        font-size: 0.82rem;
+        color: var(--gm-text);
+    }
+    
+    .update-available {
+        background: #f8fff9;
+    }
+    
+    .card {
+        background: var(--gm-card);
+        border: 1px solid var(--gm-border);
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .card-header {
+        border-bottom: 1px solid var(--gm-border);
+        background: #f8f9fa;
+    }
+
+    .card-body {
+        color: var(--gm-text);
+    }
+    
+    .update-status {
+        padding: 16px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+    }
+    
+    .update-status.checking { background-color: #fff8e1; border: 1px solid #ffe8a1; }
+    .update-status.available { background-color: #eefdf3; border: 1px solid #c9f3d9; }
+    .update-status.updating { background-color: #eaf6ff; border: 1px solid #cbe7ff; }
+    .update-status.error { background-color: #fff0f0; border: 1px solid #ffd1d1; }
+    
+    .commit-log {
+        max-height: 440px;
+        overflow-y: auto;
+        border: 1px solid var(--gm-border);
+        border-radius: 10px;
+        padding: 14px;
+        background: #f8f9fa;
+    }
+    
+    .commit-item {
+        padding: 10px;
+        border-left: 3px solid var(--gm-primary);
+        margin-bottom: 10px;
+        background: #ffffff;
+        border-radius: 6px;
+    }
+    
+    .commit-hash {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.85rem;
+        color: var(--gm-subtle);
+    }
+    
+    .commit-message {
+        font-weight: 600;
+        margin: 4px 0;
+    }
+    
+    .commit-author {
+        font-size: 0.85rem;
+        color: var(--gm-subtle);
+    }
+    
+    .update-log {
+        background: #f8f9fa;
+        color: #212529;
+        padding: 14px;
+        border-radius: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.9rem;
+        max-height: 420px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        border: 1px solid var(--gm-border);
+    }
+    
+    .changelog-box {
+        background: rgba(56, 189, 248, 0.08);
+        border: 1px solid rgba(56, 189, 248, 0.28);
+        border-radius: 10px;
+        padding: 15px;
+        margin: 15px 0;
+    }
+    
+    .btn-update {
+        font-size: 1.05rem;
+        padding: 12px 30px;
+        border-radius: 10px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+    }
+    
+    .btn-info { background: #0d6efd; border: 1px solid #0d6efd; color: #fff; font-weight: 600; }
+    .btn-info:hover { filter: brightness(1.05); }
+    .btn-success { background: #198754; border: 1px solid #198754; color: #fff; font-weight: 600; }
+
+    .btn-ghost {
+        background: transparent;
+        border: 1px solid var(--gm-border);
+        color: var(--gm-subtle);
+        font-weight: 600;
+    }
+
+    .btn-ghost:hover { border-color: #cfd4da; color: var(--gm-text); }
+
+    .btn-outline-muted {
+        background: transparent;
+        border: 1px solid var(--gm-border);
+        color: var(--gm-subtle);
+        font-weight: 600;
+    }
+
+    .btn-outline-muted:hover { color: var(--gm-text); }
+
+    .badge-warning, .badge-success {
+        padding: 8px 10px;
+        border-radius: 10px;
+    }
+
+    .spinner-border-sm {
+        width: 1rem;
+        height: 1rem;
+        border-width: 0.15em;
+    }
+
+    h2 { letter-spacing: 0.4px; }
+    .text-muted { color: var(--gm-subtle) !important; }
+
+    /* Rollback de-emphasis */
+    .rollback-card .card-header {
+        background: #f8f9fa;
+        border-bottom: 1px solid var(--gm-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+    }
+
+    .rollback-card .card-body {
+        color: var(--gm-subtle);
+    }
+
+    .rollback-hint {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px dashed var(--gm-border);
+        color: var(--gm-subtle);
+        border-radius: 10px;
+        padding: 12px;
+    }
+
+    .rollback-actions .btn {
+        font-size: 0.95rem;
+        padding: 10px;
+    }
+
+    .rollback-actions .btn-primary {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--gm-border);
+        color: var(--gm-text);
+    }
+
+    .rollback-actions .btn-primary:hover {
+        filter: brightness(1.02);
+    }
+
+    .toggle-rollback {
+        background: #ffffff;
+        border: 1px solid var(--gm-border);
+        color: var(--gm-text);
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 0.9rem;
+    }
+
+    .toggle-rollback:hover { filter: brightness(1.05); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid update-shell">
+    <div class="row">
+        <div class="col-12">
+            <h2>🔄 OTA Update Manager</h2>
+            <p class="text-muted">Remote software updates for GeoMaxima</p>
+            <hr>
+        </div>
+    </div>
+    
+    {% if not feature_enabled %}
+    <div class="alert alert-danger">
+        <strong>Feature Error:</strong> OTA Update feature not available
+    </div>
+    {% else %}
+    
+    <!-- Current Version -->
+    <div class="row">
+        <div class="col-lg-6">
+            <div class="version-card {% if version_info.has_uncommitted_changes %}update-available{% endif %}">
+                <h3><i class="fas fa-code-branch"></i> Current Version</h3>
+                <div class="version-info">
+                    <div class="mb-2">
+                        <span class="label">Version:</span>
+                        <strong>{{ version_info.version or 'Unknown' }}</strong>
+                    </div>
+                    <div class="mb-2">
+                        <span class="label">Branch:</span>
+                        <span class="commit-badge">{{ version_info.branch or 'unknown' }}</span>
+                    </div>
+                    <div class="mb-2">
+                        <span class="label">Commit:</span>
+                        <code style="color: rgba(255,255,255,0.9)">{{ version_info.commit_short or 'unknown' }}</code>
+                    </div>
+                    <div class="mb-2">
+                        <span class="label">Date:</span>
+                        {{ version_info.commit_date or 'Unknown' }}
+                    </div>
+                    <div class="mb-2">
+                        <span class="label">Message:</span>
+                        <em>{{ version_info.commit_message or 'N/A' }}</em>
+                    </div>
+                    {% if version_info.has_uncommitted_changes %}
+                    <div class="mt-3">
+                        <span class="badge badge-warning">
+                            <i class="fas fa-exclamation-triangle"></i> Uncommitted changes present
+                        </span>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-6">
+            <!-- Update Controls -->
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0"><i class="fas fa-download"></i> Update Controls</h5>
+                </div>
+                <div class="card-body">
+                    <div id="updateStatus" style="display: none;"></div>
+                    
+                    <div class="text-center mb-3">
+                        <button id="btnCheckUpdates" class="btn btn-info btn-lg btn-block">
+                            <i class="fas fa-sync"></i> Check for Updates
+                        </button>
+                    </div>
+                    
+                    <div id="updateAvailable" style="display: none;">
+                        <div class="changelog-box">
+                            <h6><strong>Updates Available:</strong></h6>
+                            <p class="mb-2">
+                                <span id="commitsBehind"></span> new commits
+                            </p>
+                            <div id="changelog" class="mt-2" style="font-family: monospace; font-size: 0.9rem;"></div>
+                        </div>
+                        
+                        <div class="alert alert-warning">
+                            <strong>⚠ Warning:</strong>
+                            <ul class="mb-0">
+                                <li>Update process takes 2-5 minutes</li>
+                                <li>Web interface will restart automatically</li>
+                                <li>Don't close browser during update</li>
+                            </ul>
+                        </div>
+                        
+                        <button id="btnPerformUpdate" class="btn btn-success btn-update btn-block">
+                            <i class="fas fa-arrow-circle-up"></i> Install Update
+                        </button>
+                    </div>
+                    
+                    <div id="noUpdates" style="display: none;">
+                        <div class="alert alert-success">
+                            <i class="fas fa-check-circle"></i> <strong>System is up to date</strong>
+                        </div>
+                    </div>
+                    
+                    <div id="updateProgress" style="display: none;">
+                        <div class="alert alert-info">
+                            <div class="d-flex align-items-center">
+                                <div class="spinner-border spinner-border-sm mr-2" role="status">
+                                    <span class="sr-only">Updating...</span>
+                                </div>
+                                <span id="progressText">Update in progress...</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="updateLog" style="display: none;">
+                        <h6 class="mt-3">Update Log:</h6>
+                        <div class="update-log" id="logContent"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GitHub Token (private repo access) -->
+            <div class="card mt-3">
+                <div class="card-header bg-light d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0"><i class="fab fa-github"></i> GitHub Access Token</h6>
+                    <span id="githubTokenStatus" class="badge badge-secondary">Not configured</span>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted mb-3">Needed only if the OTA repository is private. Token is stored locally and not displayed here.</p>
+                    <div class="form-group">
+                        <label for="githubTokenInput" class="text-muted">Personal Access Token</label>
+                        <input type="password" class="form-control" id="githubTokenInput" placeholder="ghp_xxxxxx" autocomplete="off">
+                    </div>
+                    <div class="d-flex">
+                        <button id="btnSaveGithubToken" class="btn btn-outline-primary mr-2">
+                            <i class="fas fa-save"></i> Save Token
+                        </button>
+                        <button id="btnClearGithubToken" class="btn btn-outline-secondary">
+                            <i class="fas fa-times"></i> Clear Token
+                        </button>
+                    </div>
+                    <div id="githubTokenMessage" class="text-muted mt-2" style="min-height: 22px;"></div>
+                </div>
+            </div>
+            
+            <!-- Rollback Controls (subtle) -->
+            <div class="card mt-3 rollback-card">
+                <div class="card-header text-muted">
+                    <h6 class="mb-0"><i class="fas fa-undo"></i> Rollback (use only if needed)</h6>
+                    <button id="toggleRollback" class="toggle-rollback" type="button">Show recovery options</button>
+                </div>
+                <div class="card-body" id="rollbackSection" style="display: none;">
+                    <div class="rollback-hint mb-3">
+                        <small><i class="fas fa-info-circle"></i> Rollback is for recovery only. Keep your system on the latest version unless troubleshooting.</small>
+                    </div>
+                    
+                    <div id="previousCommitInfo" style="display: none;">
+                        <div class="commit-item" style="border-left-color: var(--gm-border);">
+                            <div class="commit-hash text-muted">Previous: <span id="prevCommitHash"></span></div>
+                            <div class="commit-message text-muted" id="prevCommitMessage"></div>
+                            <div class="commit-author">
+                                <span id="prevCommitAuthor"></span> • 
+                                <span id="prevCommitDate"></span>
+                            </div>
+                        </div>
+                        
+                        <div class="d-flex justify-content-between align-items-center rollback-actions mt-3">
+                            <div class="text-muted" style="font-size: 0.9rem;">
+                                <i class="fas fa-shield-alt"></i> Will stash changes and restart service.
+                            </div>
+                            <button id="btnRollback" class="btn btn-outline-muted">
+                                <i class="fas fa-undo"></i> Rollback
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div id="noPreviousCommit" style="display: none;">
+                        <div class="rollback-hint">
+                            <small><i class="fas fa-check-circle"></i> No rollback target available.</small>
+                        </div>
+                    </div>
+                    
+                    <div id="rollbackProgress" style="display: none;">
+                        <div class="alert alert-secondary">
+                            <div class="d-flex align-items-center">
+                                <div class="spinner-border spinner-border-sm mr-2" role="status">
+                                    <span class="sr-only">Rolling back...</span>
+                                </div>
+                                <span id="rollbackProgressText">Rollback in progress...</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="rollbackLog" style="display: none;">
+                        <h6 class="mt-3 text-muted">Rollback Log</h6>
+                        <div class="update-log" id="rollbackLogContent"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Recent Commits -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0"><i class="fas fa-history"></i> Recent Commits</h5>
+                </div>
+                <div class="card-body">
+                    <div class="commit-log">
+                        {% if recent_commits %}
+                        {% for commit in recent_commits %}
+                        <div class="commit-item">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div class="flex-grow-1">
+                                    <div class="d-flex justify-content-between">
+                                        <span class="commit-hash">{{ commit.hash_short }}</span>
+                                        <span class="commit-author">
+                                            <i class="fas fa-user"></i> {{ commit.author }} 
+                                            <small>{{ commit.date[:10] }}</small>
+                                        </span>
+                                    </div>
+                                    <div class="commit-message">{{ commit.message }}</div>
+                                </div>
+                                {% if not loop.first %}
+                                <button class="btn btn-sm btn-outline-warning ml-2 btn-rollback-commit" 
+                                        data-commit="{{ commit.hash }}" 
+                                        data-short="{{ commit.hash_short }}"
+                                        data-message="{{ commit.message }}">
+                                    <i class="fas fa-undo"></i> Rollback
+                                </button>
+                                {% else %}
+                                <span class="badge badge-success ml-2">Current</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                        {% else %}
+                        <p class="text-muted">No commit history available</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Repository Info -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card border-light">
+                <div class="card-body">
+                    <p class="mb-0">
+                        <strong>Repository:</strong> 
+                        <code>{{ version_info.repo_path or 'Unknown' }}</code>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+let updateCheckInterval;
+
+// Check for updates
+$('#btnCheckUpdates').click(function() {
+    const btn = $(this);
+    btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Checking...');
+    
+    $('#updateAvailable').hide();
+    $('#noUpdates').hide();
+    $('#updateLog').hide();
+    
+    fetch('/geomaxima/api/update/check', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        return response.json();
+    })
+    .then(data => {
+        if (data.success && data.updates) {
+            if (data.updates.updates_available) {
+                // Show update available
+                $('#commitsBehind').text(data.updates.commits_behind);
+                $('#changelog').html(data.updates.changelog.replace(/\n/g, '<br>'));
+                $('#updateAvailable').show();
+                $('#noUpdates').hide();
+            } else {
+                // No updates
+                $('#updateAvailable').hide();
+                $('#noUpdates').show();
+            }
+        } else {
+            $('#updateLog').show();
+            $('#logContent').text('Error: ' + (data.error || 'Unknown error'));
+            alert('Failed to check updates: ' + (data.error || 'Unknown error'));
+        }
+        
+        btn.prop('disabled', false).html('<i class="fas fa-sync"></i> Check for Updates');
+    })
+    .catch(error => {
+        $('#updateLog').show();
+        $('#logContent').text('Network error: ' + error.message + '\n\nCheck:\n1. Is rtkbase_web service running?\n2. Are routes registered?\n3. Check browser console for details');
+        alert('Error checking updates: ' + error.message + '\n\nSee Update Log for details.');
+        btn.prop('disabled', false).html('<i class="fas fa-sync"></i> Check for Updates');
+    });
+});
+
+// Perform update
+$('#btnPerformUpdate').click(function() {
+    if (!confirm('Start update now?\n\nThis will:\n- Pull latest code from GitHub\n- Run installation script\n- Restart web service\n\nProcess takes 2-5 minutes.')) {
+        return;
+    }
+    
+    const btn = $(this);
+    btn.prop('disabled', true);
+    $('#btnCheckUpdates').prop('disabled', true);
+    $('#updateAvailable').hide();
+    $('#updateProgress').show();
+    $('#progressText').text('Starting update...');
+    
+    // Start update (async - returns immediately)
+    fetch('/geomaxima/api/update/perform', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({restart_service: true})
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        return response.json();
+    })
+    .then(data => {
+        if (data.success && data.status === 'in_progress') {
+            // Update started - poll for status
+            $('#progressText').text('Update in progress... (this may take 2-5 minutes)');
+            pollUpdateStatus();
+        } else {
+            // Error starting update
+            $('#updateProgress').hide();
+            $('#updateLog').show();
+            $('#logContent').text(data.error || 'Failed to start update');
+            alert('Failed to start update: ' + (data.error || 'Unknown error'));
+            
+            btn.prop('disabled', false);
+            $('#btnCheckUpdates').prop('disabled', false);
+        }
+    })
+    .catch(error => {
+        $('#updateProgress').hide();
+        $('#updateLog').show();
+        $('#logContent').text('Network error: ' + error.message);
+        alert('Error starting update: ' + error.message);
+        
+        btn.prop('disabled', false);
+        $('#btnCheckUpdates').prop('disabled', false);
+    });
+});
+
+// Poll update status
+let pollAttempts = 0;
+let consecutiveErrors = 0;
+
+function pollUpdateStatus() {
+    const pollInterval = setInterval(() => {
+        pollAttempts++;
+        
+        fetch('/geomaxima/api/update/status')
+        .then(response => response.json())
+        .then(data => {
+            consecutiveErrors = 0; // Reset error counter on success
+            
+            if (data.success && data.status) {
+                // Check for completed flag first
+                if (data.status.last_update && data.status.last_update.completed) {
+                    // Update explicitly marked as completed
+                    clearInterval(pollInterval);
+                    $('#updateProgress').hide();
+                    $('#updateLog').show();
+                    $('#logContent').text(data.status.last_update.log || 'Update completed');
+                    
+                    if (data.status.last_update.success) {
+                        alert('✓ Update completed successfully!\n\nPage will reload in 5 seconds...');
+                        setTimeout(() => location.reload(), 5000);
+                    } else {
+                        alert('❌ Update failed:\n' + (data.status.last_update.error || 'Unknown error'));
+                        $('#btnPerformUpdate').prop('disabled', false);
+                        $('#btnCheckUpdates').prop('disabled', false);
+                    }
+                }
+                else if (!data.status.update_in_progress && data.status.last_update) {
+                    // Legacy check: update_in_progress is false
+                    clearInterval(pollInterval);
+                    $('#updateProgress').hide();
+                    $('#updateLog').show();
+                    $('#logContent').text(data.status.last_update.log || 'Update completed');
+                    
+                    if (data.status.last_update.success) {
+                        alert('✓ Update completed successfully!\n\nPage will reload in 5 seconds...');
+                        setTimeout(() => location.reload(), 5000);
+                    } else {
+                        alert('❌ Update failed:\n' + (data.status.last_update.error || 'Unknown error'));
+                        $('#btnPerformUpdate').prop('disabled', false);
+                        $('#btnCheckUpdates').prop('disabled', false);
+                    }
+                } else {
+                    // Still in progress
+                    const elapsed = Math.floor(pollAttempts * 3);
+                    $('#progressText').text(`Update in progress... (${elapsed}s elapsed)`);
+                }
+            }
+        })
+        .catch(error => {
+            consecutiveErrors++;
+            console.error('Status poll error:', error);
+            
+            // If service restarted, we might get connection errors
+            // After 5 consecutive errors (15 seconds), assume update completed
+            if (consecutiveErrors >= 5 && pollAttempts > 20) {
+                clearInterval(pollInterval);
+                $('#updateProgress').hide();
+                $('#updateLog').show();
+                $('#logContent').text('Update appears to have completed.\n\nService restarted - connection temporarily lost.');
+                alert('✓ Update likely completed!\n\nService was restarted.\nPage will reload in 5 seconds...');
+                setTimeout(() => location.reload(), 5000);
+            } else {
+                $('#progressText').text(`Update in progress... (connection temporarily lost, retrying...)`);
+            }
+        });
+        
+        // Safety timeout: after 5 minutes, stop polling
+        if (pollAttempts > 100) {
+            clearInterval(pollInterval);
+            $('#updateProgress').hide();
+            $('#updateLog').show();
+            $('#logContent').text('Update timeout - polling stopped after 5 minutes.');
+            alert('⚠ Update polling timeout.\n\nPlease refresh the page manually and check OTA Update status.');
+        }
+    }, 3000); // Poll every 3 seconds
+}
+
+// Set page title with hostname
+document.title = 'OTA Update - {{ hostname }}';
+
+// Load previous commit info for rollback
+function loadPreviousCommit() {
+    fetch('/geomaxima/api/update/previous')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.previous_commit) {
+            const prev = data.previous_commit;
+            $('#prevCommitHash').text(prev.hash_short);
+            $('#prevCommitMessage').text(prev.message);
+            $('#prevCommitAuthor').text(prev.author);
+            $('#prevCommitDate').text(prev.date);
+            $('#btnRollback').data('commit-hash', prev.hash);
+            
+            $('#previousCommitInfo').show();
+            $('#noPreviousCommit').hide();
+        } else {
+            $('#previousCommitInfo').hide();
+            $('#noPreviousCommit').show();
+        }
+    })
+    .catch(error => {
+        console.error('Failed to load previous commit:', error);
+        $('#previousCommitInfo').hide();
+        $('#noPreviousCommit').show();
+    });
+}
+
+// Rollback button click
+$('#btnRollback').click(function() {
+    const commitHash = $(this).data('commit-hash');
+    const commitShort = $('#prevCommitHash').text();
+    const commitMsg = $('#prevCommitMessage').text();
+    
+    if (!confirm(`⚠ ROLLBACK WARNING ⚠\n\nRollback to: ${commitShort}\n"${commitMsg}"\n\nThis will:\n- Reset code to previous commit\n- Stash any uncommitted changes\n- Run installation script\n- Restart web service\n\nProcess takes 2-3 minutes.\n\nContinue with rollback?`)) {
+        return;
+    }
+    
+    const btn = $(this);
+    btn.prop('disabled', true);
+    $('#btnCheckUpdates').prop('disabled', true);
+    $('#btnPerformUpdate').prop('disabled', true);
+    $('#rollbackProgress').show();
+    $('#rollbackProgressText').text('Starting rollback to ' + commitShort + '...');
+    $('#rollbackLog').hide();
+    
+    fetch('/geomaxima/api/update/rollback', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            commit_hash: commitHash,
+            restart_service: true
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.status === 'in_progress') {
+            // Rollback started - poll for status
+            $('#rollbackProgressText').text('Rollback in progress... (please wait)');
+            pollRollbackStatus(commitShort);
+        } else {
+            // Error starting rollback
+            $('#rollbackProgress').hide();
+            $('#rollbackLog').show();
+            $('#rollbackLogContent').text(data.error || 'Failed to start rollback');
+            alert('Failed to start rollback: ' + (data.error || 'Unknown error'));
+            
+            btn.prop('disabled', false);
+            $('#btnCheckUpdates').prop('disabled', false);
+            $('#btnPerformUpdate').prop('disabled', false);
+        }
+    })
+    .catch(error => {
+        $('#rollbackProgress').hide();
+        $('#rollbackLog').show();
+        $('#rollbackLogContent').text('Network error: ' + error.message);
+        alert('Error starting rollback: ' + error.message);
+        
+        btn.prop('disabled', false);
+        $('#btnCheckUpdates').prop('disabled', false);
+        $('#btnPerformUpdate').prop('disabled', false);
+    });
+});
+
+// Poll rollback status
+function pollRollbackStatus(commitShort) {
+    const pollInterval = setInterval(() => {
+        fetch('/geomaxima/api/update/status')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.status) {
+                if (!data.status.update_in_progress && data.status.last_update) {
+                    // Rollback completed
+                    clearInterval(pollInterval);
+                    $('#rollbackProgress').hide();
+                    $('#rollbackLog').show();
+                    $('#rollbackLogContent').text(data.status.last_update.log || 'Rollback completed');
+                    
+                    if (data.status.last_update.success) {
+                        alert(`✓ Rollback completed successfully!\n\nReturned to: ${commitShort}\n\nPage will reload in 5 seconds...`);
+                        setTimeout(() => location.reload(), 5000);
+                    } else {
+                        alert('❌ Rollback failed:\n' + (data.status.last_update.error || 'Unknown error'));
+                        $('#btnRollback').prop('disabled', false);
+                        $('#btnCheckUpdates').prop('disabled', false);
+                        $('#btnPerformUpdate').prop('disabled', false);
+                    }
+                } else {
+                    // Still in progress
+                    $('#rollbackProgressText').text('Rollback in progress... (please wait)');
+                }
+            }
+        })
+        .catch(error => {
+            console.error('Rollback status poll error:', error);
+        });
+    }, 3000); // Poll every 3 seconds
+}
+
+// GitHub token helpers
+function setGithubBadge(configured) {
+    const badge = $('#githubTokenStatus');
+    if (configured) {
+        badge.removeClass('badge-secondary').addClass('badge-success').text('Configured');
+        $('#githubTokenMessage').text('Token stored on device. Needed for private repositories.');
+    } else {
+        badge.removeClass('badge-success').addClass('badge-secondary').text('Not configured');
+        $('#githubTokenMessage').text('Add a token if the OTA repository is private.');
+    }
+}
+
+function loadGithubTokenStatus() {
+    fetch('/geomaxima/api/update/github-token')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            setGithubBadge(!!data.configured);
+        } else {
+            $('#githubTokenMessage').text('Unable to load token status.');
+        }
+    })
+    .catch(() => {
+        $('#githubTokenMessage').text('Network error while checking token status.');
+    });
+}
+
+$('#btnSaveGithubToken').click(function() {
+    const token = ($('#githubTokenInput').val() || '').trim();
+    if (!token) {
+        $('#githubTokenMessage').text('Enter a token before saving.');
+        return;
+    }
+    $('#githubTokenMessage').text('Saving...');
+
+    fetch('/geomaxima/api/update/github-token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            setGithubBadge(!!data.configured);
+            $('#githubTokenInput').val('');
+            $('#githubTokenMessage').text('Token saved. Git will use it for private OTA pulls.');
+        } else {
+            $('#githubTokenMessage').text(data.error || 'Failed to save token.');
+        }
+    })
+    .catch(error => {
+        $('#githubTokenMessage').text('Network error: ' + error.message);
+    });
+});
+
+$('#btnClearGithubToken').click(function() {
+    $('#githubTokenMessage').text('Clearing token...');
+    fetch('/geomaxima/api/update/github-token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: ''})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            setGithubBadge(!!data.configured);
+            $('#githubTokenInput').val('');
+            $('#githubTokenMessage').text('Token cleared. Public repositories will still work.');
+        } else {
+            $('#githubTokenMessage').text(data.error || 'Failed to clear token.');
+        }
+    })
+    .catch(error => {
+        $('#githubTokenMessage').text('Network error: ' + error.message);
+    });
+});
+
+// Rollback to specific commit from history
+$(document).on('click', '.btn-rollback-commit', function() {
+    const btn = $(this);
+    const commitHash = btn.data('commit');
+    const commitShort = btn.data('short');
+    const commitMsg = btn.data('message');
+    
+    if (!confirm(`⚠ ROLLBACK WARNING ⚠\n\nRollback to: ${commitShort}\n"${commitMsg}"\n\nThis will:\n- Reset code to this commit\n- Stash any uncommitted changes\n- Run installation script\n- Restart web service\n\nProcess takes 2-3 minutes.\n\nContinue with rollback?`)) {
+        return;
+    }
+    
+    btn.prop('disabled', true);
+    $('#btnCheckUpdates').prop('disabled', true);
+    $('#btnPerformUpdate').prop('disabled', true);
+    $('#btnRollback').prop('disabled', true);
+    
+    $('#rollbackProgress').show();
+    $('#rollbackProgressText').text('Rolling back to ' + commitShort + '...');
+    $('#rollbackLog').hide();
+    
+    fetch('/geomaxima/api/update/rollback', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            commit_hash: commitHash,
+            restart_service: true
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.status === 'in_progress') {
+            // Rollback started - poll for status
+            $('#rollbackProgressText').text('Rollback in progress... (please wait)');
+            pollRollbackStatus(commitShort);
+        } else {
+            // Error starting rollback
+            $('#rollbackProgress').hide();
+            $('#rollbackLog').show();
+            $('#rollbackLogContent').text(data.error || 'Failed to start rollback');
+            alert('Failed to start rollback: ' + (data.error || 'Unknown error'));
+            
+            btn.prop('disabled', false);
+            $('#btnCheckUpdates').prop('disabled', false);
+            $('#btnPerformUpdate').prop('disabled', false);
+            $('#btnRollback').prop('disabled', false);
+        }
+    })
+    .catch(error => {
+        $('#rollbackProgress').hide();
+        $('#rollbackLog').show();
+        $('#rollbackLogContent').text('Network error: ' + error.message);
+        alert('Error starting rollback: ' + error.message);
+        
+        btn.prop('disabled', false);
+        $('#btnCheckUpdates').prop('disabled', false);
+        $('#btnPerformUpdate').prop('disabled', false);
+        $('#btnRollback').prop('disabled', false);
+    });
+});
+
+// Auto-check on page load (after 2 seconds)
+setTimeout(() => {
+    $('#btnCheckUpdates').click();
+    loadPreviousCommit();
+    loadGithubTokenStatus();
+}, 2000);
+
+// Toggle rollback section visibility
+const rollbackSection = document.getElementById('rollbackSection');
+const toggleRollback = document.getElementById('toggleRollback');
+if (toggleRollback && rollbackSection) {
+    toggleRollback.addEventListener('click', () => {
+        const isHidden = rollbackSection.style.display === 'none' || rollbackSection.style.display === '';
+        rollbackSection.style.display = isHidden ? 'block' : 'none';
+        toggleRollback.textContent = isHidden ? 'Hide recovery options' : 'Show recovery options';
+    });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+[Unit]
+Description=GeoMaxima Watchdog Check Timer
+Requires=geomaxima_watchdog.service
+
+[Timer]
+# Run every minute
+OnCalendar=*:*:00
+# Run immediately on boot
+OnBootSec=1min
+# Allow some drift for system load
+AccuracySec=10s
+# Persistent across reboots
+Persistent=true
+
+[Install]
+WantedBy=timers.target

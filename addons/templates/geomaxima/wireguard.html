@@ -1,0 +1,112 @@
+{% extends 'base.html' %}
+
+{% block title %}WireGuard VPN Client{% endblock %}
+
+{% block styles %}
+{{super()}}
+<link rel="stylesheet" href="{{ url_for('static', filename='geomaxima/css/geomaxima.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <!-- Header -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="border bg-light p-3">
+                <h3 class="mb-1">WireGuard VPN Client</h3>
+                <p class="text-muted mb-0">Secure VPN tunnel configuration</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status Section -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="border bg-light p-3">
+                <h5 class="mb-3">Connection Status</h5>
+                <div id="status-section">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="sr-only">Loading...</span>
+                        </div>
+                        <p class="mt-2">Checking WireGuard status...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Section -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="border bg-light p-3">
+                <h5 class="mb-3">Configuration</h5>
+                <div id="config-section">
+                    <!-- Will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Actions Section -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="border bg-light p-3">
+                <h5 class="mb-3">Actions</h5>
+                <div class="btn-group" role="group">
+                    <button id="btn-connect" class="btn btn-success" disabled>
+                        Connect
+                    </button>
+                    <button id="btn-disconnect" class="btn btn-warning" disabled>
+                        Disconnect
+                    </button>
+                    <button id="btn-enable-autostart" class="btn btn-primary" disabled>
+                        Enable Autostart
+                    </button>
+                    <button id="btn-disable-autostart" class="btn btn-secondary" disabled>
+                        Disable Autostart
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Configuration Modal -->
+<div class="modal fade" id="configModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">WireGuard Configuration</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="config-form">
+                    <div class="form-group">
+                        <label>Paste WireGuard configuration:</label>
+                        <textarea id="wg-config-text" class="form-control" rows="15" placeholder="[Interface]
+PrivateKey = ...
+Address = ...
+
+[Peer]
+PublicKey = ...
+Endpoint = ...
+AllowedIPs = ..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="btn-save-config">Save Configuration</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{super()}}
+<script src="{{ url_for('static', filename='geomaxima/js/wireguard.js') }}"></script>
+{% endblock %}

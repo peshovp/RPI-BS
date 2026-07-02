@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title %}RTCM Message Presets - {{ hostname }}{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1><i class="fas fa-satellite-dish"></i> RTCM Message Presets</h1>
+    <p class="text-muted">Reference guide for RTCM 3.x message types and configurations</p>
+    
+    <div class="alert alert-info">
+        <strong><i class="fas fa-info-circle"></i> Quick Guide:</strong>
+        Use the dropdown menu in <a href="/settings.html">Settings → Ntrip A/B service</a> to quickly select optimized RTCM message combinations.
+    </div>
+    
+    <div class="row mt-4">
+        <div class="col-lg-4 mb-3">
+            <div class="card border-success">
+                <div class="card-header bg-success text-white">
+                    <h5 class="mb-0">MSM4 - Compact</h5>
+                </div>
+                <div class="card-body">
+                    <p><strong>Bandwidth:</strong> 300-500 bytes/s</p>
+                    <p><strong>Accuracy:</strong> 2-3 cm RTK Fix</p>
+                    <p><strong>Best for:</strong></p>
+                    <ul>
+                        <li>4G/LTE connections</li>
+                        <li>RTK2GO network</li>
+                        <li>Fast update rates</li>
+                    </ul>
+                    <p class="mb-0"><strong>Messages:</strong></p>
+                    <code class="small">1074 (GPS), 1084 (GLONASS), 1094 (Galileo), 1124 (BeiDou)</code>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-4 mb-3">
+            <div class="card border-primary">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0">MSM5 - Full Precision ⭐</h5>
+                </div>
+                <div class="card-body">
+                    <p><strong>Bandwidth:</strong> 500-800 bytes/s</p>
+                    <p><strong>Accuracy:</strong> 1-2 cm RTK Fix</p>
+                    <p><strong>Best for:</strong></p>
+                    <ul>
+                        <li>Centipede network</li>
+                        <li>General purpose base</li>
+                        <li>Balanced performance</li>
+                    </ul>
+                    <p class="mb-0"><strong>Messages:</strong></p>
+                    <code class="small">1075 (GPS), 1085 (GLONASS), 1095 (Galileo), 1125 (BeiDou)</code>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-4 mb-3">
+            <div class="card border-danger">
+                <div class="card-header bg-danger text-white">
+                    <h5 class="mb-0">MSM7 - High Resolution</h5>
+                </div>
+                <div class="card-body">
+                    <p><strong>Bandwidth:</strong> 800-1200 bytes/s</p>
+                    <p><strong>Accuracy:</strong> 0.5-1 cm RTK Fix</p>
+                    <p><strong>Best for:</strong></p>
+                    <ul>
+                        <li>Professional surveying</li>
+                        <li>Local network (LAN)</li>
+                        <li>Maximum accuracy</li>
+                    </ul>
+                    <p class="mb-0"><strong>Messages:</strong></p>
+                    <code class="small">1077 (GPS), 1087 (GLONASS), 1097 (Galileo), 1127 (BeiDou)</code>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card mt-4">
+        <div class="card-header bg-warning">
+            <h5 class="mb-0"><i class="fas fa-plus-circle"></i> CMR Enhanced Variants</h5>
+        </div>
+        <div class="card-body">
+            <p>CMR (Compact Measurement Record) variants add ephemeris data for compatibility with legacy GNSS receivers.</p>
+            
+            <table class="table table-bordered">
+                <thead>
+                    <tr>
+                        <th>Preset</th>
+                        <th>Additional Messages</th>
+                        <th>Purpose</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>MSM4 + CMR</td>
+                        <td><code>1019, 1020, 1042, 1045, 1046</code></td>
+                        <td>Compact + Legacy support</td>
+                    </tr>
+                    <tr>
+                        <td>MSM5 + CMR</td>
+                        <td><code>1019, 1020, 1042, 1045, 1046</code></td>
+                        <td>Full precision + Legacy</td>
+                    </tr>
+                    <tr>
+                        <td>MSM7 + CMR</td>
+                        <td><code>1019, 1020, 1042, 1045, 1046</code></td>
+                        <td>Maximum compatibility</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <div class="alert alert-secondary">
+                <strong>CMR Messages:</strong>
+                <ul class="mb-0">
+                    <li><strong>1019:</strong> GPS Ephemeris</li>
+                    <li><strong>1020:</strong> GLONASS Ephemeris</li>
+                    <li><strong>1042:</strong> BeiDou Ephemeris (D1 NAV)</li>
+                    <li><strong>1045:</strong> Galileo F/NAV Ephemeris</li>
+                    <li><strong>1046:</strong> Galileo I/NAV Ephemeris</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card mt-4">
+        <div class="card-header bg-info text-white">
+            <h5 class="mb-0"><i class="fas fa-list"></i> Base Station Messages (Common to All)</h5>
+        </div>
+        <div class="card-body">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Message</th>
+                        <th>Description</th>
+                        <th>Interval</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>1005</code></td>
+                        <td>Station coordinates (ECEF)</td>
+                        <td>10 seconds</td>
+                    </tr>
+                    <tr>
+                        <td><code>1006</code></td>
+                        <td>Station coordinates + antenna height</td>
+                        <td>On demand</td>
+                    </tr>
+                    <tr>
+                        <td><code>1033</code></td>
+                        <td>Receiver and antenna descriptors</td>
+                        <td>10 seconds</td>
+                    </tr>
+                    <tr>
+                        <td><code>1230</code></td>
+                        <td>GLONASS L1 and L2 code-phase biases</td>
+                        <td>1 second</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <div class="card mt-4">
+        <div class="card-header bg-dark text-white">
+            <h5 class="mb-0"><i class="fas fa-question-circle"></i> Which Preset Should I Use?</h5>
+        </div>
+        <div class="card-body">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Use Case</th>
+                        <th>Recommended Preset</th>
+                        <th>Reason</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Centipede Network</strong></td>
+                        <td><span class="badge badge-primary">MSM5</span> or <span class="badge badge-primary">MSM5 + CMR</span></td>
+                        <td>Balanced accuracy and bandwidth</td>
+                    </tr>
+                    <tr>
+                        <td><strong>RTK2GO</strong></td>
+                        <td><span class="badge badge-success">MSM4</span></td>
+                        <td>Lower bandwidth for public casters</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Local Network (LAN)</strong></td>
+                        <td><span class="badge badge-danger">MSM7</span></td>
+                        <td>Maximum accuracy, bandwidth not limited</td>
+                    </tr>
+                    <tr>
+                        <td><strong>4G/LTE Connection</strong></td>
+                        <td><span class="badge badge-success">MSM4</span></td>
+                        <td>Minimize mobile data usage</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Legacy Receivers</strong></td>
+                        <td><span class="badge badge-warning">MSM5 + CMR</span></td>
+                        <td>Ephemeris for older GNSS receivers</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Professional Surveying</strong></td>
+                        <td><span class="badge badge-danger">MSM7 + CMR</span></td>
+                        <td>Maximum accuracy and compatibility</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <div class="card mt-4 mb-4">
+        <div class="card-header bg-secondary text-white">
+            <h5 class="mb-0"><i class="fas fa-tools"></i> Custom Configuration</h5>
+        </div>
+        <div class="card-body">
+            <p>If you need a custom RTCM message combination:</p>
+            <ol>
+                <li>Go to <a href="/settings.html">Settings → Ntrip A/B service</a></li>
+                <li>Select <strong>"Custom (Manual Entry)"</strong> from the dropdown</li>
+                <li>Enter your custom message list in the format: <code>msg1,msg2(interval),msg3,...</code></li>
+            </ol>
+            
+            <p><strong>Example:</strong></p>
+            <pre class="bg-light p-2"><code>1005(30),1077,1087,1097,1127</code></pre>
+            <p class="text-muted small">This sends station coordinates every 30 seconds and MSM7 messages for all constellations every second.</p>
+        </div>
+    </div>
+    
+    <div class="text-center mb-4">
+        <a href="/settings.html" class="btn btn-primary btn-lg">
+            <i class="fas fa-cog"></i> Configure RTCM Messages
+        </a>
+        <a href="/status.html" class="btn btn-secondary btn-lg">
+            <i class="fas fa-tachometer-alt"></i> Check Bandwidth Usage
+        </a>
+    </div>
+</div>
+{% endblock %}

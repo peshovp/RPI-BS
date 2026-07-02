@@ -1,0 +1,17 @@
+[Unit]
+Description=GeoMaxima Watchdog Check
+Documentation=https://github.com/peshovp/GeoMaxima-BS
+
+[Service]
+Type=oneshot
+User=peshovp
+WorkingDirectory=/home/peshovp/rtkbase/geomaxima
+ExecStart=/usr/bin/python3 /home/peshovp/rtkbase/geomaxima/tools/run_watchdog_check.py
+StandardOutput=journal
+StandardError=journal
+
+# Restart policy
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

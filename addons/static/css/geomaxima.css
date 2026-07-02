@@ -1,0 +1,37 @@
+/* GeoMaxima Styles - RTKBase Compatible */
+
+/* Match RTKBase's light theme */
+.geomaxima-container {
+    background-color: #f8f9fa;
+}
+
+/* Feature cards */
+.geomaxima-feature-card {
+    transition: all 0.2s ease;
+    min-height: 120px;
+}
+
+.geomaxima-feature-card:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* List items */
+.list-group-item-action {
+    transition: background-color 0.15s ease;
+}
+
+.list-group-item-action:hover {
+    background-color: #e9ecef !important;
+}
+
+/* Tables */
+.table-sm td {
+    padding: 0.5rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .geomaxima-feature-card {
+        margin-bottom: 1rem;
+    }
+}

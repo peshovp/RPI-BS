@@ -1,0 +1,742 @@
+{% extends "base.html" %}
+
+{% block title %}GNSS Configuration - {{ hostname }}{% endblock %}
+
+{% block styles %}
+{{super()}}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+    .receiver-card {
+        border: 2px solid #dee2e6;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 15px;
+        transition: all 0.3s;
+    }
+    
+    .receiver-card:hover {
+        border-color: #007bff;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    
+    .receiver-card.selected {
+        border-color: #28a745;
+        background-color: #f8fff9;
+    }
+    
+    .receiver-type {
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: #007bff;
+    }
+    
+    .rtcm-checkbox {
+        margin-right: 15px;
+        display: inline-block;
+    }
+    
+    .config-section {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    
+    .profile-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px;
+        border-bottom: 1px solid #dee2e6;
+    }
+    
+    .profile-item:last-child {
+        border-bottom: none;
+    }
+    
+    .status-message {
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+    
+    .status-success {
+        background-color: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+    }
+    
+    .status-error {
+        background-color: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+    }
+    
+    .spinner {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(0,0,0,.1);
+        border-radius: 50%;
+        border-top-color: #007bff;
+        animation: spin 1s ease-in-out infinite;
+    }
+    
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <!-- Left Panel: Receiver Scan & Selection -->
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5><i class="fas fa-broadcast-tower"></i> Receiver Detection</h5>
+                </div>
+                <div class="card-body">
+                    <button id="scanBtn" class="btn btn-success btn-block mb-3">
+                        <i class="fas fa-search"></i> Scan for Receivers
+                    </button>
+                    
+                    <button id="restartServicesBtn" class="btn btn-warning btn-block mb-3" style="display: none;">
+                        <i class="fas fa-redo"></i> Restart RTKBase Services
+                    </button>
+                    
+                    <div id="scanStatus"></div>
+                    <div id="receiverList"></div>
+                </div>
+            </div>
+            
+            <!-- Profile Management -->
+            <div class="card mt-3">
+                <div class="card-header bg-info text-white">
+                    <h5><i class="fas fa-bookmark"></i> Profiles</h5>
+                </div>
+                <div class="card-body">
+                    <div class="btn-group btn-block mb-3">
+                        <button id="loadProfileBtn" class="btn btn-outline-primary">
+                            <i class="fas fa-folder-open"></i> Load
+                        </button>
+                        <button id="saveProfileBtn" class="btn btn-outline-success">
+                            <i class="fas fa-save"></i> Save
+                        </button>
+                        <button id="importProfileBtn" class="btn btn-outline-secondary">
+                            <i class="fas fa-upload"></i> Import
+                        </button>
+                    </div>
+                    
+                    <div id="profileList"></div>
+                    <input type="file" id="importFileInput" accept=".json" style="display: none;">
+                </div>
+            </div>
+        </div>
+        
+        <!-- Right Panel: Configuration -->
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <h5><i class="fas fa-cog"></i> Receiver Configuration</h5>
+                </div>
+                <div class="card-body">
+                    <div id="configStatus"></div>
+                    
+                    <!-- Receiver Info -->
+                    <div id="receiverInfo" style="display: none;">
+                        <div class="config-section">
+                            <h6>Receiver Information</h6>
+                            <table class="table table-sm">
+                                <tr>
+                                    <td><strong>Type:</strong></td>
+                                    <td id="infoType">-</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Port:</strong></td>
+                                    <td id="infoPort">-</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Firmware:</strong></td>
+                                    <td id="infoFirmware">-</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Baudrate:</strong></td>
+                                    <td id="infoBaudrate">-</td>
+                                </tr>
+                            </table>
+                        </div>
+                        
+                        <!-- RTCM Messages -->
+                        <div class="config-section">
+                            <h6>RTCM Messages</h6>
+                            <div class="form-group">
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1005" checked> 1005 (Station)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1074"> 1074 (GPS MSM4)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1077" checked> 1077 (GPS MSM7)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1084"> 1084 (GLO MSM4)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1087" checked> 1087 (GLO MSM7)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1094"> 1094 (GAL MSM4)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1097" checked> 1097 (GAL MSM7)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1124"> 1124 (BDS MSM4)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1127" checked> 1127 (BDS MSM7)
+                                </label>
+                                <label class="rtcm-checkbox">
+                                    <input type="checkbox" name="rtcm" value="1230"> 1230 (GLONASS Bias)
+                                </label>
+                            </div>
+                            
+                            <div class="form-group mt-3">
+                                <label>Update Rate:</label>
+                                <select id="rtcmRate" class="form-control">
+                                    <option value="1">1 Hz (1 second)</option>
+                                    <option value="0.5">2 Hz (0.5 seconds)</option>
+                                    <option value="0.2">5 Hz (0.2 seconds)</option>
+                                    <option value="0.1">10 Hz (0.1 seconds)</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Base Mode -->
+                        <div class="config-section">
+                            <h6>Base Station Mode</h6>
+                            <div class="form-group">
+                                <label>Mode:</label>
+                                <select id="baseMode" class="form-control">
+                                    <option value="auto-survey">Auto-Survey</option>
+                                    <option value="fixed">Fixed Position</option>
+                                </select>
+                            </div>
+                            
+                            <!-- Auto-Survey Settings -->
+                            <div id="autoSurveySettings">
+                                <div class="form-row">
+                                    <div class="col-md-6">
+                                        <label>Duration (minutes):</label>
+                                        <input type="number" id="surveyDuration" class="form-control" value="60" min="5">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label>Accuracy (meters):</label>
+                                        <input type="number" id="surveyAccuracy" class="form-control" value="2.0" step="0.1" min="0.5">
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Fixed Position Settings -->
+                            <div id="fixedSettings" style="display: none;">
+                                <div class="form-row">
+                                    <div class="col-md-4">
+                                        <label>Latitude:</label>
+                                        <input type="number" id="fixedLat" class="form-control" step="0.000001" placeholder="42.123456">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label>Longitude:</label>
+                                        <input type="number" id="fixedLon" class="form-control" step="0.000001" placeholder="27.123456">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label>Height (m):</label>
+                                        <input type="number" id="fixedHeight" class="form-control" step="0.01" placeholder="100.00">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Additional Settings -->
+                        <div class="config-section">
+                            <h6>Additional Settings</h6>
+                            <div class="form-group">
+                                <label>Elevation Mask (degrees):</label>
+                                <input type="number" id="elevationMask" class="form-control" value="10" min="0" max="30">
+                            </div>
+                            
+                            <div class="form-check">
+                                <input type="checkbox" id="saveToFlash" class="form-check-input" checked>
+                                <label class="form-check-label" for="saveToFlash">
+                                    Save configuration to flash memory
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <!-- Apply Button -->
+                        <button id="applyConfigBtn" class="btn btn-success btn-lg btn-block">
+                            <i class="fas fa-check-circle"></i> Apply Configuration
+                        </button>
+                    </div>
+                    
+                    <div id="noReceiverMsg" class="alert alert-info">
+                        <i class="fas fa-info-circle"></i> Please scan and select a receiver to configure
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Profile Save Modal -->
+<div class="modal fade" id="saveProfileModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Save Configuration Profile</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Profile Name:</label>
+                    <input type="text" id="profileName" class="form-control" placeholder="e.g., Base Station Default">
+                </div>
+                <div class="form-group">
+                    <label>Description (optional):</label>
+                    <textarea id="profileDescription" class="form-control" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success" id="confirmSaveProfile">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Profile Load Modal -->
+<div class="modal fade" id="loadProfileModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Load Configuration Profile</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div id="profileListModal"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{super()}}
+<script>
+let selectedReceiver = null;
+let profiles = [];
+
+// Scan for receivers
+$('#scanBtn').click(function() {
+    const btn = $(this);
+    btn.prop('disabled', true).html('<span class="spinner"></span> Scanning...');
+    
+    $('#scanStatus').html('<div class="status-message">Stopping RTKBase services and scanning...</div>');
+    $('#receiverList').empty();
+    
+    $.ajax({
+        url: '/geomaxima/gnss-config/api/scan',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ stop_services: true }),
+        success: function(data) {
+            btn.prop('disabled', false).html('<i class="fas fa-search"></i> Scan for Receivers');
+            
+            // Show restart button if services were stopped
+            if (data.stopped_services && data.stopped_services.length > 0) {
+                $('#restartServicesBtn').show();
+            }
+            
+            if (data.success && data.receivers.length > 0) {
+                $('#scanStatus').html(`<div class="status-message status-success">${data.message}</div>`);
+                
+                data.receivers.forEach(function(receiver) {
+                    const card = $(`
+                        <div class="receiver-card" data-port="${receiver.port}" data-type="${receiver.type}" data-baudrate="${receiver.baudrate}">
+                            <div class="receiver-type">${receiver.type}</div>
+                            <div><strong>Port:</strong> ${receiver.port}</div>
+                            <div><strong>Firmware:</strong> ${receiver.firmware}</div>
+                            <div><strong>Baudrate:</strong> ${receiver.baudrate}</div>
+                        </div>
+                    `);
+                    
+                    card.click(function() {
+                        $('.receiver-card').removeClass('selected');
+                        $(this).addClass('selected');
+                        selectReceiver(receiver);
+                    });
+                    
+                    $('#receiverList').append(card);
+                });
+            } else {
+                $('#scanStatus').html('<div class="status-message status-error">No receivers found</div>');
+            }
+        },
+        error: function() {
+            btn.prop('disabled', false).html('<i class="fas fa-search"></i> Scan for Receivers');
+            $('#scanStatus').html('<div class="status-message status-error">Scan failed</div>');
+        }
+    });
+});
+
+// Restart RTKBase services
+$('#restartServicesBtn').click(function() {
+    const btn = $(this);
+    btn.prop('disabled', true).html('<span class="spinner"></span> Restarting...');
+    
+    $.ajax({
+        url: '/geomaxima/gnss-config/api/restart-services',
+        method: 'POST',
+        contentType: 'application/json',
+        success: function(data) {
+            btn.prop('disabled', false).html('<i class="fas fa-redo"></i> Restart RTKBase Services');
+            if (data.success) {
+                $('#scanStatus').html(`<div class="status-message status-success">${data.message}</div>`);
+                btn.hide();
+            } else {
+                $('#scanStatus').html(`<div class="status-message status-error">Restart failed: ${data.message}</div>`);
+            }
+        },
+        error: function() {
+            btn.prop('disabled', false).html('<i class="fas fa-redo"></i> Restart RTKBase Services');
+            $('#scanStatus').html('<div class="status-message status-error">Failed to restart services</div>');
+        }
+    });
+});
+
+// Select receiver
+function selectReceiver(receiver) {
+    selectedReceiver = receiver;
+    
+    $('#receiverInfo').show();
+    $('#noReceiverMsg').hide();
+    
+    $('#infoType').text(receiver.type);
+    $('#infoPort').text(receiver.port);
+    $('#infoFirmware').text(receiver.firmware);
+    $('#infoBaudrate').text(receiver.baudrate);
+    
+    loadProfiles(receiver.type);
+}
+
+// Base mode toggle
+$('#baseMode').change(function() {
+    if ($(this).val() === 'fixed') {
+        $('#autoSurveySettings').hide();
+        $('#fixedSettings').show();
+    } else {
+        $('#autoSurveySettings').show();
+        $('#fixedSettings').hide();
+    }
+});
+
+// Apply configuration
+$('#applyConfigBtn').click(function() {
+    if (!selectedReceiver) {
+        alert('Please select a receiver first');
+        return;
+    }
+    
+    if (!confirm('Apply this configuration to the receiver?')) {
+        return;
+    }
+    
+    const btn = $(this);
+    btn.prop('disabled', true).html('<span class="spinner"></span> Applying...');
+    
+    // Build configuration
+    const config = {
+        rtcm_messages: [],
+        rtcm_rate: parseFloat($('#rtcmRate').val()),
+        base_mode: $('#baseMode').val(),
+        base_params: {},
+        elevation_mask: parseInt($('#elevationMask').val()),
+        save_to_flash: $('#saveToFlash').is(':checked')
+    };
+    
+    // RTCM messages
+    $('input[name="rtcm"]:checked').each(function() {
+        config.rtcm_messages.push(parseInt($(this).val()));
+    });
+    
+    // Base mode parameters
+    if (config.base_mode === 'auto-survey') {
+        config.base_params.duration = parseInt($('#surveyDuration').val()) * 60; // Convert to seconds
+        config.base_params.accuracy = parseFloat($('#surveyAccuracy').val());
+    } else {
+        config.base_params.lat = parseFloat($('#fixedLat').val());
+        config.base_params.lon = parseFloat($('#fixedLon').val());
+        config.base_params.height = parseFloat($('#fixedHeight').val());
+    }
+    
+    // Send configuration
+    $.ajax({
+        url: '/geomaxima/gnss-config/api/configure',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            port: selectedReceiver.port,
+            type: selectedReceiver.type,
+            baudrate: selectedReceiver.baudrate,
+            config: config
+        }),
+        success: function(data) {
+            btn.prop('disabled', false).html('<i class="fas fa-check-circle"></i> Apply Configuration');
+            
+            if (data.success) {
+                let msg = '<div class="status-message status-success"><strong>Configuration Applied!</strong><ul>';
+                data.results.forEach(function(result) {
+                    msg += `<li>${result}</li>`;
+                });
+                msg += '</ul></div>';
+                $('#configStatus').html(msg);
+            } else {
+                $('#configStatus').html(`<div class="status-message status-error">Error: ${data.message}</div>`);
+            }
+        },
+        error: function() {
+            btn.prop('disabled', false).html('<i class="fas fa-check-circle"></i> Apply Configuration');
+            $('#configStatus').html('<div class="status-message status-error">Configuration failed</div>');
+        }
+    });
+});
+
+// Load profiles
+function loadProfiles(receiverType) {
+    $.ajax({
+        url: '/geomaxima/gnss-config/api/profiles' + (receiverType ? `?type=${receiverType}` : ''),
+        method: 'GET',
+        success: function(data) {
+            if (data.success) {
+                profiles = data.profiles;
+                updateProfileList();
+            }
+        }
+    });
+}
+
+function updateProfileList() {
+    const list = $('#profileList');
+    list.empty();
+    
+    if (profiles.length === 0) {
+        list.html('<p class="text-muted">No saved profiles</p>');
+        return;
+    }
+    
+    profiles.forEach(function(profile) {
+        const item = $(`
+            <div class="profile-item">
+                <div>
+                    <strong>${profile.name}</strong><br>
+                    <small class="text-muted">${profile.receiver_type} - ${profile.timestamp}</small>
+                </div>
+                <div>
+                    <button class="btn btn-sm btn-primary load-profile" data-name="${profile.name}">
+                        <i class="fas fa-folder-open"></i>
+                    </button>
+                    <button class="btn btn-sm btn-info export-profile" data-name="${profile.name}">
+                        <i class="fas fa-download"></i>
+                    </button>
+                    <button class="btn btn-sm btn-danger delete-profile" data-name="${profile.name}">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        `);
+        
+        list.append(item);
+    });
+    
+    // Load profile button
+    $('.load-profile').click(function() {
+        const name = $(this).data('name');
+        loadProfileConfig(name);
+    });
+    
+    // Export profile button
+    $('.export-profile').click(function() {
+        const name = $(this).data('name');
+        window.location.href = `/geomaxima/gnss-config/api/export/${name}`;
+    });
+    
+    // Delete profile button
+    $('.delete-profile').click(function() {
+        const name = $(this).data('name');
+        if (confirm(`Delete profile "${name}"?`)) {
+            deleteProfile(name);
+        }
+    });
+}
+
+function loadProfileConfig(name) {
+    $.ajax({
+        url: `/geomaxima/gnss-config/api/profiles/${name}/load`,
+        method: 'GET',
+        success: function(data) {
+            if (data.success) {
+                applyProfileToUI(data.profile.config);
+                $('#configStatus').html(`<div class="status-message status-success">Profile "${name}" loaded</div>`);
+            }
+        }
+    });
+}
+
+function applyProfileToUI(config) {
+    // RTCM messages
+    $('input[name="rtcm"]').prop('checked', false);
+    if (config.rtcm_messages) {
+        config.rtcm_messages.forEach(function(msg) {
+            $(`input[name="rtcm"][value="${msg}"]`).prop('checked', true);
+        });
+    }
+    
+    // RTCM rate
+    if (config.rtcm_rate) {
+        $('#rtcmRate').val(config.rtcm_rate);
+    }
+    
+    // Base mode
+    if (config.base_mode) {
+        $('#baseMode').val(config.base_mode).trigger('change');
+        
+        if (config.base_mode === 'auto-survey' && config.base_params) {
+            $('#surveyDuration').val(config.base_params.duration / 60); // Convert to minutes
+            $('#surveyAccuracy').val(config.base_params.accuracy);
+        } else if (config.base_mode === 'fixed' && config.base_params) {
+            $('#fixedLat').val(config.base_params.lat);
+            $('#fixedLon').val(config.base_params.lon);
+            $('#fixedHeight').val(config.base_params.height);
+        }
+    }
+    
+    // Elevation mask
+    if (config.elevation_mask) {
+        $('#elevationMask').val(config.elevation_mask);
+    }
+}
+
+function deleteProfile(name) {
+    $.ajax({
+        url: `/geomaxima/gnss-config/api/profiles/${name}`,
+        method: 'DELETE',
+        success: function(data) {
+            if (data.success) {
+                loadProfiles(selectedReceiver ? selectedReceiver.type : null);
+            }
+        }
+    });
+}
+
+// Save profile
+$('#saveProfileBtn').click(function() {
+    if (!selectedReceiver) {
+        alert('Please select a receiver first');
+        return;
+    }
+    $('#saveProfileModal').modal('show');
+});
+
+$('#confirmSaveProfile').click(function() {
+    const name = $('#profileName').val().trim();
+    if (!name) {
+        alert('Please enter a profile name');
+        return;
+    }
+    
+    // Build current configuration
+    const config = {
+        rtcm_messages: [],
+        rtcm_rate: parseFloat($('#rtcmRate').val()),
+        base_mode: $('#baseMode').val(),
+        base_params: {},
+        elevation_mask: parseInt($('#elevationMask').val())
+    };
+    
+    $('input[name="rtcm"]:checked').each(function() {
+        config.rtcm_messages.push(parseInt($(this).val()));
+    });
+    
+    if (config.base_mode === 'auto-survey') {
+        config.base_params.duration = parseInt($('#surveyDuration').val()) * 60;
+        config.base_params.accuracy = parseFloat($('#surveyAccuracy').val());
+    } else {
+        config.base_params.lat = parseFloat($('#fixedLat').val());
+        config.base_params.lon = parseFloat($('#fixedLon').val());
+        config.base_params.height = parseFloat($('#fixedHeight').val());
+    }
+    
+    $.ajax({
+        url: '/geomaxima/gnss-config/api/profiles',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            name: name,
+            type: selectedReceiver.type,
+            config: config
+        }),
+        success: function(data) {
+            if (data.success) {
+                $('#saveProfileModal').modal('hide');
+                $('#profileName').val('');
+                loadProfiles(selectedReceiver.type);
+                $('#configStatus').html(`<div class="status-message status-success">${data.message}</div>`);
+            }
+        }
+    });
+});
+
+// Import profile
+$('#importProfileBtn').click(function() {
+    $('#importFileInput').click();
+});
+
+$('#importFileInput').change(function() {
+    const file = this.files[0];
+    if (!file) return;
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    $.ajax({
+        url: '/geomaxima/gnss-config/api/import',
+        method: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        success: function(data) {
+            if (data.success) {
+                loadProfiles(selectedReceiver ? selectedReceiver.type : null);
+                $('#configStatus').html(`<div class="status-message status-success">${data.message}</div>`);
+            }
+        }
+    });
+    
+    $(this).val('');
+});
+
+// Initialize
+$(document).ready(function() {
+    loadProfiles();
+});
+</script>
+{% endblock %}

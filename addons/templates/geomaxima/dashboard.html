@@ -1,0 +1,460 @@
+{% extends 'base.html' %}
+
+{% block title %}GeoMaxima Dashboard{% endblock %}
+
+{% block styles %}
+{{super()}}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+    body { 
+        background: #f8f9fa;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    }
+    
+    .container {
+        max-width: 1200px;
+        padding-top: 2rem;
+    }
+    
+    .hero-section {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 4rem 2rem;
+        margin: -2rem -15px 3rem;
+        border-radius: 0 0 30px 30px;
+        box-shadow: 0 10px 40px rgba(102, 126, 234, 0.3);
+        text-align: center;
+    }
+    
+    .hero-section h1 {
+        font-size: 3rem;
+        font-weight: 800;
+        margin-bottom: 0.75rem;
+        text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    }
+    
+    .hero-section p {
+        opacity: 0.95;
+        font-size: 1.2rem;
+        font-weight: 300;
+        margin: 0;
+    }
+    
+    .stat-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 2rem;
+        margin-bottom: 3rem;
+    }
+    
+    .stat-card {
+        background: white;
+        padding: 2rem;
+        border-radius: 20px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        border: 1px solid rgba(0,0,0,0.05);
+    }
+    
+    .stat-card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 12px 35px rgba(0,0,0,0.12);
+    }
+    
+    .stat-card .icon {
+        width: 60px;
+        height: 60px;
+        border-radius: 15px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.75rem;
+        margin-bottom: 1.25rem;
+    }
+    
+    .stat-card.primary .icon { 
+        background: linear-gradient(135deg, #667eea, #764ba2); 
+        color: white;
+        box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+    }
+    .stat-card.success .icon { 
+        background: linear-gradient(135deg, #56ab2f, #a8e063); 
+        color: white;
+        box-shadow: 0 8px 20px rgba(86, 171, 47, 0.3);
+    }
+    .stat-card.info .icon { 
+        background: linear-gradient(135deg, #3494e6, #ec6ead); 
+        color: white;
+        box-shadow: 0 8px 20px rgba(52, 148, 230, 0.3);
+    }
+    
+    .stat-card h3 {
+        font-size: 2.5rem;
+        font-weight: 800;
+        margin: 0 0 0.5rem 0;
+        color: #1a202c;
+    }
+    
+    .stat-card p {
+        margin: 0;
+        color: #718096;
+        font-size: 1rem;
+        font-weight: 500;
+    }
+    
+    .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+        gap: 2rem;
+        margin-top: 2rem;
+        padding-bottom: 3rem;
+    }
+    
+    .feature-card {
+        background: white;
+        border-radius: 20px;
+        padding: 2.5rem;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+        border: 1px solid rgba(0,0,0,0.05);
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .feature-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 5px;
+        background: linear-gradient(90deg, #667eea, #764ba2);
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+    
+    .feature-card:hover::before {
+        opacity: 1;
+    }
+    
+    .feature-card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 12px 35px rgba(0,0,0,0.12);
+    }
+    
+    .feature-card .icon {
+        width: 70px;
+        height: 70px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 2rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+    }
+    
+    .feature-card h3 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 0.75rem;
+        color: #1a202c;
+    }
+    
+    .feature-card p {
+        color: #718096;
+        font-size: 1rem;
+        margin-bottom: 1.5rem;
+        line-height: 1.7;
+        flex-grow: 1;
+    }
+    
+    .feature-card .btn {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border: none;
+        color: white;
+        padding: 0.75rem 2rem;
+        border-radius: 12px;
+        font-weight: 600;
+        font-size: 1rem;
+        transition: all 0.3s;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        text-decoration: none;
+        display: inline-block;
+        text-align: center;
+    }
+    
+    .feature-card .btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 25px rgba(102, 126, 234, 0.4);
+        color: white;
+        text-decoration: none;
+    }
+    
+    .section-title {
+        font-size: 2rem;
+        font-weight: 800;
+        color: #1a202c;
+        margin-bottom: 2rem;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    
+    .section-title i {
+        color: #667eea;
+        font-size: 1.75rem;
+    }
+    
+    .badge-status {
+        display: inline-block;
+        padding: 0.35rem 1rem;
+        border-radius: 25px;
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+    
+    .badge-status.active {
+        background: linear-gradient(135deg, #56ab2f, #a8e063);
+        color: white;
+    }
+    
+    @media (max-width: 768px) {
+        .hero-section h1 { font-size: 2rem; }
+        .stat-cards { grid-template-columns: 1fr; }
+        .feature-grid { grid-template-columns: 1fr; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    <!-- Hero Section -->
+    <div class="hero-section">
+        <h1><i class="fas fa-satellite-dish"></i> GeoMaxima</h1>
+        <p>Професионално разширение за RTKBase v{{ version }}</p>
+    </div>
+    
+    <!-- Stats Cards -->
+    <div class="stat-cards">
+        <div class="stat-card primary">
+            <div class="icon"><i class="fas fa-code-branch"></i></div>
+            <h3>{{ version }}</h3>
+            <p>Текуща версия</p>
+        </div>
+        
+        <div class="stat-card success">
+            <div class="icon"><i class="fas fa-check-circle"></i></div>
+            <h3>{{ features.values()|select|list|length }}</h3>
+            <p>Активни функции</p>
+        </div>
+        
+        <div class="stat-card info">
+            <div class="icon"><i class="fas fa-server"></i></div>
+            <h3>Running</h3>
+            <p>Статус на системата</p>
+        </div>
+    </div>
+    
+    <!-- GeoMaxima Update Section -->
+    <div class="alert alert-info" style="margin-top: 2rem; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+            <i class="fas fa-code-branch"></i>
+            <strong>GeoMaxima Updates</strong>
+            <span id="updateStatus" style="margin-left: 1rem;">Checking...</span>
+        </div>
+        <button id="updateBtn" class="btn btn-primary" style="display: none;">
+            <i class="fas fa-download"></i> Update GeoMaxima
+        </button>
+    </div>
+    
+    <!-- Features Section -->
+    <h2 class="section-title">
+        <i class="fas fa-th-large"></i>
+        Налични функции
+    </h2>
+    
+    <div class="feature-grid">
+        {% for feature_name, enabled in features.items() %}
+        {% if enabled %}
+        
+        {% if feature_name == 'wireguard_client' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-shield-alt"></i></div>
+            <h3>WireGuard VPN</h3>
+            <p>Сигурен отдалечен достъп до базовата станция чрез VPN тунел</p>
+            <a href="/geomaxima/wireguard" class="btn">
+                <i class="fas fa-cog"></i> Конфигурация
+            </a>
+        </div>
+        
+        {% elif feature_name == 'auto_survey_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-map-marked-alt"></i></div>
+            <h3>Автоматично измерване</h3>
+            <p>24-часово GNSS измерване за прецизни координати на базовата станция</p>
+            <a href="/geomaxima/survey" class="btn">
+                <i class="fas fa-chart-line"></i> Отвори Survey
+            </a>
+        </div>
+        
+        {% elif feature_name == 'ota_update_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-cloud-download-alt"></i></div>
+            <h3>OTA Update</h3>
+            <p>Актуализации по въздуха с rollback опция за отдалечени деплоймънти</p>
+            <a href="/geomaxima/update" class="btn">
+                <i class="fas fa-sync-alt"></i> Актуализация
+            </a>
+        </div>
+        
+        {% elif feature_name == 'watchdog_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-shield-alt"></i></div>
+            <h3>Watchdog</h3>
+            <p>Система за мониторинг и автоматично възстановяване на услуги</p>
+            <a href="/geomaxima/watchdog" class="btn">
+                <i class="fas fa-cogs"></i> Мониторинг
+            </a>
+        </div>
+        
+        {% elif feature_name == 'gnss_config_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-satellite-dish"></i></div>
+            <h3>GNSS Configuration</h3>
+            <p>Конфигуриране на GNSS приемници (ZED-F9P, Mosaic-X5, UM980/UM982)</p>
+            <a href="/geomaxima/gnss-config" class="btn">
+                <i class="fas fa-sliders-h"></i> Конфигурация
+            </a>
+        </div>
+        
+        {% elif feature_name == 'rtcm_dropdown_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-list-ul"></i></div>
+            <h3>RTCM Presets</h3>
+            <p>Бързи RTCM preset-и за MSM4/5/7 съобщения в Ntrip настройките</p>
+            <a href="/geomaxima/rtcm-info" class="btn">
+                <i class="fas fa-info-circle"></i> Информация
+            </a>
+        </div>
+        
+        {% elif feature_name == 'external_integration_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-plug"></i></div>
+            <h3>External Integration</h3>
+            <p>Интеграция с GNSS.NET Caster API за статус репортинг</p>
+            <a href="/geomaxima/integration" class="btn">
+                <i class="fas fa-cog"></i> Настройки
+            </a>
+        </div>
+        
+        {% elif feature_name == 'system_settings_feature' %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-sliders-h"></i></div>
+            <h3>System Settings</h3>
+            <p>Raspi-config функции - hostname, timezone, WiFi, интерфейси</p>
+            <a href="/geomaxima/system-settings" class="btn">
+                <i class="fas fa-cog"></i> Настройки
+            </a>
+        </div>
+        
+        {% else %}
+        <div class="feature-card">
+            <div class="icon"><i class="fas fa-puzzle-piece"></i></div>
+            <h3>{{ feature_name|replace('_', ' ')|title }}</h3>
+            <p>Функция активна и готова за използване</p>
+            <span class="badge-status active">Активна</span>
+        </div>
+        {% endif %}
+        
+        {% endif %}
+        {% endfor %}
+    </div>
+    
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{super()}}
+<script>
+// Check for GeoMaxima updates
+$(document).ready(function() {
+    $.ajax({
+        url: '/geomaxima/geomaxima-update/api/check',
+        method: 'GET',
+        success: function(data) {
+            if (data.success) {
+                if (data.updates_available) {
+                    $('#updateStatus').html(`<span style="color: #f59e0b;">Налична версия: ${data.remote_commit}</span>`);
+                    $('#updateBtn').show();
+                } else {
+                    $('#updateStatus').html(`<span style="color: #10b981;">Актуална версия: ${data.current_commit}</span>`);
+                }
+            }
+        },
+        error: function() {
+            $('#updateStatus').html('<span style="color: #6b7280;">Няма информация</span>');
+        }
+    });
+    
+    // Update button click
+    $('#updateBtn').click(function() {
+        const btn = $(this);
+        btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Updating...');
+        $('#updateStatus').html('<span style="color: #3b82f6;">Обновяване...</span>');
+        
+        $.ajax({
+            url: '/geomaxima/geomaxima-update/api/update',
+            method: 'POST',
+            success: function(data) {
+                if (data.success) {
+                    $('#updateStatus').html('<span style="color: #10b981;">✓ Успешно обновено!</span>');
+                    btn.hide();
+                    setTimeout(() => location.reload(), 2000);
+                } else {
+                    $('#updateStatus').html(`<span style="color: #ef4444;">Грешка: ${data.message}</span>`);
+                    btn.prop('disabled', false).html('<i class="fas fa-download"></i> Update GeoMaxima');
+                }
+            },
+            error: function(xhr) {
+                const msg = xhr.responseJSON?.message || 'Unknown error';
+                $('#updateStatus').html(`<span style="color: #ef4444;">Грешка: ${msg}</span>`);
+                btn.prop('disabled', false).html('<i class="fas fa-download"></i> Update GeoMaxima');
+            }
+        });
+    });
+});
+
+// Smooth scroll animations
+document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+    anchor.addEventListener('click', function (e) {
+        e.preventDefault();
+        const target = document.querySelector(this.getAttribute('href'));
+        if(target) {
+            target.scrollIntoView({ behavior: 'smooth' });
+        }
+    });
+});
+
+// Add entrance animations
+window.addEventListener('load', () => {
+    const cards = document.querySelectorAll('.stat-card, .feature-card');
+    cards.forEach((card, index) => {
+        setTimeout(() => {
+            card.style.opacity = '0';
+            card.style.transform = 'translateY(20px)';
+            card.style.transition = 'all 0.5s ease';
+            
+            setTimeout(() => {
+                card.style.opacity = '1';
+                card.style.transform = 'translateY(0)';
+            }, 50);
+        }, index * 100);
+    });
+});
+</script>
+{% endblock %}
