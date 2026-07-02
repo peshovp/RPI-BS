@@ -2,26 +2,86 @@
 # =============================================================================
 # install.sh - Master installation script for RTKBase on Raspberry Pi OS Trixie
 # =============================================================================
+# Usage (bootstrap):      curl -fsSL https://raw.githubusercontent.com/peshovp/RPI-BS/main/install.sh | sudo bash
+# Usage (already cloned): cd RPI-BS && sudo ./install.sh
+#
 # MUST be run as root or with sudo.
 # =============================================================================
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://github.com/peshovp/RPI-BS.git"
+
+if [[ -n "${INSTALL_DIR:-}" ]]; then
+    : # explicit override, use as-is
+elif [[ -n "${SUDO_USER:-}" ]]; then
+    SUDO_USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    INSTALL_DIR="${SUDO_USER_HOME:-/root}/RPI-BS"
+else
+    INSTALL_DIR="${HOME:-/root}/RPI-BS"
+fi
+
+log() { echo "$1" >&2; }
+
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: This script must be run as root (or using sudo)." >&2
+    exit 1
+fi
+
+# Checks whether BASH_SOURCE[0] points at a real file on disk that is part of
+# an actual RPI-BS checkout. Under "curl | sudo bash", BASH_SOURCE[0] is
+# something like "bash" or "/dev/stdin" -- not a real path -- so this
+# correctly (and silently) fails in that case, it isn't an error condition.
+detect_existing_checkout() {
+    local src="${BASH_SOURCE[0]}"
+    [[ -f "$src" ]] || return 1
+    local dir
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    [[ -f "$dir/tools/security_setup.sh" && -f "$dir/web_app/server.py" ]] || return 1
+    echo "$dir"
+}
+
+# Clones (or, if already present, fast-forward pulls) the repo into
+# INSTALL_DIR. Prints the resolved directory as the ONLY line on stdout so
+# callers can safely capture it with $(...); all progress/log messages are
+# sent to stderr via log() to avoid polluting that capture.
+bootstrap_repo() {
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        log "Existing checkout found at $INSTALL_DIR, updating (git pull --ff-only)..."
+        git -C "$INSTALL_DIR" pull --ff-only || { log "ERROR: git pull --ff-only failed in $INSTALL_DIR"; exit 1; }
+    else
+        log "No existing checkout found. Cloning $REPO_URL into $INSTALL_DIR..."
+        git clone "$REPO_URL" "$INSTALL_DIR" || { log "ERROR: git clone failed"; exit 1; }
+    fi
+
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown -R "$SUDO_USER":"$SUDO_USER" "$INSTALL_DIR" || log "WARNING: chown to $SUDO_USER failed"
+    fi
+
+    if [[ ! -f "$INSTALL_DIR/web_app/server.py" || ! -f "$INSTALL_DIR/tools/security_setup.sh" ]]; then
+        log "ERROR: $INSTALL_DIR does not look like a valid RPI-BS checkout after bootstrap."
+        exit 1
+    fi
+
+    echo "$INSTALL_DIR"
+}
+
+if SCRIPT_DIR="$(detect_existing_checkout)"; then
+    log "Running from existing checkout: $SCRIPT_DIR"
+else
+    log "No local checkout detected (likely running via curl | sudo bash). Bootstrapping..."
+    SCRIPT_DIR="$(bootstrap_repo | tail -1)"
+fi
+
 cd "$SCRIPT_DIR"
 
-# --- 1. Banner + root/sudo check ---
+# --- 1. Banner ---
 echo "============================================================================"
 echo "          RTKBase Master Installation Script"
 echo "============================================================================"
 echo "This script performs a full, clean installation of RTKBase on Raspberry Pi OS Trixie."
 echo "WARNING: This process requires root privileges and will modify system files."
 echo ""
-
-if [[ $EUID -ne 0 ]]; then
-    echo "ERROR: This script must be run as root (or using sudo)."
-    exit 1
-fi
 
 # --- 2. Security setup (interactive UFW confirmation happens inside) ---
 echo "============================================================================"
