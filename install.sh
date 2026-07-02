@@ -46,6 +46,11 @@ detect_existing_checkout() {
 # callers can safely capture it with $(...); all progress/log messages are
 # sent to stderr via log() to avoid polluting that capture.
 bootstrap_repo() {
+    if ! command -v git &>/dev/null; then
+        log "git not found, installing..."
+        apt update -qq && apt install -y -qq git || { log "ERROR: failed to install git"; exit 1; }
+    fi
+
     if [[ -d "$INSTALL_DIR/.git" ]]; then
         log "Existing checkout found at $INSTALL_DIR, updating (git pull --ff-only)..."
         git -C "$INSTALL_DIR" pull --ff-only || { log "ERROR: git pull --ff-only failed in $INSTALL_DIR"; exit 1; }
