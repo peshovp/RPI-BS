@@ -45,6 +45,7 @@ from threading import Thread
 from RTKLIB import RTKLIB
 from ServiceController import ServiceController
 from RTKBaseConfigManager import RTKBaseConfigManager
+from wireguard_settings import get_wireguard_settings, write_wireguard_config
 import network_infos
 
 #print("Installing all required packages")
@@ -109,7 +110,8 @@ services_list = [{"service_unit" : "str2str_tcp.service", "name" : "main"},
                  {'service_unit' : 'rtkbase_archive.timer', "name" : "archive_timer"},
                  {'service_unit' : 'rtkbase_archive.service', "name" : "archive_service"},
                  {'service_unit' : 'rtkbase_raw2nmea.service', "name" : "raw2nmea"},
-                 {'service_unit' : 'rtkbase_gnss_web_proxy.service', "name": "RTKBase Reverse Proxy for Gnss receiver Web Server"}
+                 {'service_unit' : 'rtkbase_gnss_web_proxy.service', "name": "RTKBase Reverse Proxy for Gnss receiver Web Server"},
+                 {'service_unit' : 'wg-quick@wg0.service', "name" : "wireguard"}
                  ]
 
 #Delay before rtkrcv will stop if no user is on status.html page
@@ -465,6 +467,7 @@ def settings_page():
     rtcm_udp_client_settings = rtkbaseconfig.get_rtcm_udp_client_settings()
     rtcm_serial_settings = rtkbaseconfig.get_rtcm_serial_settings()
     file_settings = rtkbaseconfig.get_file_settings()
+    wireguard_settings = get_wireguard_settings()
 
     return render_template("settings.html", main_settings = main_settings,
                                             ntrip_A_settings = ntrip_A_settings,
@@ -476,6 +479,7 @@ def settings_page():
                                             rtcm_udp_client_settings = rtcm_udp_client_settings,
                                             rtcm_serial_settings = rtcm_serial_settings,
                                             file_settings = file_settings,
+                                            wireguard_settings = wireguard_settings,
                                             os_infos = distro.info(),)
 
 @app.route('/logs')
@@ -975,6 +979,14 @@ def update_settings(json_msg):
 
         else:
             print("ERROR, WRONG PASSWORD!")
+    elif source_section == "wireguard":
+        # wg0.conf lives outside settings.conf, so it needs its own writer
+        # instead of rtkbaseconfig.update_setting()/write_file().
+        wireguard_fields = {form_input.get("name") : form_input.get("value") for form_input in json_msg}
+        if write_wireguard_config(wireguard_fields):
+            restartServices(("wireguard",))
+        else:
+            print("ERROR, FAILED TO WRITE WIREGUARD CONFIG!")
     else:
         for form_input in json_msg:
             #print("name: ", form_input.get("name"))

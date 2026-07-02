@@ -484,6 +484,86 @@
           <button type="submit" class="btn btn-primary float-right" disabled>Save</button>
         </div>
     </form>
+
+<!-- ######## WireGuard Service ########-->
+  <div id="wireguard_service_space" class="form-group row">
+      <div class="col">
+    <label for="wireguard-switch" class="col-4 col-form-label col-form-label-lg">WireGuard VPN</label>
+    <input id="wireguard-switch" type="checkbox" data-toggle="toggle" data-onstyle="success" data-offstyle="outline-secondary">
+    <button class="btn btn-secondary" type="button" data-toggle="collapse" data-target="#{{ wireguard_settings[0].source_section }}" aria-expanded="false" aria-controls="wireguard_service_options">Options</button>
+    <a data-toggle="tooltip" id="wireguard_service_tooltip" title="This service, when enabled, connects the base station to a WireGuard VPN for secure remote access.">
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#6c757d" class="bi bi-info-circle" viewBox="0 0 16 16">
+        <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+        <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+      </svg>
+    </a>
+  </div>
+  </div>
+    <form id="{{ wireguard_settings.pop(0).source_section }}" class="collapse was-validated">
+      <div class="form-group row">
+        <label for="private_key" class="col-sm-3 col-form-label">Private Key: </label>
+        <div class="col-sm-9">
+          <div class="input-group">
+            <input id="private_key" type="password" name="private_key" class="form-control" aria-describedby="private_keyHelp" placeholder="Enter Private Key" value="{{ wireguard_settings[0].private_key }}">
+              <span class="input-group-append">
+                <button class="btn btn-outline-secondary" id="private_key_button" type="button">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-eye-slash" viewBox="0 0 16 16">
+                    <path d="M13.359 11.238C15.06 9.72 16 8 16 8s-3-5.5-8-5.5a7.028 7.028 0 0 0-2.79.588l.77.771A5.944 5.944 0 0 1 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.134 13.134 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755-.165.165-.337.328-.517.486l.708.709z"/>
+                    <path d="M11.297 9.176a3.5 3.5 0 0 0-4.474-4.474l.823.823a2.5 2.5 0 0 1 2.829 2.829l.822.822zm-2.943 1.299.822.822a3.5 3.5 0 0 1-4.474-4.474l.823.823a2.5 2.5 0 0 0 2.829 2.829z"/>
+                    <path d="M3.35 5.47c-.18.16-.353.322-.518.487A13.134 13.134 0 0 0 1.172 8l.195.288c.335.48.83 1.12 1.465 1.755C4.121 11.332 5.881 12.5 8 12.5c.716 0 1.39-.133 2.02-.36l.77.772A7.029 7.029 0 0 1 8 13.5C3 13.5 0 8 0 8s.939-1.721 2.641-3.238l.708.709zm10.296 8.884-12-12 .708-.708 12 12-.708.708z"/>
+                  </svg>
+                </button>
+              </span>
+            </div>
+            <small class="form-text text-muted" id="private_keyHelp">WireGuard client private key (kept secret, never shared with peers)</small>
+        </div>
+      </div>
+      <div class="form-group row">
+        <label for="wg_address" class="col-sm-3 col-form-label">Address: </label>
+        <div class="col-sm-9">
+            <input id="wg_address" type="text" name="address" class="form-control" aria-describedby="wg_addressHelp" placeholder="10.0.0.2/24" value="{{ wireguard_settings[1].address }}" pattern="[^\|><\s]*">
+            <small class="form-text text-muted" id="wg_addressHelp">Tunnel address assigned to this client (CIDR notation)</small>
+        </div>
+      </div>
+      <div class="form-group row">
+        <label for="wg_dns" class="col-sm-3 col-form-label">DNS: </label>
+        <div class="col-sm-9">
+            <input id="wg_dns" type="text" name="dns" class="form-control" aria-describedby="wg_dnsHelp" placeholder="1.1.1.1" value="{{ wireguard_settings[2].dns }}" pattern="[^\|><\s]*">
+            <small class="form-text text-muted" id="wg_dnsHelp">Optional DNS server to use while the tunnel is up</small>
+        </div>
+      </div>
+      <div class="form-group row">
+        <label for="peer_public_key" class="col-sm-3 col-form-label">Peer Public Key: </label>
+        <div class="col-sm-9">
+            <input id="peer_public_key" type="text" name="peer_public_key" class="form-control" aria-describedby="peer_public_keyHelp" placeholder="Peer's public key" value="{{ wireguard_settings[3].peer_public_key }}" pattern="[^\|><\s]*">
+            <small class="form-text text-muted" id="peer_public_keyHelp">Public key of the remote WireGuard peer/server</small>
+        </div>
+      </div>
+      <div class="form-group row">
+        <label for="wg_endpoint" class="col-sm-3 col-form-label">Endpoint: </label>
+        <div class="col-sm-9">
+            <input id="wg_endpoint" type="text" name="endpoint" class="form-control" aria-describedby="wg_endpointHelp" placeholder="vpn.example.com:51820" value="{{ wireguard_settings[4].endpoint }}" pattern="[^\|><\s]*">
+            <small class="form-text text-muted" id="wg_endpointHelp">Remote peer address and port</small>
+        </div>
+      </div>
+      <div class="form-group row">
+        <label for="allowed_ips" class="col-sm-3 col-form-label">Allowed IPs: </label>
+        <div class="col-sm-9">
+            <input id="allowed_ips" type="text" name="allowed_ips" class="form-control" aria-describedby="allowed_ipsHelp" placeholder="0.0.0.0/0" value="{{ wireguard_settings[5].allowed_ips }}" pattern="[^\|><\s]*">
+            <small class="form-text text-muted" id="allowed_ipsHelp">Traffic ranges routed through the tunnel</small>
+        </div>
+      </div>
+      <div class="form-group row">
+        <label for="persistent_keepalive" class="col-sm-3 col-form-label">Persistent Keepalive: </label>
+        <div class="col-sm-9">
+            <input id="persistent_keepalive" type="text" name="persistent_keepalive" class="form-control" aria-describedby="persistent_keepaliveHelp" placeholder="25" value="{{ wireguard_settings[6].persistent_keepalive }}" pattern="\d*">
+            <small class="form-text text-muted" id="persistent_keepaliveHelp">Keepalive interval in seconds (useful behind NAT). Leave empty to disable</small>
+        </div>
+      </div>
+        <div class="clearfix">
+          <button type="submit" class="btn btn-primary float-right" disabled>Save</button>
+        </div>
+    </form>
 </div>
 <div id="system_settings" class="container">
     <h4> System Settings:</h4>

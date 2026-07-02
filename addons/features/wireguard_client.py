@@ -8,6 +8,7 @@ import os
 import subprocess
 import logging
 import re
+from flask_login import login_required
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +22,13 @@ def register_routes(app, gm_blueprint):
     """Register WireGuard Client routes"""
     
     @gm_blueprint.route('/wireguard')
+    @login_required
     def wireguard_ui():
         """WireGuard Client UI page"""
         return render_template('geomaxima/wireguard.html')
     
     @gm_blueprint.route('/api/wireguard/status')
+    @login_required
     def get_wireguard_status():
         """Get WireGuard connection status"""
         try:
@@ -115,6 +118,7 @@ def register_routes(app, gm_blueprint):
             return jsonify({"status": "error", "message": str(e)}), 500
     
     @gm_blueprint.route('/api/wireguard/config', methods=['GET'])
+    @login_required
     def get_wireguard_config():
         """Get current WireGuard configuration"""
         try:
@@ -144,6 +148,7 @@ def register_routes(app, gm_blueprint):
             return jsonify({"status": "error", "message": str(e)}), 500
     
     @gm_blueprint.route('/api/wireguard/config', methods=['POST'])
+    @login_required
     def save_wireguard_config():
         """Save WireGuard configuration"""
         try:
@@ -195,6 +200,7 @@ def register_routes(app, gm_blueprint):
             return jsonify({"status": "error", "message": str(e)}), 500
     
     @gm_blueprint.route('/api/wireguard/control/<action>', methods=['POST'])
+    @login_required
     def control_wireguard(action):
         """Control WireGuard service (start/stop/restart/enable/disable)"""
         try:
@@ -234,6 +240,7 @@ def register_routes(app, gm_blueprint):
             return jsonify({"status": "error", "message": str(e)}), 500
     
     @gm_blueprint.route('/api/wireguard/install', methods=['POST'])
+    @login_required
     def install_wireguard():
         """Install WireGuard packages"""
         try:
@@ -271,6 +278,7 @@ def register_routes(app, gm_blueprint):
             return jsonify({"status": "error", "message": str(e)}), 500
     
     @gm_blueprint.route('/api/wireguard/logs')
+    @login_required
     def get_wireguard_logs():
         """Get WireGuard service logs"""
         try:

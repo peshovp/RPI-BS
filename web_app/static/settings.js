@@ -79,7 +79,7 @@ $(document).ready(function () {
     // View/hide password buttons for: Ntrip A, Ntrip B and Local caster
     document.querySelectorAll(".input-group-append").forEach(function(e) {
         var name = e.querySelector("button").id.replace("_button", "");
-        if (!["svr_pwd_A", "svr_pwd_B", "local_ntripc_pwd", "rtcm_client_pwd"].includes(name))
+        if (!["svr_pwd_A", "svr_pwd_B", "local_ntripc_pwd", "rtcm_client_pwd", "private_key"].includes(name))
             return;
 
         var button = $("#" + name + "_button");
@@ -313,6 +313,29 @@ $(document).ready(function () {
             //console.log(" e : " + e);
             //console.log("File SwitchStatus : " + switchStatus);
             socket.emit("services switch", {"name" : "file", "active" : switchStatus});          
+        })
+
+        // ####################  WIREGUARD service Switch #########################
+        // NOTE: "wireguard" was appended at the END of services_list in server.py
+        // (index 11), to avoid shifting the indexes already used above.
+        var wireguardSwitch = $('#wireguard-switch');
+        // set the switch to on/off depending of the service status
+        if (servicesStatus[11].active === true) {
+            wireguardSwitch.bootstrapToggle('on', true);
+        } else {
+            wireguardSwitch.bootstrapToggle('off', true);
+        }
+        if (servicesStatus[11].btn_color) {
+            wireguardSwitch.bootstrapToggle('setOnStyle', servicesStatus[11].btn_color);
+        }
+        if (servicesStatus[11].btn_off_color) {
+            wireguardSwitch.bootstrapToggle('setOffStyle', servicesStatus[11].btn_off_color);
+        }
+
+        // event for switching on/off service on user mouse click
+        $( "#wireguard-switch" ).one("change", function(e) {
+            var switchStatus = $(this).prop('checked');
+            socket.emit("services switch", {"name" : "wireguard", "active" : switchStatus});
         })
     })
 
