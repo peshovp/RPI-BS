@@ -117,6 +117,15 @@ if [ ! -L "rtkbase" ]; then
 fi
 
 chmod +x tools/install.sh tools/copy_unit.sh 2>/dev/null || true
+
+# Force an absolute rtkbase_path in the environment: in the git-pull branch of
+# tools/install.sh (taken here, since the "rtkbase" symlink already has a
+# .git dir), _add_rtkbase_path_to_environment() is never called, so
+# rtkbase_path would otherwise default to the relative 'rtkbase' (main(),
+# tools/install.sh). Exporting it here makes main() pick up the absolute
+# path instead, without touching the upstream script.
+export rtkbase_path="$(pwd)/rtkbase"
+
 ./tools/install.sh --all repo --rtkbase-repo main --user "${SUDO_USER:-$USER}" --start-services
 
 # --- 4. Final checklist ---
