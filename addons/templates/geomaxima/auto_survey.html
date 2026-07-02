@@ -1,0 +1,568 @@
+{% extends "base.html" %}
+
+{% block styles %}
+{{ super() }}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+<style>
+    .survey-status {
+        padding: 20px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }
+    .survey-status.idle { background-color: #f8f9fa; border: 1px solid #dee2e6; }
+    .survey-status.running { background-color: #d4edda; border: 1px solid #c3e6cb; }
+    .survey-status.paused { background-color: #fff3cd; border: 1px solid #ffeeba; }
+    .survey-status.completed { background-color: #d1ecf1; border: 1px solid #bee5eb; }
+    .survey-status.failed { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+    
+    .progress-container {
+        margin: 20px 0;
+    }
+    
+    .metric-card {
+        border: 1px solid #dee2e6;
+        border-radius: 5px;
+        padding: 15px;
+        margin-bottom: 15px;
+        background-color: #fff;
+    }
+    
+    .metric-label {
+        font-weight: 600;
+        color: #6c757d;
+        font-size: 0.875rem;
+        text-transform: uppercase;
+    }
+    
+    .metric-value {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #212529;
+    }
+    
+    .metric-unit {
+        font-size: 0.875rem;
+        color: #6c757d;
+        margin-left: 5px;
+    }
+    
+    .position-table {
+        font-family: monospace;
+        font-size: 0.9rem;
+    }
+    
+    .btn-survey {
+        min-width: 120px;
+    }
+    
+    .alert-info-custom {
+        background-color: #e7f3ff;
+        border-color: #bee5eb;
+        color: #004085;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <h2>🛰️ Auto Survey-In</h2>
+            <p class="text-muted">Automatic 24-hour precise base station positioning</p>
+            <hr>
+        </div>
+    </div>
+    
+    {% if not feature_enabled %}
+    <div class="alert alert-danger">
+        <strong>Feature Error:</strong> {{ error or "Survey feature not available" }}
+    </div>
+    {% else %}
+    
+    <!-- Status Section -->
+    <div class="row">
+        <div class="col-lg-8">
+            <div class="survey-status {{ status.survey_state or 'idle' }}">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h4 class="mb-1">
+                            <span class="badge badge-{{ 'success' if status.survey_state == 'running' else 'secondary' if status.survey_state == 'idle' else 'warning' if status.survey_state == 'paused' else 'info' if status.survey_state == 'completed' else 'danger' }}">
+                                {{ status.survey_state or 'IDLE' | upper }}
+                            </span>
+                        </h4>
+                        <p class="mb-0 text-muted">
+                            {% if status.survey_state == 'running' %}
+                                Survey in progress - DO NOT move antenna
+                            {% elif status.survey_state == 'idle' %}
+                                Ready to start new survey
+                            {% elif status.survey_state == 'paused' %}
+                                Survey paused
+                            {% elif status.survey_state == 'completed' %}
+                                Survey completed successfully
+                            {% elif status.survey_state == 'failed' %}
+                                Survey failed - check logs
+                            {% endif %}
+                        </p>
+                    </div>
+                    <div>
+                        {% if status.survey_state == 'idle' or status.survey_state == 'completed' or status.survey_state == 'failed' %}
+                        <button id="btnStart" class="btn btn-primary btn-survey">
+                            <i class="fas fa-play"></i> Start Survey
+                        </button>
+                        {% elif status.survey_state == 'running' or status.survey_state == 'paused' %}
+                        <button id="btnStop" class="btn btn-warning btn-survey">
+                            <i class="fas fa-stop"></i> Stop
+                        </button>
+                        {% endif %}
+                        <button id="btnReset" class="btn btn-secondary btn-survey ml-2">
+                            <i class="fas fa-redo"></i> Reset
+                        </button>
+                        {% if status.survey_state == 'completed' %}
+                        <button id="btnRestartServices" class="btn btn-success btn-survey ml-2" title="Restart RTKBase services to apply coordinates">
+                            <i class="fas fa-sync-alt"></i> Apply Coordinates
+                        </button>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Progress Bar -->
+            {% if status.survey_state in ['running', 'paused'] %}
+            <div class="progress-container">
+                <div class="d-flex justify-content-between mb-2">
+                    <span><strong>Progress:</strong> <span id="progressPercent">{{ "%.1f"|format(status.progress_percent or 0) }}</span>%</span>
+                    <span><span id="completedHours">{{ "%.1f"|format(status.completed_hours or 0) }}</span> / {{ status.target_hours or 24 }} hours</span>
+                </div>
+                <div class="progress" style="height: 25px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" 
+                         role="progressbar" 
+                         style="width: {{ status.progress_percent or 0 }}%"
+                         aria-valuenow="{{ status.progress_percent or 0 }}" 
+                         aria-valuemin="0" 
+                         aria-valuemax="100">
+                        {{ "%.1f"|format(status.progress_percent or 0) }}%
+                    </div>
+                </div>
+                {% if status.remaining_seconds %}
+                <p class="text-muted mt-2 mb-0">
+                    <i class="fas fa-clock"></i> Estimated time remaining: 
+                    <strong id="timeRemaining">{{ (status.remaining_seconds // 3600)|int }}h {{ ((status.remaining_seconds % 3600) // 60)|int }}m</strong>
+                </p>
+                {% endif %}
+            </div>
+            {% endif %}
+            
+            <!-- Current Position -->
+            {% if status.current_position %}
+            <div class="card border-light mt-3">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0"><i class="fas fa-map-marker-alt"></i> Current Position</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-sm position-table mb-0">
+                        <tr>
+                            <th style="width: 150px;">Latitude:</th>
+                            <td><span id="currentLat">{{ "%.8f"|format(status.current_position.lat) }}</span>°</td>
+                        </tr>
+                        <tr>
+                            <th>Longitude:</th>
+                            <td><span id="currentLon">{{ "%.8f"|format(status.current_position.lon) }}</span>°</td>
+                        </tr>
+                        <tr>
+                            <th>Height (MSL):</th>
+                            <td><span id="currentHeight">{{ "%.3f"|format(status.current_position.height) }}</span> m</td>
+                        </tr>
+                    </table>
+                    
+                    {% if status.position_std %}
+                    <hr>
+                    <p class="mb-1"><strong>Accuracy:</strong></p>
+                    <div class="row">
+                        <div class="col-6">
+                            <span class="text-muted">Horizontal:</span> 
+                            <strong>{{ "%.1f"|format(status.position_std.std_h_meters * 1000) }} mm</strong>
+                        </div>
+                        <div class="col-6">
+                            <span class="text-muted">Vertical:</span> 
+                            <strong>{{ "%.1f"|format(status.position_std.std_height * 1000) }} mm</strong>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        
+        <!-- Quality Metrics -->
+        <div class="col-lg-4">
+            <h5 class="mb-3">Quality Metrics</h5>
+            
+            <div class="metric-card">
+                <div class="metric-label">Epochs Processed</div>
+                <div class="metric-value" id="numEpochs">{{ "{:,}".format(status.num_epochs or 0) }}</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Updates Performed</div>
+                <div class="metric-value" id="numUpdates">{{ status.num_updates or 0 }}</div>
+            </div>
+            
+            {% if status.quality_metrics %}
+            <div class="metric-card">
+                <div class="metric-label">Mean Ambiguity Ratio</div>
+                <div class="metric-value">{{ "%.2f"|format(status.quality_metrics.mean_ratio or 0) }}</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Mean Satellites</div>
+                <div class="metric-value">{{ "%.1f"|format(status.quality_metrics.mean_sats or 0) }}</div>
+            </div>
+            
+            {% if status.quality_metrics.rejected_epochs is defined %}
+            <div class="metric-card">
+                <div class="metric-label">Outliers Rejected</div>
+                <div class="metric-value">{{ status.quality_metrics.rejected_epochs or 0 }}</div>
+            </div>
+            {% endif %}
+            {% endif %}
+            
+            {% if status.last_update_time %}
+            <div class="alert alert-info-custom mt-3">
+                <small>
+                    <i class="fas fa-info-circle"></i> Last update:<br>
+                    <strong>{{ status.last_update_time }}</strong>
+                </small>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- Information Panel -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card border-light">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0"><i class="fas fa-info-circle"></i> How It Works</h5>
+                </div>
+                <div class="card-body">
+                    <p><strong>Auto Survey-In</strong> determines precise base station coordinates by:</p>
+                    <ol>
+                        <li>Collecting FIX solutions from RTKLIB over 24 hours</li>
+                        <li>Filtering quality epochs (Q=1, ratio ≥3.0, 3D std ≤5cm)</li>
+                        <li>Removing outliers using Modified Z-Score (MAD-based)</li>
+                        <li>Computing weighted average position (inverse variance weighting)</li>
+                        <li>Applying geoid correction for orthometric height (MSL)</li>
+                        <li>Updating RTKBase configuration hourly</li>
+                    </ol>
+                    
+                    <div class="alert alert-warning mt-3">
+                        <strong>⚠️ Important:</strong>
+                        <ul class="mb-0">
+                            <li>Ensure clear sky view (minimal obstructions)</li>
+                            <li>Do NOT move antenna during survey</li>
+                            <li>Survey can recover from system restarts</li>
+                            <li>Target accuracy: &lt;5mm horizontal, &lt;10mm vertical</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Geoid model upload -->
+    <div class="row mt-3">
+        <div class="col-md-12">
+            <div class="card card-body">
+                <h4>Geoid model (GGF)</h4>
+                <p class="mb-1">Използва се за превръщане на височините от WGS84 в ортометрични (MSL).</p>
+                <div class="d-flex align-items-center gap-2" style="gap:10px; flex-wrap:wrap;">
+                    <span id="geoidStatus" class="badge bg-secondary">Loading...</span>
+                    <input type="file" id="geoidFile" accept=".ggf" class="form-control" style="max-width:320px;">
+                    <button id="btnUploadGeoid" class="btn btn-primary">Качи и активирай</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    {% endif %}
+</div>
+
+<!-- Start Survey Modal -->
+<div class="modal fade" id="startModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Start Survey</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="targetHours">Survey Duration (hours):</label>
+                    <input type="number" class="form-control" id="targetHours" 
+                           value="24" min="1" max="72" step="1">
+                    <small class="form-text text-muted">
+                        Recommended: 24 hours for &lt;5mm accuracy
+                    </small>
+                </div>
+                <div class="alert alert-warning">
+                    <strong>Before starting:</strong>
+                    <ul class="mb-0">
+                        <li>Ensure antenna is firmly mounted</li>
+                        <li>Check clear sky view</li>
+                        <li>Verify RTKLIB is running</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="btnConfirmStart">
+                    <i class="fas fa-play"></i> Start Survey
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+// Auto-refresh status every 10 seconds when running
+let refreshInterval;
+let lastProgressPercent = {{ status.progress_percent|default(0) }};
+
+function loadStatus() {
+    fetch('/geomaxima/api/survey/status')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.status) {
+                const status = data.status;
+                const state = status.survey_state;
+                
+                // Update progress bar if running
+                if (state === 'running' && status.progress_percent !== undefined) {
+                    const progress = Math.min(100, status.progress_percent);
+                    $('.progress-bar').css('width', progress + '%');
+                    $('.progress-bar').attr('aria-valuenow', progress);
+                    $('.progress-bar').text(progress.toFixed(1) + '%');
+                    $('#progressPercent').text(progress.toFixed(1));
+                    
+                    // Update completed hours
+                    if (status.elapsed_seconds !== undefined) {
+                        const completedHours = (status.elapsed_seconds / 3600).toFixed(1);
+                        $('#completedHours').text(completedHours);
+                    }
+                    
+                    // Update time remaining
+                    if (status.remaining_seconds !== undefined) {
+                        const hours = Math.floor(status.remaining_seconds / 3600);
+                        const minutes = Math.floor((status.remaining_seconds % 3600) / 60);
+                        $('#timeRemaining').text(hours + 'h ' + minutes + 'm');
+                    }
+                    
+                    // Update position if available
+                    if (status.current_position) {
+                        $('#currentLat').text(status.current_position.lat.toFixed(8));
+                        $('#currentLon').text(status.current_position.lon.toFixed(8));
+                        $('#currentHeight').text(status.current_position.height.toFixed(3));
+                    }
+                    
+                    // Update epochs count
+                    if (status.num_epochs !== undefined) {
+                        $('#numEpochs').text(status.num_epochs.toLocaleString());
+                    }
+
+                    // Update updates-performed count
+                    if (status.num_updates !== undefined) {
+                        $('#numUpdates').text(status.num_updates.toLocaleString());
+                    }
+                    
+                    lastProgressPercent = progress;
+                }
+                
+                // If state changed to completed/failed, reload to show final UI
+                if (state === 'completed' || state === 'failed') {
+                    clearInterval(refreshInterval);
+                    location.reload();
+                }
+            }
+        })
+        .catch(error => console.error('Status refresh error:', error));
+}
+
+// Start survey
+$('#btnStart').click(function() {
+    $('#startModal').modal('show');
+});
+
+$('#btnConfirmStart').click(function() {
+    const targetHours = parseInt($('#targetHours').val());
+    
+    $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Starting...');
+    
+    fetch('/geomaxima/api/survey/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({target_hours: targetHours})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            $('#startModal').modal('hide');
+            alert('Survey started successfully!');
+            location.reload();
+        } else {
+            alert('Failed to start survey: ' + data.error);
+            $('#btnConfirmStart').prop('disabled', false).html('<i class="fas fa-play"></i> Start Survey');
+        }
+    })
+    .catch(error => {
+        alert('Error: ' + error);
+        $('#btnConfirmStart').prop('disabled', false).html('<i class="fas fa-play"></i> Start Survey');
+    });
+});
+
+// Stop survey
+$('#btnStop').click(function() {
+    if (!confirm('Stop survey? Progress will be saved for recovery.')) return;
+    
+    $(this).prop('disabled', true);
+    
+    fetch('/geomaxima/api/survey/stop', {method: 'POST'})
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Survey stopped');
+                location.reload();
+            } else {
+                alert('Failed to stop: ' + data.error);
+                $(this).prop('disabled', false);
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+            $(this).prop('disabled', false);
+        });
+});
+
+// Reset survey
+$('#btnReset').click(function() {
+    if (!confirm('Reset survey state? All progress will be lost.')) return;
+    
+    $(this).prop('disabled', true);
+    
+    fetch('/geomaxima/api/survey/reset', {method: 'POST'})
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Survey reset');
+                location.reload();
+            } else {
+                alert('Failed to reset: ' + data.error);
+                $(this).prop('disabled', false);
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+            $(this).prop('disabled', false);
+        });
+});
+
+// Apply coordinates and restart RTKBase services
+$('#btnRestartServices').click(function() {
+    if (!confirm('Apply surveyed coordinates to RTKBase?\n\nThis will update settings.conf and restart services.')) return;
+    
+    const $btn = $(this);
+    $btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Applying...');
+    
+    fetch('/geomaxima/api/survey/apply', {method: 'POST'})
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const pos = data.position;
+                const msg = `✓ Coordinates applied successfully!\n\n` +
+                           `Latitude:  ${pos.lat.toFixed(8)}°\n` +
+                           `Longitude: ${pos.lon.toFixed(8)}°\n` +
+                           `Height:    ${pos.height.toFixed(3)} m\n\n` +
+                           `Services restarted: ${data.services_restarted ? 'Yes' : 'No'}`;
+                alert(msg);
+                location.reload();
+            } else {
+                alert('✗ Failed to apply coordinates!\n\n' + (data.error || 'Unknown error'));
+                $btn.prop('disabled', false).html('<i class="fas fa-sync-alt"></i> Apply Coordinates');
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+            $btn.prop('disabled', false).html('<i class="fas fa-sync-alt"></i> Apply Coordinates');
+        });
+});
+
+// Set page title with hostname
+document.title = 'Auto Survey-In - {{ hostname }}';
+
+// Start auto-refresh if survey is running
+{% if status.survey_state == 'running' %}
+refreshInterval = setInterval(loadStatus, 10000);  // 10 seconds for smooth updates
+{% endif %}
+
+// Geoid status + upload
+function loadGeoidStatus() {
+    fetch('/geomaxima/api/survey/geoid')
+        .then(r => r.json())
+        .then(data => {
+            const badge = document.getElementById('geoidStatus');
+            if (!data.success) {
+                badge.className = 'badge bg-danger';
+                badge.innerText = data.error || 'Грешка';
+                return;
+            }
+            if (data.ggf_path) {
+                badge.className = 'badge bg-success';
+                badge.innerText = 'Активен: ' + data.ggf_path.split('/').pop();
+            } else {
+                badge.className = 'badge bg-warning text-dark';
+                badge.innerText = 'Няма зареден геоиден модел (елипсоидна височина)';
+            }
+        })
+        .catch(() => {
+            const badge = document.getElementById('geoidStatus');
+            badge.className = 'badge bg-danger';
+            badge.innerText = 'Грешка при зареждане на статуса';
+        });
+}
+
+document.getElementById('btnUploadGeoid').addEventListener('click', function() {
+    const fileInput = document.getElementById('geoidFile');
+    if (!fileInput.files.length) {
+        alert('Моля изберете GGF файл');
+        return;
+    }
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    this.disabled = true;
+    this.innerText = 'Качване...';
+    fetch('/geomaxima/api/survey/geoid/upload', {
+        method: 'POST',
+        body: formData
+    }).then(r => r.json()).then(data => {
+        if (data.success) {
+            alert('Геоиден модел качен и активиран');
+            loadGeoidStatus();
+        } else {
+            alert('Грешка: ' + (data.error || 'неизвестна'));
+        }
+    }).catch(err => {
+        alert('Грешка: ' + err);
+    }).finally(() => {
+        this.disabled = false;
+        this.innerText = 'Качи и активирай';
+    });
+});
+
+loadGeoidStatus();
+</script>
+{% endblock %}

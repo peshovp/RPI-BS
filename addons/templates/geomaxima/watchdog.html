@@ -1,0 +1,981 @@
+{% extends "base.html" %}
+
+{% block title %}Watchdog - {{ hostname }}{% endblock %}
+
+{% block head %}
+{{ super() }}
+<style>
+/* Watchdog-specific styles */
+.watchdog-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.status-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 30px;
+    border-radius: 10px;
+    margin-bottom: 30px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+.status-header h1 {
+    margin: 0;
+    font-size: 2rem;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 5px 15px;
+    border-radius: 20px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-left: 10px;
+}
+
+.status-badge.active {
+    background-color: #10b981;
+    color: white;
+}
+
+.status-badge.inactive {
+    background-color: #6b7280;
+    color: white;
+}
+
+.monitor-card {
+    background: white;
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    transition: all 0.3s;
+}
+
+.monitor-card:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.monitor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.monitor-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #333;
+}
+
+.monitor-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Toggle Switch */
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 60px;
+    height: 34px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: .4s;
+    border-radius: 34px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 26px;
+    width: 26px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: .4s;
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background-color: #10b981;
+}
+
+input:checked + .slider:before {
+    transform: translateX(26px);
+}
+
+.config-section {
+    margin-top: 15px;
+    padding: 15px;
+    background-color: #f9fafb;
+    border-radius: 5px;
+}
+
+.config-section h6 {
+    margin-bottom: 10px;
+    color: #666;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+}
+
+.config-item {
+    margin-bottom: 10px;
+}
+
+.config-item label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+    color: #555;
+}
+
+.config-item input,
+.config-item select {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+}
+
+.incident-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 15px;
+}
+
+.incident-table th,
+.incident-table td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.incident-table th {
+    background-color: #f3f4f6;
+    font-weight: 600;
+    color: #374151;
+}
+
+.incident-table tr:hover {
+    background-color: #f9fafb;
+}
+
+.severity-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.severity-badge.warning {
+    background-color: #fef3c7;
+    color: #92400e;
+}
+
+.severity-badge.critical {
+    background-color: #fee2e2;
+    color: #991b1b;
+}
+
+.severity-badge.info {
+    background-color: #dbeafe;
+    color: #1e40af;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.3s;
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.alert-box {
+    padding: 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+}
+
+.alert-box.success {
+    background-color: #d1fae5;
+    border-left: 4px solid #10b981;
+    color: #065f46;
+}
+
+.alert-box.error {
+    background-color: #fee2e2;
+    border-left: 4px solid #ef4444;
+    color: #991b1b;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.stat-card {
+    background: white;
+    padding: 15px;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #667eea;
+}
+
+.stat-label {
+    font-size: 0.9rem;
+    color: #6b7280;
+    margin-top: 5px;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="watchdog-container">
+    <!-- Header -->
+    <div class="status-header">
+        <h1>
+            <i class="fas fa-shield-alt"></i> Система за Мониторинг (Watchdog)
+            <span class="status-badge {% if status.enabled %}active{% else %}inactive{% endif %}">
+                {% if status.enabled %}АКТИВЕН{% else %}НЕАКТИВЕН{% endif %}
+            </span>
+        </h1>
+        <p style="margin: 10px 0 0 0; opacity: 0.9;">
+            Автоматично наблюдение и възстановяване на системни услуги
+        </p>
+    </div>
+
+    <!-- Master Toggle -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-power-off"></i> Главен Превключвател
+            </div>
+            <div class="monitor-toggle">
+                <span>Watchdog:</span>
+                <label class="switch">
+                    <input type="checkbox" id="masterToggle" {% if status.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p class="text-muted">Включете или изключете целия Watchdog мониторинг</p>
+    </div>
+
+    <!-- Statistics -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ status.monitors.service.services_count if status.monitors.service.enabled else 0 }}</div>
+            <div class="stat-label">Наблюдавани Услуги</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ recent_incidents|length }}</div>
+            <div class="stat-label">Скорошни Инциденти</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">
+                {% set enabled_count = 0 %}
+                {% if status.monitors.service.enabled %}{% set enabled_count = enabled_count + 1 %}{% endif %}
+                {% if status.monitors.network.enabled %}{% set enabled_count = enabled_count + 1 %}{% endif %}
+                {% if status.monitors.disk.enabled %}{% set enabled_count = enabled_count + 1 %}{% endif %}
+                {% if status.monitors.gnss.enabled %}{% set enabled_count = enabled_count + 1 %}{% endif %}
+                {{ enabled_count }}/4
+            </div>
+            <div class="stat-label">Активни Монитори</div>
+        </div>
+    </div>
+
+    <!-- Service Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-cogs"></i> Наблюдение на Услуги
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="service" 
+                           {% if config.monitors.service.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Проверява RTKBase услуги и автоматично ги рестартира при падане</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>
+                            <input type="checkbox" id="serviceAutoRestart" 
+                                   {% if config.monitors.service.auto_restart %}checked{% endif %}>
+                            Автоматичен Рестарт
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Макс. опити за рестарт:</label>
+                        <input type="number" id="serviceMaxAttempts" 
+                               value="{{ config.monitors.service.max_restart_attempts }}" min="1" max="10">
+                    </div>
+                </div>
+            </div>
+            <div class="config-item">
+                <label>Наблюдавани услуги:</label>
+                <small class="text-muted">{{ ', '.join(config.monitors.service.services) }}</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Network Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-network-wired"></i> Наблюдение на Мрежата
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="network" 
+                           {% if config.monitors.network.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Проверява интернет свързаност и VPN статус</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>
+                            <input type="checkbox" id="networkCheckInternet" 
+                                   {% if config.monitors.network.check_internet %}checked{% endif %}>
+                            Проверка на Интернет
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>
+                            <input type="checkbox" id="networkCheckVPN" 
+                                   {% if config.monitors.network.check_vpn %}checked{% endif %}>
+                            Проверка на VPN
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Disk Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-hdd"></i> Наблюдение на Диска
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="disk" 
+                           {% if config.monitors.disk.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Следи дисковото пространство и алармира при ниско ниво</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Праг за Предупреждение (%):</label>
+                        <input type="number" id="diskWarningThreshold" 
+                               value="{{ config.monitors.disk.warning_threshold_percent }}" min="50" max="100">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Критичен Праг (%):</label>
+                        <input type="number" id="diskCriticalThreshold" 
+                               value="{{ config.monitors.disk.critical_threshold_percent }}" min="50" max="100">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- GNSS Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-satellite-dish"></i> Наблюдение на GNSS Приемник
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="gnss" 
+                           {% if config.monitors.gnss.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Проверява свързаността и данните от GNSS приемника</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="config-item">
+                <label>Сериен порт:</label>
+                <input type="text" id="gnssSerialPort" 
+                       value="{{ config.monitors.gnss.serial_port }}" placeholder="/dev/ttyACM0">
+            </div>
+        </div>
+    </div>
+
+    <!-- Temperature Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-thermometer-half"></i> Наблюдение на Температурата
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="temperature" 
+                           {% if config.monitors.temperature.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Следи температурата на CPU и алармира при прегряване</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Праг за Предупреждение (°C):</label>
+                        <input type="number" id="tempWarningThreshold" 
+                               value="{{ config.monitors.temperature.warning_threshold }}" min="50" max="100">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Критичен Праг (°C):</label>
+                        <input type="number" id="tempCriticalThreshold" 
+                               value="{{ config.monitors.temperature.critical_threshold }}" min="50" max="100">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CPU Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-microchip"></i> Наблюдение на CPU
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="cpu" 
+                           {% if config.monitors.cpu.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Следи натоварването на процесора</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Праг за Предупреждение (%):</label>
+                        <input type="number" id="cpuWarningThreshold" 
+                               value="{{ config.monitors.cpu.warning_threshold }}" min="50" max="100">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Критичен Праг (%):</label>
+                        <input type="number" id="cpuCriticalThreshold" 
+                               value="{{ config.monitors.cpu.critical_threshold }}" min="50" max="100">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Memory Monitor -->
+    <div class="monitor-card">
+        <div class="monitor-header">
+            <div class="monitor-title">
+                <i class="fas fa-memory"></i> Наблюдение на Паметта
+            </div>
+            <div class="monitor-toggle">
+                <span>Активен:</span>
+                <label class="switch">
+                    <input type="checkbox" class="monitor-checkbox" data-monitor="memory" 
+                           {% if config.monitors.memory.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        <p>Следи използването на RAM и Swap памет</p>
+        
+        <div class="config-section">
+            <h6>Конфигурация:</h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Праг за Предупреждение (%):</label>
+                        <input type="number" id="memWarningThreshold" 
+                               value="{{ config.monitors.memory.warning_threshold }}" min="50" max="100">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Критичен Праг (%):</label>
+                        <input type="number" id="memCriticalThreshold" 
+                               value="{{ config.monitors.memory.critical_threshold }}" min="50" max="100">
+                    </div>
+                </div>
+            </div>
+            <div class="config-item">
+                <label>
+                    <input type="checkbox" id="memCheckSwap" 
+                           {% if config.monitors.memory.check_swap %}checked{% endif %}>
+                    Следи Swap паметта
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notifications Section -->
+    <div class="monitor-card">
+        <h3><i class="fas fa-bell"></i> Известия</h3>
+        
+        <!-- Email Notifications -->
+        <div class="monitor-header mt-3">
+            <div class="monitor-title">
+                <i class="fas fa-envelope"></i> Email Известия
+            </div>
+            <div class="monitor-toggle">
+                <span>Активни:</span>
+                <label class="switch">
+                    <input type="checkbox" id="emailEnabled" 
+                           {% if config.notifications.email.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        
+        <div class="config-section">
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>SMTP Сървър:</label>
+                        <input type="text" id="emailSmtpServer" 
+                               value="{{ config.notifications.email.smtp_server }}" 
+                               placeholder="smtp.gmail.com">
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="config-item">
+                        <label>Порт:</label>
+                        <input type="number" id="emailSmtpPort" 
+                               value="{{ config.notifications.email.smtp_port }}" 
+                               placeholder="587">
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="config-item">
+                        <label>Използвай TLS:</label>
+                        <input type="checkbox" id="emailUseTls" 
+                               {% if config.notifications.email.use_tls %}checked{% endif %}>
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>От Email:</label>
+                        <input type="email" id="emailFromAddress" 
+                               value="{{ config.notifications.email.from_address }}" 
+                               placeholder="watchdog@example.com">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>SMTP Потребител (optional):</label>
+                        <input type="text" id="emailSmtpUser" 
+                               value="{{ config.notifications.email.get('smtp_user', '') }}" 
+                               placeholder="username">
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>SMTP Парола:</label>
+                        <input type="password" id="emailSmtpPassword" 
+                               placeholder="••••••••">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>До Email Адреси (разделени със запетая):</label>
+                        <input type="text" id="emailToAddresses" 
+                               value="{{ config.notifications.email.to_addresses | join(', ') }}" 
+                               placeholder="admin@example.com, user@example.com">
+                    </div>
+                </div>
+            </div>
+            <button class="btn btn-sm btn-info mt-2" id="btnTestEmail">
+                <i class="fas fa-paper-plane"></i> Тест Email
+            </button>
+        </div>
+
+        <!-- Telegram Notifications -->
+        <div class="monitor-header mt-4">
+            <div class="monitor-title">
+                <i class="fab fa-telegram"></i> Telegram Известия
+            </div>
+            <div class="monitor-toggle">
+                <span>Активни:</span>
+                <label class="switch">
+                    <input type="checkbox" id="telegramEnabled" 
+                           {% if config.notifications.telegram.enabled %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+        
+        <div class="config-section">
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Bot Token:</label>
+                        <input type="password" id="telegramBotToken" 
+                               placeholder="••••••••" 
+                               {% if config.notifications.telegram.bot_token %}value="********"{% endif %}>
+                        <small class="text-muted">Получи от @BotFather</small>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="config-item">
+                        <label>Chat ID:</label>
+                        <input type="text" id="telegramChatId" 
+                               value="{{ config.notifications.telegram.chat_id }}" 
+                               placeholder="123456789">
+                        <small class="text-muted">Използвай @userinfobot за намиране</small>
+                    </div>
+                </div>
+            </div>
+            <button class="btn btn-sm btn-info mt-2" id="btnTestTelegram">
+                <i class="fas fa-paper-plane"></i> Тест Telegram
+            </button>
+        </div>
+    </div>
+
+    <!-- Manual Check Button -->
+    <div class="text-center mb-4">
+        <button class="btn btn-primary" id="btnRunChecks">
+            <i class="fas fa-play"></i> Пусни Проверки Сега
+        </button>
+        <button class="btn btn-secondary ml-2" id="btnSaveConfig">
+            <i class="fas fa-save"></i> Запази Конфигурация
+        </button>
+    </div>
+
+    <!-- Recent Incidents -->
+    <div class="monitor-card">
+        <h3><i class="fas fa-exclamation-triangle"></i> Скорошни Инциденти</h3>
+        
+        {% if recent_incidents %}
+        <table class="incident-table">
+            <thead>
+                <tr>
+                    <th>Време</th>
+                    <th>Тип</th>
+                    <th>Сериозност</th>
+                    <th>Съобщение</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for incident in recent_incidents|reverse %}
+                <tr>
+                    <td>{{ incident.logged_at[:19] if incident.logged_at else incident.timestamp[:19] }}</td>
+                    <td>{{ incident.type }}</td>
+                    <td>
+                        <span class="severity-badge {{ incident.severity }}">
+                            {{ incident.severity.upper() }}
+                        </span>
+                    </td>
+                    <td>{{ incident.message }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted text-center">Няма регистрирани инциденти</p>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+// Master toggle
+$('#masterToggle').change(function() {
+    const enabled = $(this).is(':checked');
+    
+    $.ajax({
+        url: '/geomaxima/watchdog/api/toggle-watchdog',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({enabled: enabled}),
+        success: function(response) {
+            if (response.success) {
+                alert(response.message);
+                location.reload();
+            } else {
+                alert('Грешка: ' + response.error);
+            }
+        },
+        error: function() {
+            alert('Грешка при комуникацията със сървъра');
+        }
+    });
+});
+
+// Monitor toggles
+$('.monitor-checkbox').change(function() {
+    const monitor = $(this).data('monitor');
+    const enabled = $(this).is(':checked');
+    
+    $.ajax({
+        url: '/geomaxima/watchdog/api/toggle-monitor',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            monitor: monitor,
+            enabled: enabled
+        }),
+        success: function(response) {
+            if (response.success) {
+                console.log(response.message);
+            } else {
+                alert('Грешка: ' + response.error);
+            }
+        },
+        error: function() {
+            alert('Грешка при комуникацията със сървъра');
+        }
+    });
+});
+
+// Run checks manually
+$('#btnRunChecks').click(function() {
+    $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Изпълнява се...');
+    
+    $.ajax({
+        url: '/geomaxima/watchdog/api/run-checks',
+        method: 'POST',
+        success: function(response) {
+            if (response.success) {
+                alert('Проверките завършиха успешно!');
+                location.reload();
+            } else {
+                alert('Грешка: ' + response.error);
+            }
+        },
+        error: function() {
+            alert('Грешка при изпълнение на проверките');
+        },
+        complete: function() {
+            $('#btnRunChecks').prop('disabled', false).html('<i class="fas fa-play"></i> Пусни Проверки Сега');
+        }
+    });
+});
+
+// Save configuration
+$('#btnSaveConfig').click(function() {
+    const config = {
+        monitors: {
+            service: {
+                auto_restart: $('#serviceAutoRestart').is(':checked'),
+                max_restart_attempts: parseInt($('#serviceMaxAttempts').val())
+            },
+            network: {
+                check_internet: $('#networkCheckInternet').is(':checked'),
+                check_vpn: $('#networkCheckVPN').is(':checked')
+            },
+            disk: {
+                warning_threshold_percent: parseInt($('#diskWarningThreshold').val()),
+                critical_threshold_percent: parseInt($('#diskCriticalThreshold').val())
+            },
+            gnss: {
+                serial_port: $('#gnssSerialPort').val()
+            },
+            temperature: {
+                warning_threshold: parseInt($('#tempWarningThreshold').val()),
+                critical_threshold: parseInt($('#tempCriticalThreshold').val())
+            },
+            cpu: {
+                warning_threshold: parseInt($('#cpuWarningThreshold').val()),
+                critical_threshold: parseInt($('#cpuCriticalThreshold').val())
+            },
+            memory: {
+                warning_threshold: parseInt($('#memWarningThreshold').val()),
+                critical_threshold: parseInt($('#memCriticalThreshold').val()),
+                check_swap: $('#memCheckSwap').is(':checked')
+            }
+        },
+        notifications: {
+            email: {
+                enabled: $('#emailEnabled').is(':checked'),
+                smtp_server: $('#emailSmtpServer').val(),
+                smtp_port: parseInt($('#emailSmtpPort').val()),
+                use_tls: $('#emailUseTls').is(':checked'),
+                from_address: $('#emailFromAddress').val(),
+                smtp_user: $('#emailSmtpUser').val(),
+                smtp_password: $('#emailSmtpPassword').val() || undefined,
+                to_addresses: $('#emailToAddresses').val().split(',').map(s => s.trim()).filter(s => s)
+            },
+            telegram: {
+                enabled: $('#telegramEnabled').is(':checked'),
+                bot_token: $('#telegramBotToken').val() === '********' ? undefined : $('#telegramBotToken').val(),
+                chat_id: $('#telegramChatId').val()
+            }
+        }
+    };
+    
+    $.ajax({
+        url: '/geomaxima/watchdog/api/config',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(config),
+        success: function(response) {
+            if (response.success) {
+                alert('Конфигурацията е запазена!');
+            } else {
+                alert('Грешка: ' + response.error);
+            }
+        },
+        error: function() {
+            alert('Грешка при запазване на конфигурацията');
+        }
+    });
+});
+
+// Test email configuration
+$('#btnTestEmail').click(function() {
+    const emailConfig = {
+        enabled: true,  // Force enabled for test
+        smtp_server: $('#emailSmtpServer').val(),
+        smtp_port: parseInt($('#emailSmtpPort').val()),
+        use_tls: $('#emailUseTls').is(':checked'),
+        from_address: $('#emailFromAddress').val(),
+        smtp_user: $('#emailSmtpUser').val(),
+        smtp_password: $('#emailSmtpPassword').val(),
+        to_addresses: $('#emailToAddresses').val().split(',').map(s => s.trim()).filter(s => s)
+    };
+    
+    $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Изпращане...');
+    
+    $.ajax({
+        url: '/geomaxima/watchdog/api/test-email',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(emailConfig),
+        success: function(response) {
+            alert(response.message);
+            $('#btnTestEmail').prop('disabled', false).html('<i class="fas fa-paper-plane"></i> Тест Email');
+        },
+        error: function(xhr) {
+            alert('Грешка: ' + (xhr.responseJSON?.message || 'Неуспешен тест'));
+            $('#btnTestEmail').prop('disabled', false).html('<i class="fas fa-paper-plane"></i> Тест Email');
+        }
+    });
+});
+
+// Test telegram configuration
+$('#btnTestTelegram').click(function() {
+    const telegramConfig = {
+        enabled: true,  // Force enabled for test
+        bot_token: $('#telegramBotToken').val() === '********' ? '' : $('#telegramBotToken').val(),
+        chat_id: $('#telegramChatId').val()
+    };
+    
+    if (!telegramConfig.bot_token) {
+        alert('Моля въведи Bot Token преди теста');
+        return;
+    }
+    
+    $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Изпращане...');
+    
+    $.ajax({
+        url: '/geomaxima/watchdog/api/test-telegram',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(telegramConfig),
+        success: function(response) {
+            alert(response.message);
+            $('#btnTestTelegram').prop('disabled', false).html('<i class="fas fa-paper-plane"></i> Тест Telegram');
+        },
+        error: function(xhr) {
+            alert('Грешка: ' + (xhr.responseJSON?.message || 'Неуспешен тест'));
+            $('#btnTestTelegram').prop('disabled', false).html('<i class="fas fa-paper-plane"></i> Тест Telegram');
+        }
+    });
+});
+
+// Set page title
+document.title = 'Watchdog - {{ hostname }}';
+</script>
+{% endblock %}
+

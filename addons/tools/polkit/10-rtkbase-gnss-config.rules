@@ -1,0 +1,14 @@
+// Allow RTKBase web user to control services for GNSS configuration
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "peshovp" &&
+        (action.lookup("unit") == "str2str_tcp.service" ||
+         action.lookup("unit") == "str2str_file.service" ||
+         action.lookup("unit") == "str2str_ntrip_A.service" ||
+         action.lookup("unit") == "str2str_ntrip_B.service" ||
+         action.lookup("unit") == "str2str_rtcm_svr.service" ||
+         action.lookup("unit") == "str2str_rtcm_serial.service" ||
+         action.lookup("unit") == "rtkbase_raw2nmea.service")) {
+        return polkit.Result.YES;
+    }
+});

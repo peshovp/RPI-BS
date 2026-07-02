@@ -1,0 +1,27 @@
+--- a/web_app/server.py
++++ b/web_app/server.py
+@@ -410,10 +410,12 @@ def download_update():
+ @app.before_request
+ def inject_global_infos():
+     """
+         Insert various informations as global variables for Flask/Jinja
+     """
++    import socket
+     g.version = rtkbaseconfig.get("general", "version")
+     g.station_name = rtkbaseconfig.get_ntrip_A_settings()[4]['mnt_name_A']
+     g.sbc_model = get_sbc_model()
++    g.hostname = socket.gethostname()
+ 
+ @login.user_loader
+ def load_user(user_id):
+--- a/web_app/templates/base.html
++++ b/web_app/templates/base.html
+@@ -12,7 +12,7 @@
+     <link rel="stylesheet" href="{{ url_for('static', filename='lib/bootstrap-4.6.1.min.css') }}">
+     {% endblock %}
+ 
+-     <title>{{ g.station_name }} - RTKBase </title>
++     <title>{{ g.hostname }} - RTKBase </title>
+     {% endblock %}
+   </head>
+   <body style="min-height: 100vh; display:flex; flex-direction: column;">

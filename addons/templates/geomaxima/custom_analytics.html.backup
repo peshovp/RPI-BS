@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+
+{% block title %}Custom Analytics - {{ hostname }}{% endblock %}
+
+{% block head %}
+{{ super() }}
+<style>
+    .satellite-sky {
+        width: 100%;
+        height: 400px;
+        background: radial-gradient(circle, #1a1a2e 0%, #0f0f1e 100%);
+        border-radius: 50%;
+        position: relative;
+        margin: 20px auto;
+    }
+    
+    .satellite-marker {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #4CAF50;
+        border: 2px solid white;
+        transform: translate(-50%, -50%);
+        cursor: pointer;
+    }
+    
+    .satellite-marker.gps { background: #4CAF50; }
+    .satellite-marker.glonass { background: #2196F3; }
+    .satellite-marker.galileo { background: #FF9800; }
+    .satellite-marker.beidou { background: #F44336; }
+    
+    .stats-card {
+        background: white;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    
+    .stat-value {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #007bff;
+    }
+    
+    .stat-label {
+        color: #6c757d;
+        font-size: 0.9rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <h1><i class="fas fa-chart-line"></i> Custom Analytics</h1>
+    <p class="text-muted">Real-time GNSS data visualization and quality metrics</p>
+    
+    {% if not feature_enabled %}
+    <div class="alert alert-danger">
+        <strong>Feature Error:</strong> Custom Analytics feature not available
+    </div>
+    {% else %}
+    
+    <div class="row">
+        <!-- Sky Plot -->
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0"><i class="fas fa-satellite"></i> Satellite Sky Plot</h5>
+                </div>
+                <div class="card-body">
+                    <div id="skyPlotContainer" class="text-center">
+                        <div class="satellite-sky" id="skyPlot"></div>
+                        <div class="alert alert-info mt-3" id="noSatelliteData" style="display:none;">
+                            <strong><i class="fas fa-info-circle"></i> No Data:</strong>
+                            Waiting for satellite data from RTKLIB... Make sure the main service is running.
+                        </div>
+                    </div>
+                    <div class="text-center mt-2">
+                        <span class="badge badge-success">GPS</span>
+                        <span class="badge badge-primary">GLONASS</span>
+                        <span class="badge badge-warning">Galileo</span>
+                        <span class="badge badge-danger">BeiDou</span>
+                    </div>
+                    <div class="text-center mt-2">
+                        <small class="text-muted">Data source: <span id="dataSource">Connecting...</span></small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Position Quality Stats -->
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <h5 class="mb-0"><i class="fas fa-tachometer-alt"></i> Position Quality</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="stats-card">
+                                <div class="stat-value" id="satCount">--</div>
+                                <div class="stat-label">Satellites Used</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stats-card">
+                                <div class="stat-value" id="fixType">--</div>
+                                <div class="stat-label">Fix Type</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stats-card">
+                                <div class="stat-value" id="stdHorizontal">--</div>
+                                <div class="stat-label">Std Horizontal (m)</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stats-card">
+                                <div class="stat-value" id="stdVertical">--</div>
+                                <div class="stat-label">Std Vertical (m)</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stats-card">
+                                <div class="stat-value" id="ageDiff">--</div>
+                                <div class="stat-label">Age of Diff (s)</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stats-card">
+                                <div class="stat-value badge" id="statusBadge">No Data</div>
+                                <div class="stat-label">Status</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="fas fa-list"></i> Satellite Details</h5>
+                </div>
+                <div class="card-body">
+                    <div id="satelliteList" class="table-responsive">
+                        <table class="table table-sm table-striped">
+                            <thead>
+                                <tr>
+                                    <th>PRN</th>
+                                    <th>Constellation</th>
+                                    <th>SNR (dB)</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="satelliteTableBody">
+                                <tr>
+                                    <td colspan="4" class="text-center text-muted">No satellite data available</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+// Load satellite data
+function loadSatelliteData() {
+    fetch('/geomaxima/api/analytics/satellite-data')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.satellites && data.satellites.length > 0) {
+            renderSkyPlot(data.satellites);
+            updateSatelliteTable(data.satellites);
+            $('#noSatelliteData').hide();
+            $('#dataSource').text(data.source === 'rtkbase' ? 'RTKBase (Live)' : 'No Data');
+        } else {
+            $('#skyPlot').html('<div class="text-center text-muted p-5">No satellite data</div>');
+            $('#noSatelliteData').show();
+            $('#dataSource').text('No Data');
+        }
+    })
+    .catch(error => {
+        console.error('Error loading satellite data:', error);
+        $('#noSatelliteData').show();
+        $('#dataSource').text('Error');
+    });
+}
+
+// Render satellite sky plot
+function renderSkyPlot(satellites) {
+    const skyPlot = document.getElementById('skyPlot');
+    skyPlot.innerHTML = '';
+    
+    if (!satellites || satellites.length === 0) {
+        skyPlot.innerHTML = '<div class="text-center text-muted p-5">No satellites visible</div>';
+        return;
+    }
+    
+    const radius = skyPlot.offsetWidth / 2;
+    let satCount = 0;
+    
+    satellites.forEach(sat => {
+        // For now, we don't have elevation/azimuth, so distribute satellites in a circle
+        // TODO: Use real elevation/azimuth when available from RTKLIB
+        const elevation = sat.elevation || (30 + Math.random() * 50); // Mock elevation 30-80°
+        const azimuth = sat.azimuth || (satCount * (360 / satellites.length)); // Distribute evenly
+        
+        const marker = document.createElement('div');
+        
+        // Determine constellation color
+        let className = 'satellite-marker ';
+        const constellation = sat.constellation || 'unknown';
+        if (constellation === 'GPS') className += 'gps';
+        else if (constellation === 'GLONASS') className += 'glonass';
+        else if (constellation === 'Galileo') className += 'galileo';
+        else if (constellation === 'BeiDou') className += 'beidou';
+        
+        // Dim satellites with low SNR
+        if (sat.snr < 20) {
+            marker.style.opacity = '0.4';
+        }
+// Load position stats
+function loadPositionStats() {
+    fetch('/geomaxima/api/analytics/position-stats')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.stats) {
+            const stats = data.stats;
+            $('#satCount').text(stats.satellites_used || 0);
+            $('#fixType').text(stats.fix_type || 'Unknown');
+            $('#stdHorizontal').text(stats.std_horizontal ? stats.std_horizontal.toFixed(3) : '--');
+            $('#stdVertical').text(stats.std_vertical ? stats.std_vertical.toFixed(3) : '--');
+            $('#ageDiff').text(stats.age_of_differential ? stats.age_of_differential.toFixed(1) : '--');
+            
+            // Update status badge with color
+            const badge = $('#statusBadge');
+            badge.removeClass('badge-success badge-warning badge-danger badge-secondary');
+            
+            if (stats.fix_type === 'Fix') {
+                badge.addClass('badge-success');
+            } else if (stats.fix_type === 'Float' || stats.fix_type === 'DGPS') {
+                badge.addClass('badge-warning');
+            } else if (stats.fix_type === 'No Data' || stats.fix_type === 'Unknown') {
+                badge.addClass('badge-secondary');
+            } else {
+                badge.addClass('badge-danger');
+            }
+            badge.text(stats.fix_type);
+        }
+    })
+    .catch(error => console.error('Error loading position stats:', error));
+}       skyPlot.appendChild(marker);
+        satCount++;
+    });
+}
+
+// Update satellite table
+function updateSatelliteTable(satellites) {
+    const tbody = $('#satelliteTableBody');
+    tbody.empty();
+    
+    if (!satellites || satellites.length === 0) {
+        tbody.append('<tr><td colspan="4" class="text-center text-muted">No satellite data available</td></tr>');
+        return;
+    }
+    
+    // Sort by SNR descending
+    satellites.sort((a, b) => b.snr - a.snr);
+    
+    satellites.forEach(sat => {
+        const row = $('<tr>');
+        row.append(`<td><strong>${sat.prn}</strong></td>`);
+        row.append(`<td>${sat.constellation || 'Unknown'}</td>`);
+        
+        // Color-code SNR
+        let snrClass = '';
+        if (sat.snr >= 40) snrClass = 'text-success';
+        else if (sat.snr >= 30) snrClass = 'text-info';
+        else if (sat.snr >= 20) snrClass = 'text-warning';
+        else snrClass = 'text-danger';
+        
+        row.append(`<td class="${snrClass}">${sat.snr.toFixed(1)}</td>`);
+        
+        const status = sat.used ? 
+            '<span class="badge badge-success">Used</span>' : 
+            '<span class="badge badge-secondary">Visible</span>';
+        row.append(`<td>${status}</td>`);
+        
+        tbody.append(row);
+    });
+}
+
+// Load position stats
+function loadPositionStats() {
+    fetch('/geomaxima/api/analytics/position-stats')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            $('#satCount').text(data.stats.satellites_used);
+            $('#fixType').text(data.stats.fix_type);
+            $('#hdop').text(data.stats.hdop.toFixed(2));
+            $('#stdHorizontal').text((data.stats.std_horizontal * 1000).toFixed(1) + ' mm');
+        }
+    })
+    .catch(error => console.error('Error loading position stats:', error));
+}
+
+// Auto-refresh every 5 seconds
+setInterval(() => {
+    loadSatelliteData();
+    loadPositionStats();
+}, 5000);
+
+// Initial load
+$(document).ready(() => {
+    loadSatelliteData();
+    loadPositionStats();
+});
+</script>
+{% endblock %}

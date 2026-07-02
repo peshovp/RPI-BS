@@ -1,0 +1,70 @@
+# .gitignore for GeoMaxima
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Build output
+Output/
+*.zip
+*.tar.gz
+
+# Custom data directory (if you create one)
+data/
+
+# Backups
+*.bak
+backup/
+/var/tmp/geomaxima_backup_*/
+
+# Config overrides (keep config.py in git, but allow local overrides)
+config.local.py
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Local development files
+*.local.*
+.env
+
+# Release builds
+Output/
+*.zip
+htmlcov/
+
+# OS specific
+.DS_Store
+.Spotlight-V100
+.Trashes

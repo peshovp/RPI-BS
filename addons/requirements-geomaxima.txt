@@ -1,0 +1,10 @@
+# GeoMaxima Python Dependencies
+# Add your custom dependencies here
+
+# Example dependencies:
+# pandas==2.0.0
+# numpy==1.24.0
+# matplotlib==3.7.0
+
+# Note: Common dependencies like Flask, requests, etc. 
+# are already included in RTKBase requirements.txt
