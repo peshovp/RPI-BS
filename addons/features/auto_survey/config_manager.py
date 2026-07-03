@@ -8,6 +8,7 @@ Handles coordinate updates without disrupting other configuration parameters.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 import configparser
@@ -24,11 +25,16 @@ class ConfigManager:
     Updates antenna position while preserving all other settings.
     """
     
-    def __init__(self, settings_path: str = "/home/peshovp/rtkbase/settings.conf"):
+    def __init__(self, settings_path: str = None):
         """
         Args:
             settings_path: Path to RTKBase settings.conf
         """
+        if settings_path is None:
+            # Resolve rtkbase root the same way web_app/server.py does: relative
+            # to this file's location, not $HOME (this may run as root via systemd).
+            _rtkbase_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+            settings_path = os.path.join(_rtkbase_root, "settings.conf")
         self.settings_path = Path(settings_path)
         
         if not self.settings_path.exists():
