@@ -790,12 +790,21 @@ $(document).ready(function () {
     var autoSurveyDetailsElt = document.getElementById("auto-survey-details");
     var autoSurveyPollInterval = null;
 
+    function setAutoSurveyBadge(state) {
+        var el = document.getElementById("auto-survey-badge");
+        el.classList.remove("badge-success", "badge-warning", "badge-danger", "badge-secondary");
+        var badgeClass = { running: "badge-warning", completed: "badge-success", failed: "badge-danger", idle: "badge-secondary" }[state] || "badge-secondary";
+        el.classList.add(badgeClass);
+        el.textContent = state.charAt(0).toUpperCase() + state.slice(1);
+    }
+
     function autoSurveyResetToIdle() {
         if (autoSurveyPollInterval !== null) {
             clearInterval(autoSurveyPollInterval);
             autoSurveyPollInterval = null;
         }
         autoSurveyStatusTextElt.textContent = "Status: Idle";
+        setAutoSurveyBadge("idle");
         autoSurveyProgressBarElt.style.width = "0%";
         autoSurveyProgressBarElt.setAttribute("aria-valuenow", "0");
         autoSurveyProgressBarElt.textContent = "0%";
@@ -810,6 +819,7 @@ $(document).ready(function () {
             autoSurveyPollInterval = null;
         }
         autoSurveyStatusTextElt.textContent = "Status: Auto Survey-In feature unavailable";
+        setAutoSurveyBadge("idle");
         $(autoSurveyStartBtnElt).prop("disabled", true).hide();
         $(autoSurveyStopBtnElt).prop("disabled", true).hide();
     }
@@ -840,6 +850,7 @@ $(document).ready(function () {
 
                 if (state === "running") {
                     autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
+                    setAutoSurveyBadge("running");
                     $(autoSurveyStartBtnElt).prop("disabled", true).hide();
                     $(autoSurveyStopBtnElt).prop("disabled", false).show();
                     if (autoSurveyPollInterval === null) {
@@ -847,6 +858,7 @@ $(document).ready(function () {
                     }
                 } else if (state === "completed") {
                     autoSurveyStatusTextElt.textContent = "Status: Completed";
+                    setAutoSurveyBadge("completed");
                     $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
                     $(autoSurveyStopBtnElt).hide();
                     if (autoSurveyPollInterval !== null) {
@@ -859,6 +871,7 @@ $(document).ready(function () {
                     }
                 } else if (state === "failed") {
                     autoSurveyStatusTextElt.textContent = "Status: Failed - " + (status.last_failure_reason || "unknown error");
+                    setAutoSurveyBadge("failed");
                     $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
                     $(autoSurveyStopBtnElt).hide();
                     if (autoSurveyPollInterval !== null) {
@@ -867,6 +880,7 @@ $(document).ready(function () {
                     }
                 } else {
                     autoSurveyStatusTextElt.textContent = "Status: Idle";
+                    setAutoSurveyBadge("idle");
                     $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
                     $(autoSurveyStopBtnElt).hide();
                     if (autoSurveyPollInterval !== null) {
@@ -886,6 +900,7 @@ $(document).ready(function () {
             })
             .catch(function(err) {
                 autoSurveyStatusTextElt.textContent = "Status: Error polling status";
+                setAutoSurveyBadge("idle");
                 console.log("Auto Survey-In status poll failed: " + err);
             });
     }
@@ -906,6 +921,7 @@ $(document).ready(function () {
                 }
                 if (result.error) {
                     autoSurveyStatusTextElt.textContent = "Status: Error - " + result.error;
+                    setAutoSurveyBadge("idle");
                     $(autoSurveyStartBtnElt).prop("disabled", false).html("Start Survey");
                     return;
                 }
@@ -918,6 +934,7 @@ $(document).ready(function () {
             })
             .catch(function(err) {
                 autoSurveyStatusTextElt.textContent = "Status: Error starting survey";
+                setAutoSurveyBadge("idle");
                 $(autoSurveyStartBtnElt).prop("disabled", false).html("Start Survey");
                 console.log("Auto Survey-In start failed: " + err);
             });
@@ -942,6 +959,7 @@ $(document).ready(function () {
             })
             .catch(function(err) {
                 autoSurveyStatusTextElt.textContent = "Status: Error stopping survey";
+                setAutoSurveyBadge("idle");
                 $(autoSurveyStopBtnElt).prop("disabled", false).html("Stop Survey");
                 console.log("Auto Survey-In stop failed: " + err);
             });
