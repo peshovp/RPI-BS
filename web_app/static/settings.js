@@ -909,7 +909,11 @@ $(document).ready(function () {
     autoSurveySwitch.on("change", function(e) {
         var switchStatus = $(this).prop("checked");
         if (switchStatus) {
-            fetch("/api/auto_survey/start", { method: "POST" })
+            fetch("/api/auto_survey/start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ target_hours: parseInt($("#auto-survey-target-hours").val()) })
+            })
                 .then(function(response) {
                     if (response.status === 503) {
                         autoSurveyUnavailable();
@@ -961,6 +965,61 @@ $(document).ready(function () {
                 });
         }
     });
+
+    // ####################### AUTO SURVEY-IN OPTIONS: GEOID MODEL #######################
+
+    var autoSurveyGeoidCurrentElt = document.getElementById("auto-survey-geoid-current");
+    var autoSurveyGeoidFileElt = document.getElementById("auto-survey-geoid-file");
+    var autoSurveyGeoidUploadBtn = document.getElementById("auto-survey-geoid-upload-btn");
+    var autoSurveyGeoidUploadStatusElt = document.getElementById("auto-survey-geoid-upload-status");
+
+    function loadAutoSurveyGeoidStatus() {
+        fetch("/api/auto_survey/geoid")
+            .then(function(response) { return response.json(); })
+            .then(function(result) {
+                if (result && result.success && result.ggf_path) {
+                    autoSurveyGeoidCurrentElt.textContent = "Current model: " + result.ggf_path;
+                } else {
+                    autoSurveyGeoidCurrentElt.textContent = "No geoid model loaded";
+                }
+            })
+            .catch(function(err) {
+                autoSurveyGeoidCurrentElt.textContent = "Error loading geoid model status";
+                console.log("Auto Survey-In geoid status fetch failed: " + err);
+            });
+    }
+
+    autoSurveyGeoidUploadBtn.addEventListener("click", function() {
+        var file = autoSurveyGeoidFileElt.files[0];
+        if (!file) {
+            autoSurveyGeoidUploadStatusElt.textContent = "Please select a file first.";
+            autoSurveyGeoidUploadStatusElt.className = "small mt-1 text-danger";
+            return;
+        }
+        var formData = new FormData();
+        formData.append("file", file);
+        autoSurveyGeoidUploadStatusElt.textContent = "Uploading...";
+        autoSurveyGeoidUploadStatusElt.className = "small mt-1 text-muted";
+        fetch("/api/auto_survey/geoid/upload", { method: "POST", body: formData })
+            .then(function(response) { return response.json(); })
+            .then(function(result) {
+                if (result && result.success) {
+                    autoSurveyGeoidUploadStatusElt.textContent = "Upload successful.";
+                    autoSurveyGeoidUploadStatusElt.className = "small mt-1 text-success";
+                    loadAutoSurveyGeoidStatus();
+                } else {
+                    autoSurveyGeoidUploadStatusElt.textContent = "Error: " + ((result && result.error) || "Upload failed");
+                    autoSurveyGeoidUploadStatusElt.className = "small mt-1 text-danger";
+                }
+            })
+            .catch(function(err) {
+                autoSurveyGeoidUploadStatusElt.textContent = "Error uploading file";
+                autoSurveyGeoidUploadStatusElt.className = "small mt-1 text-danger";
+                console.log("Auto Survey-In geoid upload failed: " + err);
+            });
+    });
+
+    loadAutoSurveyGeoidStatus();
 
     // Show current state on page load (in case a survey is already running)
     pollAutoSurveyStatus();
