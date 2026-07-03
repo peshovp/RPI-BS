@@ -14,6 +14,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
+import os
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,8 @@ class StateManager:
             state_file: Path to state persistence file
         """
         self.state_file = Path(state_file)
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+        self.state_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         
         self._state: Dict[str, Any] = self._load_state()
     
@@ -140,6 +142,10 @@ class StateManager:
             
             with open(self.state_file, 'w') as f:
                 json.dump(state_converted, f, indent=2)
+            
+            # Set explicit permissions: owner read/write only (0o600)
+            os.chmod(self.state_file, 0o600)
+            
             return True
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
@@ -359,3 +365,4 @@ class StateManager:
                 return elapsed_hours < (self._state['target_hours'] + 1)
         
         return False
+
