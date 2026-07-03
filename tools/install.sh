@@ -182,13 +182,15 @@ install_rtklib() {
         && lsb_release -c | grep -qE 'bookworm|trixie' \
         && "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/str2str --version > /dev/null 2>&1 \
         && "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/convbin --version > /dev/null 2>&1 \
-        && "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rtkrcv --version > /dev/null 2>&1
+        && "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rtkrcv --version > /dev/null 2>&1 \
+        && "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rnx2rtkp --version > /dev/null 2>&1
 
     then
       echo 'Copying new rtklib binary for ' "${computer_model}" ' - ' "${arch_package}"
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/str2str /usr/local/bin/
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rtkrcv /usr/local/bin/
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/convbin /usr/local/bin/
+      cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rnx2rtkp /usr/local/bin/
     else
       echo 'No binary available for ' "${computer_model}" ' - ' "${arch_package}" '. We will build it from source'
       _compil_rtklib
@@ -210,6 +212,8 @@ _compil_rtklib() {
     make --directory="${TMPDIR}"/"${RTKLIB_RELEASE}"/app/consapp/rtkrcv/gcc install
     make --directory="${TMPDIR}"/"${RTKLIB_RELEASE}"/app/consapp/convbin/gcc
     make --directory="${TMPDIR}"/"${RTKLIB_RELEASE}"/app/consapp/convbin/gcc install
+    make --directory="${TMPDIR}"/"${RTKLIB_RELEASE}"/app/consapp/rnx2rtkp/gcc
+    make --directory="${TMPDIR}"/"${RTKLIB_RELEASE}"/app/consapp/rnx2rtkp/gcc install
     #deleting RTKLIB
     rm -rf "${TMPDIR}"/"${RTKLIB_RELEASE}"/
 }
