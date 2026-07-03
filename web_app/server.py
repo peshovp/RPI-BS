@@ -72,6 +72,7 @@ import socket
 from werkzeug.security import generate_password_hash
 from werkzeug.security import check_password_hash
 from werkzeug.utils import safe_join
+from pathlib import Path
 import gunicorn.app.base
 
 app = Flask(__name__)
@@ -503,12 +504,20 @@ def get_survey_controller():
 @app.route('/api/auto_survey/start', methods=['POST'])
 @login_required
 def auto_survey_start():
-    """Start the Auto Survey-In process"""
+    """Start the Auto Survey-In process with optional target_hours"""
     try:
         if SurveyController is None:
             return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        data = request.get_json(silent=True) or {}
+        target_hours = data.get('target_hours', 24)
+        try:
+            target_hours = int(target_hours)
+            if not (1 <= target_hours <= 168):
+                return jsonify({"error": "target_hours must be between 1 and 168"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "target_hours must be a valid integer"}), 400
         controller = get_survey_controller()
-        started = controller.start_survey()
+        started = controller.start_survey(target_hours=target_hours)
         if started:
             return jsonify({"status": "started"})
         else:
@@ -541,6 +550,62 @@ def auto_survey_status():
         return jsonify(status)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auto_survey/geoid', methods=['GET'])
+@login_required
+def auto_survey_geoid_status():
+    """Return current geoid model status"""
+    try:
+        controller = get_survey_controller()
+        cfg_path = controller.geoid_config_path
+        ggf = None
+        if cfg_path.exists():
+            import json
+            with open(cfg_path, 'r') as f:
+                data = json.load(f)
+            ggf = data.get('ggf_path')
+        return jsonify({'success': True, 'ggf_path': ggf})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auto_survey/geoid/upload', methods=['POST'])
+@login_required
+def auto_survey_geoid_upload():
+    """Upload GGF geoid file and activate it"""
+    try:
+        controller = get_survey_controller()
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file provided'}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'Empty filename'}), 400
+        filename = Path(file.filename).name
+        suffix = Path(filename).suffix.lower()
+        allowed_ext = {'.bin', '.ggf'}
+        allowed_mime = {'application/octet-stream', 'binary/octet-stream', 'application/x-binary'}
+        max_size = 5 * 1024 * 1024
+        if suffix not in allowed_ext:
+            return jsonify({'success': False, 'error': 'Invalid file type; must be .bin or .ggf'}), 400
+        try:
+            file.stream.seek(0, 2)
+            size = file.stream.tell()
+            file.stream.seek(0)
+        except Exception:
+            size = None
+        if size is not None and size > max_size:
+            return jsonify({'success': False, 'error': 'File too large; max 5 MiB'}), 400
+        mimetype = (file.mimetype or '').lower()
+        if mimetype and mimetype not in allowed_mime:
+            return jsonify({'success': False, 'error': 'Invalid MIME type'}), 400
+        dest_dir = controller.geoid_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / filename
+        file.save(dest_path)
+        if controller.set_geoid_model(dest_path):
+            return jsonify({'success': True, 'ggf_path': str(dest_path)})
+        return jsonify({'success': False, 'error': controller.geoid.last_error or 'Failed to load geoid model'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/logs')
 @login_required
