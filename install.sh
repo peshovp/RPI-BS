@@ -117,6 +117,7 @@ if [ ! -L "rtkbase" ]; then
 fi
 
 chmod +x tools/install.sh tools/copy_unit.sh 2>/dev/null || true
+chmod +x tools/install_polkit_rules.sh 2>/dev/null || true
 
 # Force an absolute rtkbase_path in the environment: in the git-pull branch of
 # tools/install.sh (taken here, since the "rtkbase" symlink already has a
