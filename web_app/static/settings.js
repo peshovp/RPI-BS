@@ -785,9 +785,9 @@ $(document).ready(function () {
 
     var autoSurveyStatusTextElt = document.getElementById("auto-survey-status-text");
     var autoSurveyProgressBarElt = document.getElementById("auto-survey-progress-bar");
-    var autoSurveyStartBtnElt = document.getElementById("auto-survey-start-btn");
-    var autoSurveyStopBtnElt = document.getElementById("auto-survey-stop-btn");
     var autoSurveyDetailsElt = document.getElementById("auto-survey-details");
+    var autoSurveyCardRowElt = document.getElementById("auto_survey_card_row");
+    var autoSurveySwitch = $("#auto-survey-switch");
     var autoSurveyPollInterval = null;
 
     function setAutoSurveyBadge(state) {
@@ -809,8 +809,8 @@ $(document).ready(function () {
         autoSurveyProgressBarElt.setAttribute("aria-valuenow", "0");
         autoSurveyProgressBarElt.textContent = "0%";
         autoSurveyDetailsElt.textContent = "";
-        $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
-        $(autoSurveyStopBtnElt).hide();
+        autoSurveySwitch.bootstrapToggle("off", true);
+        $(autoSurveyCardRowElt).hide();
     }
 
     function autoSurveyUnavailable() {
@@ -820,8 +820,9 @@ $(document).ready(function () {
         }
         autoSurveyStatusTextElt.textContent = "Status: Auto Survey-In feature unavailable";
         setAutoSurveyBadge("idle");
-        $(autoSurveyStartBtnElt).prop("disabled", true).hide();
-        $(autoSurveyStopBtnElt).prop("disabled", true).hide();
+        autoSurveySwitch.bootstrapToggle("off", true);
+        autoSurveySwitch.bootstrapToggle("disable");
+        $(autoSurveyCardRowElt).hide();
     }
 
     function pollAutoSurveyStatus() {
@@ -851,16 +852,16 @@ $(document).ready(function () {
                 if (state === "running") {
                     autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
                     setAutoSurveyBadge("running");
-                    $(autoSurveyStartBtnElt).prop("disabled", true).hide();
-                    $(autoSurveyStopBtnElt).prop("disabled", false).show();
+                    autoSurveySwitch.bootstrapToggle("on", true);
+                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval === null) {
                         autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
                     }
                 } else if (state === "completed") {
                     autoSurveyStatusTextElt.textContent = "Status: Completed";
                     setAutoSurveyBadge("completed");
-                    $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
-                    $(autoSurveyStopBtnElt).hide();
+                    autoSurveySwitch.bootstrapToggle("off", true);
+                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval !== null) {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
@@ -872,8 +873,8 @@ $(document).ready(function () {
                 } else if (state === "failed") {
                     autoSurveyStatusTextElt.textContent = "Status: Failed - " + (status.last_failure_reason || "unknown error");
                     setAutoSurveyBadge("failed");
-                    $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
-                    $(autoSurveyStopBtnElt).hide();
+                    autoSurveySwitch.bootstrapToggle("off", true);
+                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval !== null) {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
@@ -881,8 +882,8 @@ $(document).ready(function () {
                 } else {
                     autoSurveyStatusTextElt.textContent = "Status: Idle";
                     setAutoSurveyBadge("idle");
-                    $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
-                    $(autoSurveyStopBtnElt).hide();
+                    autoSurveySwitch.bootstrapToggle("off", true);
+                    $(autoSurveyCardRowElt).hide();
                     if (autoSurveyPollInterval !== null) {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
@@ -905,65 +906,61 @@ $(document).ready(function () {
             });
     }
 
-    autoSurveyStartBtnElt.onclick = function() {
-        $(autoSurveyStartBtnElt).prop("disabled", true).html('<span class="spinner-border spinner-border-sm"></span> Starting...');
-        fetch("/api/auto_survey/start", { method: "POST" })
-            .then(function(response) {
-                if (response.status === 503) {
-                    autoSurveyUnavailable();
-                    return null;
-                }
-                return response.json();
-            })
-            .then(function(result) {
-                if (!result) {
-                    return;
-                }
-                if (result.error) {
-                    autoSurveyStatusTextElt.textContent = "Status: Error - " + result.error;
+    autoSurveySwitch.on("change", function(e) {
+        var switchStatus = $(this).prop("checked");
+        if (switchStatus) {
+            fetch("/api/auto_survey/start", { method: "POST" })
+                .then(function(response) {
+                    if (response.status === 503) {
+                        autoSurveyUnavailable();
+                        return null;
+                    }
+                    return response.json();
+                })
+                .then(function(result) {
+                    if (!result) {
+                        return;
+                    }
+                    if (result.error) {
+                        autoSurveyStatusTextElt.textContent = "Status: Error - " + result.error;
+                        setAutoSurveyBadge("idle");
+                        autoSurveySwitch.bootstrapToggle("off", true);
+                        return;
+                    }
+                    $(autoSurveyCardRowElt).show();
+                    if (autoSurveyPollInterval === null) {
+                        autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
+                    }
+                    pollAutoSurveyStatus();
+                })
+                .catch(function(err) {
+                    autoSurveyStatusTextElt.textContent = "Status: Error starting survey";
                     setAutoSurveyBadge("idle");
-                    $(autoSurveyStartBtnElt).prop("disabled", false).html("Start Survey");
-                    return;
-                }
-                $(autoSurveyStartBtnElt).hide();
-                $(autoSurveyStopBtnElt).prop("disabled", false).show();
-                if (autoSurveyPollInterval === null) {
-                    autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
-                }
-                pollAutoSurveyStatus();
-            })
-            .catch(function(err) {
-                autoSurveyStatusTextElt.textContent = "Status: Error starting survey";
-                setAutoSurveyBadge("idle");
-                $(autoSurveyStartBtnElt).prop("disabled", false).html("Start Survey");
-                console.log("Auto Survey-In start failed: " + err);
-            });
-    };
-
-    autoSurveyStopBtnElt.onclick = function() {
-        $(autoSurveyStopBtnElt).prop("disabled", true).html('<span class="spinner-border spinner-border-sm"></span> Stopping...');
-        fetch("/api/auto_survey/stop", { method: "POST" })
-            .then(function(response) {
-                if (response.status === 503) {
-                    autoSurveyUnavailable();
-                    return null;
-                }
-                return response.json();
-            })
-            .then(function(result) {
-                if (!result) {
-                    return;
-                }
-                $(autoSurveyStopBtnElt).html("Stop Survey");
-                autoSurveyResetToIdle();
-            })
-            .catch(function(err) {
-                autoSurveyStatusTextElt.textContent = "Status: Error stopping survey";
-                setAutoSurveyBadge("idle");
-                $(autoSurveyStopBtnElt).prop("disabled", false).html("Stop Survey");
-                console.log("Auto Survey-In stop failed: " + err);
-            });
-    };
+                    autoSurveySwitch.bootstrapToggle("off", true);
+                    console.log("Auto Survey-In start failed: " + err);
+                });
+        } else {
+            fetch("/api/auto_survey/stop", { method: "POST" })
+                .then(function(response) {
+                    if (response.status === 503) {
+                        autoSurveyUnavailable();
+                        return null;
+                    }
+                    return response.json();
+                })
+                .then(function(result) {
+                    if (!result) {
+                        return;
+                    }
+                    autoSurveyResetToIdle();
+                })
+                .catch(function(err) {
+                    autoSurveyStatusTextElt.textContent = "Status: Error stopping survey";
+                    setAutoSurveyBadge("idle");
+                    console.log("Auto Survey-In stop failed: " + err);
+                });
+        }
+    });
 
     // Show current state on page load (in case a survey is already running)
     pollAutoSurveyStatus();

@@ -570,6 +570,7 @@
   <div id="auto_survey_space" class="form-group row">
     <div class="col">
       <label class="col-4 col-form-label col-form-label-lg">Auto Survey-In</label>
+      <input id="auto-survey-switch" type="checkbox" data-toggle="toggle" data-onstyle="warning" data-offstyle="outline-secondary">
       <a data-toggle="tooltip" id="auto_survey_tooltip" title="Automatically determines the precise base station coordinates over a long observation period (up to 24h), using SPP positioning on the recorded raw GNSS data.">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#6c757d" class="bi bi-info-circle" viewBox="0 0 16 16">
           <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -578,7 +579,7 @@
       </a>
     </div>
   </div>
-  <div class="form-group row" style="margin-top: -0.5rem;">
+  <div id="auto_survey_card_row" class="form-group row" style="margin-top: -0.5rem; display: none;">
     <div class="col-sm-9 offset-sm-3">
       <div class="card card-body p-3">
         <div class="d-flex justify-content-between align-items-center mb-2">
@@ -587,10 +588,6 @@
         </div>
         <div class="progress mb-2" style="height: 20px;">
           <div id="auto-survey-progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
-        </div>
-        <div class="d-flex align-items-center">
-          <button id="auto-survey-start-btn" class="btn btn-primary" type="button">Start Survey</button>
-          <button id="auto-survey-stop-btn" class="btn btn-danger ml-2" type="button" hidden>Stop Survey</button>
         </div>
         <div id="auto-survey-details" class="text-muted mt-2 small"></div>
       </div>
