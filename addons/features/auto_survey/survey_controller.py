@@ -47,7 +47,7 @@ class SurveyController:
     """
     
     def __init__(self,
-                 settings_file: str = "/home/peshovp/rtkbase/settings.conf",
+                 settings_file: str = None,
                  state_file: str = "/var/lib/rtkbase/survey_state.json",
                  auto_mode: bool = True):
         """
@@ -57,7 +57,13 @@ class SurveyController:
             auto_mode: Enable automatic RTKBase integration
         """
         self.auto_mode = auto_mode
-        
+
+        if settings_file is None:
+            # Resolve rtkbase root the same way web_app/server.py does: relative
+            # to this file's location, not $HOME (this may run as root via systemd).
+            _rtkbase_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+            settings_file = os.path.join(_rtkbase_root, "settings.conf")
+
         # Initialize RTKBase config parser
         try:
             self.rtkbase = RTKBaseConfig(settings_file)
