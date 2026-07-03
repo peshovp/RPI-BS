@@ -781,5 +781,174 @@ $(document).ready(function () {
         socket.emit("shutdown device");
     })
 
+    // ####################### HANDLE AUTO SURVEY-IN #######################
+
+    var autoSurveyStatusTextElt = document.getElementById("auto-survey-status-text");
+    var autoSurveyProgressBarElt = document.getElementById("auto-survey-progress-bar");
+    var autoSurveyStartBtnElt = document.getElementById("auto-survey-start-btn");
+    var autoSurveyStopBtnElt = document.getElementById("auto-survey-stop-btn");
+    var autoSurveyDetailsElt = document.getElementById("auto-survey-details");
+    var autoSurveyPollInterval = null;
+
+    function autoSurveyResetToIdle() {
+        if (autoSurveyPollInterval !== null) {
+            clearInterval(autoSurveyPollInterval);
+            autoSurveyPollInterval = null;
+        }
+        autoSurveyStatusTextElt.textContent = "Status: Idle";
+        autoSurveyProgressBarElt.style.width = "0%";
+        autoSurveyProgressBarElt.setAttribute("aria-valuenow", "0");
+        autoSurveyProgressBarElt.textContent = "0%";
+        autoSurveyDetailsElt.textContent = "";
+        $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
+        $(autoSurveyStopBtnElt).hide();
+    }
+
+    function autoSurveyUnavailable() {
+        if (autoSurveyPollInterval !== null) {
+            clearInterval(autoSurveyPollInterval);
+            autoSurveyPollInterval = null;
+        }
+        autoSurveyStatusTextElt.textContent = "Status: Auto Survey-In feature unavailable";
+        $(autoSurveyStartBtnElt).prop("disabled", true).hide();
+        $(autoSurveyStopBtnElt).prop("disabled", true).hide();
+    }
+
+    function pollAutoSurveyStatus() {
+        fetch("/api/auto_survey/status")
+            .then(function(response) {
+                if (response.status === 503) {
+                    autoSurveyUnavailable();
+                    return null;
+                }
+                return response.json();
+            })
+            .then(function(status) {
+                if (!status) {
+                    return;
+                }
+                if (status.error) {
+                    autoSurveyStatusTextElt.textContent = "Status: Error - " + status.error;
+                    return;
+                }
+
+                var state = status.survey_state || "idle";
+                var numEpochs = status.num_epochs || 0;
+                var targetHours = status.target_hours || 24;
+                var targetEpochs = targetHours * 3600;
+                var percent = targetEpochs > 0 ? Math.min(100, Math.round((numEpochs / targetEpochs) * 100)) : 0;
+
+                if (state === "running") {
+                    autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
+                    $(autoSurveyStartBtnElt).prop("disabled", true).hide();
+                    $(autoSurveyStopBtnElt).prop("disabled", false).show();
+                    if (autoSurveyPollInterval === null) {
+                        autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
+                    }
+                } else if (state === "completed") {
+                    autoSurveyStatusTextElt.textContent = "Status: Completed";
+                    $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
+                    $(autoSurveyStopBtnElt).hide();
+                    if (autoSurveyPollInterval !== null) {
+                        clearInterval(autoSurveyPollInterval);
+                        autoSurveyPollInterval = null;
+                    }
+                    var finalPos = status.applied_position || status.current_position;
+                    if (finalPos) {
+                        autoSurveyDetailsElt.textContent = "Final position: " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
+                    }
+                } else if (state === "failed") {
+                    autoSurveyStatusTextElt.textContent = "Status: Failed - " + (status.last_failure_reason || "unknown error");
+                    $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
+                    $(autoSurveyStopBtnElt).hide();
+                    if (autoSurveyPollInterval !== null) {
+                        clearInterval(autoSurveyPollInterval);
+                        autoSurveyPollInterval = null;
+                    }
+                } else {
+                    autoSurveyStatusTextElt.textContent = "Status: Idle";
+                    $(autoSurveyStartBtnElt).html("Start Survey").prop("disabled", false).show();
+                    $(autoSurveyStopBtnElt).hide();
+                    if (autoSurveyPollInterval !== null) {
+                        clearInterval(autoSurveyPollInterval);
+                        autoSurveyPollInterval = null;
+                    }
+                }
+
+                autoSurveyProgressBarElt.style.width = percent + "%";
+                autoSurveyProgressBarElt.setAttribute("aria-valuenow", percent);
+                autoSurveyProgressBarElt.textContent = percent + "%";
+
+                if (status.start_time && (state === "running" || state === "completed")) {
+                    var elapsedMs = Date.now() - new Date(status.start_time).getTime();
+                    autoSurveyDetailsElt.textContent = (autoSurveyDetailsElt.textContent ? autoSurveyDetailsElt.textContent + " - " : "") + "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+                }
+            })
+            .catch(function(err) {
+                autoSurveyStatusTextElt.textContent = "Status: Error polling status";
+                console.log("Auto Survey-In status poll failed: " + err);
+            });
+    }
+
+    autoSurveyStartBtnElt.onclick = function() {
+        $(autoSurveyStartBtnElt).prop("disabled", true).html('<span class="spinner-border spinner-border-sm"></span> Starting...');
+        fetch("/api/auto_survey/start", { method: "POST" })
+            .then(function(response) {
+                if (response.status === 503) {
+                    autoSurveyUnavailable();
+                    return null;
+                }
+                return response.json();
+            })
+            .then(function(result) {
+                if (!result) {
+                    return;
+                }
+                if (result.error) {
+                    autoSurveyStatusTextElt.textContent = "Status: Error - " + result.error;
+                    $(autoSurveyStartBtnElt).prop("disabled", false).html("Start Survey");
+                    return;
+                }
+                $(autoSurveyStartBtnElt).hide();
+                $(autoSurveyStopBtnElt).prop("disabled", false).show();
+                if (autoSurveyPollInterval === null) {
+                    autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
+                }
+                pollAutoSurveyStatus();
+            })
+            .catch(function(err) {
+                autoSurveyStatusTextElt.textContent = "Status: Error starting survey";
+                $(autoSurveyStartBtnElt).prop("disabled", false).html("Start Survey");
+                console.log("Auto Survey-In start failed: " + err);
+            });
+    };
+
+    autoSurveyStopBtnElt.onclick = function() {
+        $(autoSurveyStopBtnElt).prop("disabled", true).html('<span class="spinner-border spinner-border-sm"></span> Stopping...');
+        fetch("/api/auto_survey/stop", { method: "POST" })
+            .then(function(response) {
+                if (response.status === 503) {
+                    autoSurveyUnavailable();
+                    return null;
+                }
+                return response.json();
+            })
+            .then(function(result) {
+                if (!result) {
+                    return;
+                }
+                $(autoSurveyStopBtnElt).html("Stop Survey");
+                autoSurveyResetToIdle();
+            })
+            .catch(function(err) {
+                autoSurveyStatusTextElt.textContent = "Status: Error stopping survey";
+                $(autoSurveyStopBtnElt).prop("disabled", false).html("Stop Survey");
+                console.log("Auto Survey-In stop failed: " + err);
+            });
+    };
+
+    // Show current state on page load (in case a survey is already running)
+    pollAutoSurveyStatus();
+
     // end of document.ready
 });
