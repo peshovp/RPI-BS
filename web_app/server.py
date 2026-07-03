@@ -57,7 +57,7 @@ import network_infos
 from flask_bootstrap import Bootstrap4
 from flask import Flask, render_template, session, request, flash, url_for
 from flask import send_from_directory, redirect, abort
-from flask import g
+from flask import g, jsonify
 from flask_wtf import FlaskForm
 from wtforms import PasswordField, BooleanField, SubmitField
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user, UserMixin
@@ -85,6 +85,13 @@ app.config['UPLOAD_EXTENSIONS'] = ['.conf', '.txt', 'ini']
 
 rtkbase_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
 path_to_rtklib = "/usr/local/bin" #TODO find path with which or another tool
+
+sys.path.insert(0, rtkbase_path)
+try:
+    from addons.features.auto_survey.survey_controller import SurveyController
+except ImportError as e:
+    print(f"Auto Survey-In feature unavailable (addons import failed): {e}")
+    SurveyController = None
 
 login=LoginManager(app)
 login.login_view = 'login_page'
@@ -481,6 +488,59 @@ def settings_page():
                                             file_settings = file_settings,
                                             wireguard_settings = wireguard_settings,
                                             os_infos = distro.info(),)
+
+#### Auto Survey-In ####
+
+_survey_controller = None
+
+def get_survey_controller():
+    """Lazily instantiate the singleton SurveyController"""
+    global _survey_controller
+    if _survey_controller is None:
+        _survey_controller = SurveyController()
+    return _survey_controller
+
+@app.route('/api/auto_survey/start', methods=['POST'])
+@login_required
+def auto_survey_start():
+    """Start the Auto Survey-In process"""
+    try:
+        if SurveyController is None:
+            return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        controller = get_survey_controller()
+        started = controller.start_survey()
+        if started:
+            return jsonify({"status": "started"})
+        else:
+            return jsonify({"error": "Survey could not be started (already running?)"}), 409
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auto_survey/stop', methods=['POST'])
+@login_required
+def auto_survey_stop():
+    """Stop the Auto Survey-In process"""
+    try:
+        if SurveyController is None:
+            return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        controller = get_survey_controller()
+        controller.stop_survey()
+        return jsonify({"status": "stopped"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auto_survey/status', methods=['GET'])
+@login_required
+def auto_survey_status():
+    """Get current Auto Survey-In progress/status"""
+    try:
+        if SurveyController is None:
+            return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        controller = get_survey_controller()
+        status = controller.get_status()
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/logs')
 @login_required
