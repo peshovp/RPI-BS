@@ -127,6 +127,11 @@ chmod +x tools/install_polkit_rules.sh 2>/dev/null || true
 # path instead, without touching the upstream script.
 export rtkbase_path="$(pwd)/rtkbase"
 
+# Defensive chmod: ensure the precompiled RTKLIB binaries for this architecture
+# keep their executable bit regardless of git's tracked file mode (e.g. after a
+# fresh clone/pull where the mode may have been stored as non-executable).
+chmod +x tools/bin/RTKLIB-2.5.0/aarch64/str2str tools/bin/RTKLIB-2.5.0/aarch64/rtkrcv tools/bin/RTKLIB-2.5.0/aarch64/convbin tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp 2>/dev/null || true
+
 ./tools/install.sh --all repo --rtkbase-repo main --user "${SUDO_USER:-$USER}" --start-services
 
 # --- 4. Final checklist ---
