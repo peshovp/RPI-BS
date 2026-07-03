@@ -603,7 +603,9 @@ def auto_survey_geoid_upload():
         file.save(dest_path)
         if controller.set_geoid_model(dest_path):
             return jsonify({'success': True, 'ggf_path': str(dest_path)})
-        return jsonify({'success': False, 'error': controller.geoid.last_error or 'Failed to load geoid model'}), 500
+        error = controller.geoid.last_error or 'Failed to load geoid model'
+        dest_path.unlink(missing_ok=True)
+        return jsonify({'success': False, 'error': error}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

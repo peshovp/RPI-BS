@@ -12,6 +12,7 @@ Supports EGM96/EGM2008 .ggf grid files (RTKLIB format).
 """
 
 import logging
+import os
 import struct
 from typing import Optional, Tuple
 from dataclasses import dataclass
@@ -100,9 +101,22 @@ class GeoidCorrector:
                     return False
                 
                 logger.info(f"Geoid grid: {nlat}x{nlon}, spacing: {dlat}°x{dlon}°")
-                
+
                 # Read grid data (float32 values)
                 grid_size = nlat * nlon
+                expected_data_bytes = grid_size * 4
+                header_bytes = f.tell()
+                file_size = os.fstat(f.fileno()).st_size
+                remaining_bytes = file_size - header_bytes
+                if remaining_bytes <= 0 or expected_data_bytes > remaining_bytes * 2:
+                    msg = (
+                        f"GGF header declares {nlat}x{nlon} grid "
+                        f"({expected_data_bytes} bytes needed) but file only has "
+                        f"{remaining_bytes} bytes remaining; refusing to allocate"
+                    )
+                    logger.error(msg)
+                    self.last_error = msg
+                    return False
                 data = np.fromfile(f, dtype='<f4', count=grid_size)
                 if data.size < grid_size:
                     msg = f"Incomplete grid data: expected {grid_size} floats, got {data.size}"
