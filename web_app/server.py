@@ -508,6 +508,9 @@ def auto_survey_start():
     try:
         if SurveyController is None:
             return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        receiver = rtkbaseconfig.get('main', 'receiver').strip("'")
+        if receiver == 'unknown':
+            return jsonify({"error": "No GNSS receiver detected. Configure or connect a receiver before starting Auto Survey-In."}), 400
         data = request.get_json(silent=True) or {}
         target_hours = data.get('target_hours', 24)
         try:
