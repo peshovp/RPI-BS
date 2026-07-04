@@ -401,7 +401,7 @@ class SurveyController:
                             f"(timeout={self.update_timeout_minutes}): {reason}"
                         )
                         logger.error(msg)
-                        self.state.fail_survey(msg)
+                        self._fail(msg)
                         self._running = False
                         break
                 except Exception as timeout_err:
@@ -439,7 +439,7 @@ class SurveyController:
                 
         except Exception as e:
             logger.error(f"Survey loop error: {e}", exc_info=True)
-            self.state.fail_survey(str(e))
+            self._fail(str(e))
             self._running = False
     
     def _perform_interim_update(self, elapsed_hours: float):
@@ -686,12 +686,12 @@ class SurveyController:
                     self._stop_file_logging()
             else:
                 logger.error("No position available for finalization")
-                self.state.fail_survey("No final position computed")
-        
+                self._fail("No final position computed")
+
         except Exception as e:
             logger.error(f"Finalization failed: {e}", exc_info=True)
             self._services_restarted = False
-            self.state.fail_survey(str(e))
+            self._fail(str(e))
         
         finally:
             self._running = False
@@ -766,6 +766,14 @@ class SurveyController:
             logger.error(f"Failed to set geoid model: {e}")
             return False
     
+    def _fail(self, reason: str):
+        """Mark survey as failed and ensure file logging is stopped (prevents orphaned File Service / disk fill)."""
+        try:
+            self._stop_file_logging()
+        except Exception as e:
+            logger.error(f"Failed to stop file logging during failure handling: {e}")
+        self.state.fail_survey(reason)
+
     def recover_survey(self) -> bool:
         """
         Attempt to recover survey after restart
