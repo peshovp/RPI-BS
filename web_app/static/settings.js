@@ -786,7 +786,6 @@ $(document).ready(function () {
     var autoSurveyStatusTextElt = document.getElementById("auto-survey-status-text");
     var autoSurveyProgressBarElt = document.getElementById("auto-survey-progress-bar");
     var autoSurveyDetailsElt = document.getElementById("auto-survey-details");
-    var autoSurveyCardRowElt = document.getElementById("auto_survey_card_row");
     var autoSurveySwitch = $("#auto-survey-switch");
     var autoSurveyPollInterval = null;
 
@@ -810,7 +809,6 @@ $(document).ready(function () {
         autoSurveyProgressBarElt.textContent = "0%";
         autoSurveyDetailsElt.textContent = "";
         autoSurveySwitch.bootstrapToggle("off", true);
-        $(autoSurveyCardRowElt).hide();
     }
 
     function autoSurveyUnavailable() {
@@ -822,7 +820,6 @@ $(document).ready(function () {
         setAutoSurveyBadge("idle");
         autoSurveySwitch.bootstrapToggle("off", true);
         autoSurveySwitch.bootstrapToggle("disable");
-        $(autoSurveyCardRowElt).hide();
     }
 
     function pollAutoSurveyStatus() {
@@ -853,7 +850,6 @@ $(document).ready(function () {
                     autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
                     setAutoSurveyBadge("running");
                     autoSurveySwitch.bootstrapToggle("on", true);
-                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval === null) {
                         autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
                     }
@@ -861,7 +857,6 @@ $(document).ready(function () {
                     autoSurveyStatusTextElt.textContent = "Status: Completed";
                     setAutoSurveyBadge("completed");
                     autoSurveySwitch.bootstrapToggle("off", true);
-                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval !== null) {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
@@ -874,7 +869,6 @@ $(document).ready(function () {
                     autoSurveyStatusTextElt.textContent = "Status: Failed - " + (status.last_failure_reason || "unknown error");
                     setAutoSurveyBadge("failed");
                     autoSurveySwitch.bootstrapToggle("off", true);
-                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval !== null) {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
@@ -883,7 +877,6 @@ $(document).ready(function () {
                     autoSurveyStatusTextElt.textContent = "Status: Idle";
                     setAutoSurveyBadge("idle");
                     autoSurveySwitch.bootstrapToggle("off", true);
-                    $(autoSurveyCardRowElt).hide();
                     if (autoSurveyPollInterval !== null) {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
@@ -931,7 +924,6 @@ $(document).ready(function () {
                         autoSurveySwitch.bootstrapToggle("off", true);
                         return;
                     }
-                    $(autoSurveyCardRowElt).show();
                     if (autoSurveyPollInterval === null) {
                         autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
                     }
