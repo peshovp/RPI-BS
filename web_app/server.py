@@ -499,6 +499,10 @@ def get_survey_controller():
     global _survey_controller
     if _survey_controller is None:
         _survey_controller = SurveyController()
+        try:
+            _survey_controller.recover_survey()
+        except Exception as e:
+            print(f"Auto Survey-In recovery failed: {e}")
     return _survey_controller
 
 @app.route('/api/auto_survey/start', methods=['POST'])
