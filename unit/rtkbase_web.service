@@ -6,6 +6,7 @@ Description=RTKBase Web Server
 [Service]
 User=root
 SyslogIdentifier=rtkbase_web
+WorkingDirectory={script_path}
 ExecStart={python_path} {script_path}/web_app/server.py
 Restart=on-failure
 RestartSec=30
