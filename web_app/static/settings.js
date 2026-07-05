@@ -862,9 +862,6 @@ $(document).ready(function () {
                         autoSurveyPollInterval = null;
                     }
                     var finalPos = status.applied_position || status.current_position;
-                    if (finalPos) {
-                        autoSurveyDetailsElt.textContent = "Final position: " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
-                    }
                 } else if (state === "failed") {
                     autoSurveyStatusTextElt.textContent = "Status: Failed - " + (status.last_failure_reason || "unknown error");
                     setAutoSurveyBadge("failed");
@@ -887,9 +884,16 @@ $(document).ready(function () {
                 autoSurveyProgressBarElt.setAttribute("aria-valuenow", percent);
                 autoSurveyProgressBarElt.textContent = percent + "%";
 
-                if (status.start_time && (state === "running" || state === "completed")) {
+                if (state === "completed" && finalPos) {
+                    var detailsText = "Final position: " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
+                    if (status.start_time) {
+                        var elapsedMs = Date.now() - new Date(status.start_time).getTime();
+                        detailsText += " - Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+                    }
+                    autoSurveyDetailsElt.textContent = detailsText;
+                } else if (status.start_time && state === "running") {
                     var elapsedMs = Date.now() - new Date(status.start_time).getTime();
-                    autoSurveyDetailsElt.textContent = (autoSurveyDetailsElt.textContent ? autoSurveyDetailsElt.textContent + " - " : "") + "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+                    autoSurveyDetailsElt.textContent = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
                 }
             })
             .catch(function(err) {
