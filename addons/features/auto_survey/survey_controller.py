@@ -785,10 +785,25 @@ class SurveyController:
             logger.info("No recoverable survey found")
             return False
 
-        receiver = self.rtkbase.config.get('main', 'receiver', fallback='unknown').strip("'")
-        if receiver == 'unknown':
-            logger.warning("Cannot recover survey: no GNSS receiver detected")
-            self._fail("No GNSS receiver detected during recovery")
+        saved_input_type = self.rtkbase.config.get('main', 'receiver_format', fallback='').strip("'")
+        try:
+            main_service_active = subprocess.run(
+                ['systemctl', 'is-active', 'str2str_tcp.service'],
+                capture_output=True,
+                text=True
+            ).returncode == 0
+        except Exception as e:
+            logger.warning(f"Failed to check main service status: {e}")
+            main_service_active = False
+
+        is_receiver_ready = (
+            main_service_active
+            and saved_input_type in
+            ["rtcm2","rtcm3","nov","oem3","ubx","ss2","hemis","stq","javad","nvs","binex","rt17","sbf","unicore"]
+        )
+        if not is_receiver_ready:
+            logger.warning("Cannot recover survey: GNSS receiver not ready (service inactive or invalid format)")
+            self._fail("GNSS receiver not ready (service inactive or invalid format). Configure the receiver in Main Service settings before starting Auto Survey-In.")
             return False
 
         logger.info("Recovering previous survey session...")

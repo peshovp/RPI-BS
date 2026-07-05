@@ -512,9 +512,14 @@ def auto_survey_start():
     try:
         if SurveyController is None:
             return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
-        receiver = rtkbaseconfig.get('main', 'receiver').strip("'")
-        if receiver == 'unknown':
-            return jsonify({"error": "No GNSS receiver detected. Configure or connect a receiver before starting Auto Survey-In."}), 400
+        saved_input_type = rtkbaseconfig.get('main', 'receiver_format').strip("'")
+        is_receiver_ready = (
+            services_list[0]["unit"].isActive() is True
+            and saved_input_type in
+            ["rtcm2","rtcm3","nov","oem3","ubx","ss2","hemis","stq","javad","nvs","binex","rt17","sbf","unicore"]
+        )
+        if not is_receiver_ready:
+            return jsonify({"error": "GNSS receiver not ready (service inactive or invalid format). Configure the receiver in Main Service settings before starting Auto Survey-In."}), 400
         data = request.get_json(silent=True) or {}
         target_hours = data.get('target_hours', 24)
         try:
