@@ -570,22 +570,25 @@ class SurveyController:
                 return False
             
             # Step 8: Update state
+            # Explicit float()/int() casts: estimate.* fields come from numpy
+            # aggregations (np.sum/np.sqrt/np.mean) and would otherwise leak
+            # numpy.float64/numpy.int64 into the JSON-serialized state.
             position = {
-                'lat': estimate.lat,
-                'lon': estimate.lon,
-                'height': h_ortho
+                'lat': float(estimate.lat),
+                'lon': float(estimate.lon),
+                'height': float(h_ortho)
             }
-            
+
             position_std = {
-                'std_lat': estimate.std_lat,
-                'std_lon': estimate.std_lon,
-                'std_height': estimate.std_height,
-                'std_h_meters': estimate.horizontal_std_meters
+                'std_lat': float(estimate.std_lat),
+                'std_lon': float(estimate.std_lon),
+                'std_height': float(estimate.std_height),
+                'std_h_meters': float(estimate.horizontal_std_meters)
             }
-            
+
             quality_metrics = {
-                'mean_sats': estimate.mean_sats if hasattr(estimate, 'mean_sats') else 0,
-                'rejected_epochs': estimate.rejected_epochs if hasattr(estimate, 'rejected_epochs') else 0,
+                'mean_sats': float(estimate.mean_sats) if hasattr(estimate, 'mean_sats') else 0,
+                'rejected_epochs': int(estimate.rejected_epochs) if hasattr(estimate, 'rejected_epochs') else 0,
                 'is_final': is_final  # Mark if this is final or interim
             }
             

@@ -332,21 +332,23 @@ class StateManager:
             Dict with all state information
         """
         status = self._state.copy()
-        
+
         # Add computed fields
         if status['start_time']:
             start = datetime.fromisoformat(status['start_time'])
             now = datetime.utcnow()
             elapsed_seconds = (now - start).total_seconds()
-            
+
             status['elapsed_seconds'] = elapsed_seconds
             status['progress_percent'] = min(100, (elapsed_seconds / 3600 / status['target_hours']) * 100)
-            
+
             if status['survey_state'] == SurveyState.RUNNING.value:
                 remaining_seconds = max(0, status['target_hours'] * 3600 - elapsed_seconds)
                 status['remaining_seconds'] = remaining_seconds
-        
-        return status
+
+        # Ensure any numpy scalars (e.g. from position/std/quality_metrics) are
+        # converted to native Python types so this dict is always JSON serializable.
+        return self._convert_numpy(status)
     
     def can_recover(self) -> bool:
         """
