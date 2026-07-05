@@ -174,7 +174,24 @@
       <div class="form-group row">
         <label for="rtcm_msg_A" class="col-sm-3 col-form-label">Rtcm messages: </label>
         <div class="col-sm-9">
-            <input id="rtcm_msg_A" type="text" name="rtcm_msg_A" class="form-control" aria-describedby="rtcm_msg_AHelp" placeholder="1004,1005(10),1006,1008(10),1012,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1107,1127,1230" value="{{ ntrip_A_settings[4].rtcm_msg_A }}" pattern="[0-9,\(\).]+" required>
+            <select id="rtcm_msg_A" name="rtcm_msg_A" class="form-control" required>
+              {% if ntrip_A_settings[4].rtcm_msg_A not in [
+                '1005(10),1006,1033(10),1074,1084,1094,1124,1230',
+                '1005(10),1006,1033(10),1075,1085,1095,1125,1230',
+                '1005(10),1006,1033(10),1077,1087,1097,1127,1230',
+                '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1074,1084,1094,1124,1230',
+                '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1075,1085,1095,1125,1230',
+                '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1127,1230'
+              ] %}
+              <option value="{{ ntrip_A_settings[4].rtcm_msg_A }}" selected disabled hidden>Custom (current)</option>
+              {% endif %}
+              <option value="1005(10),1006,1033(10),1074,1084,1094,1124,1230" {{ 'selected' if ntrip_A_settings[4].rtcm_msg_A == '1005(10),1006,1033(10),1074,1084,1094,1124,1230' else '' }}>MSM4</option>
+              <option value="1005(10),1006,1033(10),1075,1085,1095,1125,1230" {{ 'selected' if ntrip_A_settings[4].rtcm_msg_A == '1005(10),1006,1033(10),1075,1085,1095,1125,1230' else '' }}>MSM5</option>
+              <option value="1005(10),1006,1033(10),1077,1087,1097,1127,1230" {{ 'selected' if ntrip_A_settings[4].rtcm_msg_A == '1005(10),1006,1033(10),1077,1087,1097,1127,1230' else '' }}>MSM7</option>
+              <option value="1005(10),1006,1019,1020,1033(10),1042,1045,1046,1074,1084,1094,1124,1230" {{ 'selected' if ntrip_A_settings[4].rtcm_msg_A == '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1074,1084,1094,1124,1230' else '' }}>MSM4 + CMR+</option>
+              <option value="1005(10),1006,1019,1020,1033(10),1042,1045,1046,1075,1085,1095,1125,1230" {{ 'selected' if ntrip_A_settings[4].rtcm_msg_A == '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1075,1085,1095,1125,1230' else '' }}>MSM5 + CMR+</option>
+              <option value="1005(10),1006,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1127,1230" {{ 'selected' if ntrip_A_settings[4].rtcm_msg_A == '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1127,1230' else '' }}>MSM7 + CMR+</option>
+            </select>
             <small class="form-text text-muted" id="rtcm_msg_AHelp">Rtcm messages list: msg(interval in seconds),msg(interval in seconds),...</small>
         </div>
       </div>
@@ -248,7 +265,24 @@
       <div class="form-group row">
         <label for="rtcm_msg_B" class="col-sm-3 col-form-label">Rtcm messages: </label>
         <div class="col-sm-9">
-            <input id="rtcm_msg_B" type="text" name="rtcm_msg_B" class="form-control" aria-describedby="rtcm_msg_BHelp" placeholder="1004,1005(10),1006,1008(10),1012,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1107,1127,1230" value="{{ ntrip_B_settings[4].rtcm_msg_B }}" pattern="[0-9,\(\).]+" required>
+            <select id="rtcm_msg_B" name="rtcm_msg_B" class="form-control" required>
+              {% if ntrip_B_settings[4].rtcm_msg_B not in [
+                '1005(10),1006,1033(10),1074,1084,1094,1124,1230',
+                '1005(10),1006,1033(10),1075,1085,1095,1125,1230',
+                '1005(10),1006,1033(10),1077,1087,1097,1127,1230',
+                '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1074,1084,1094,1124,1230',
+                '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1075,1085,1095,1125,1230',
+                '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1127,1230'
+              ] %}
+              <option value="{{ ntrip_B_settings[4].rtcm_msg_B }}" selected disabled hidden>Custom (current)</option>
+              {% endif %}
+              <option value="1005(10),1006,1033(10),1074,1084,1094,1124,1230" {{ 'selected' if ntrip_B_settings[4].rtcm_msg_B == '1005(10),1006,1033(10),1074,1084,1094,1124,1230' else '' }}>MSM4</option>
+              <option value="1005(10),1006,1033(10),1075,1085,1095,1125,1230" {{ 'selected' if ntrip_B_settings[4].rtcm_msg_B == '1005(10),1006,1033(10),1075,1085,1095,1125,1230' else '' }}>MSM5</option>
+              <option value="1005(10),1006,1033(10),1077,1087,1097,1127,1230" {{ 'selected' if ntrip_B_settings[4].rtcm_msg_B == '1005(10),1006,1033(10),1077,1087,1097,1127,1230' else '' }}>MSM7</option>
+              <option value="1005(10),1006,1019,1020,1033(10),1042,1045,1046,1074,1084,1094,1124,1230" {{ 'selected' if ntrip_B_settings[4].rtcm_msg_B == '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1074,1084,1094,1124,1230' else '' }}>MSM4 + CMR+</option>
+              <option value="1005(10),1006,1019,1020,1033(10),1042,1045,1046,1075,1085,1095,1125,1230" {{ 'selected' if ntrip_B_settings[4].rtcm_msg_B == '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1075,1085,1095,1125,1230' else '' }}>MSM5 + CMR+</option>
+              <option value="1005(10),1006,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1127,1230" {{ 'selected' if ntrip_B_settings[4].rtcm_msg_B == '1005(10),1006,1019,1020,1033(10),1042,1045,1046,1077,1087,1097,1127,1230' else '' }}>MSM7 + CMR+</option>
+            </select>
             <small class="form-text text-muted" id="rtcm_msg_BHelp">Rtcm messages list: msg(interval in seconds),msg(interval in seconds),...</small>
         </div>
       </div>
