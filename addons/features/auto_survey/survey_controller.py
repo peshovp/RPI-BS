@@ -784,7 +784,13 @@ class SurveyController:
         if not self.state.can_recover():
             logger.info("No recoverable survey found")
             return False
-        
+
+        receiver = self.rtkbase.config.get('main', 'receiver', fallback='unknown').strip("'")
+        if receiver == 'unknown':
+            logger.warning("Cannot recover survey: no GNSS receiver detected")
+            self._fail("No GNSS receiver detected during recovery")
+            return False
+
         logger.info("Recovering previous survey session...")
 
         # Ensure controller uses persisted target_hours (so loop completion matches UI)
