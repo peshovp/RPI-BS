@@ -783,10 +783,22 @@ class SurveyController:
             logger.error(f"Failed to stop file logging during failure handling: {e}")
         self.state.fail_survey(reason)
 
+    def reset_survey(self) -> bool:
+        """
+        Fully reset survey to clean idle state, clearing all historical data
+        (position, epochs, errors). Different from stop_survey(), which
+        pauses but preserves last-known results.
+        """
+        if self._running:
+            self.stop_survey()
+        result = self.state.reset_survey()
+        logger.info("Survey manually reset to idle state")
+        return result
+
     def recover_survey(self) -> bool:
         """
         Attempt to recover survey after restart
-        
+
         Returns:
             True if recovery successful
         """
