@@ -542,6 +542,7 @@ def auto_survey_start():
 def auto_survey_stop():
     """Stop the Auto Survey-In process"""
     try:
+        print("Auto Survey-In STOP requested via REST endpoint")
         if SurveyController is None:
             return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
         controller = get_survey_controller()
