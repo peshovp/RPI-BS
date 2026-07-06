@@ -46,6 +46,7 @@ from RTKLIB import RTKLIB
 from ServiceController import ServiceController
 from RTKBaseConfigManager import RTKBaseConfigManager
 from wireguard_settings import get_wireguard_settings, write_wireguard_config
+from audit_logger import log_event, read_recent
 import network_infos
 
 #print("Installing all required packages")
@@ -561,6 +562,15 @@ def auto_survey_reset():
         controller = get_survey_controller()
         controller.reset_survey()
         return jsonify({"status": "reset"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/audit_log', methods=['GET'])
+@login_required
+def get_audit_log():
+    try:
+        limit = request.args.get('limit', 200, type=int)
+        return jsonify(read_recent(limit))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1096,9 +1106,11 @@ def switchService(json_msg):
         for service in services_list:
             if json_msg["name"] == service["name"] and json_msg["active"] == True:
                 print("Trying to start service {}".format(service["name"]))
+                log_event("service", "start_requested", {"service": service["name"]})
                 service["unit"].start()
             elif json_msg["name"] == service["name"] and json_msg["active"] == False:
                 print("Trying to stop service {}".format(service["name"]))
+                log_event("service", "stop_requested", {"service": service["name"]})
                 service["unit"].stop()
 
         # When the service is in failed state and we try to restart the service from the web UI during
