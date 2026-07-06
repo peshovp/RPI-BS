@@ -158,13 +158,19 @@ class SurveyController:
             logger.error(f"Failed to enable file logging: {e}")
             return False
     
-    def _stop_file_logging(self) -> bool:
+    def _stop_file_logging(self, reason: str = "unknown") -> bool:
         """
         Stop RTKBase file logging service to prevent disk space issues
-        
+
+        Args:
+            reason: Short label identifying which code path triggered the stop
+                (e.g. "manual_stop", "survey_completed", "survey_failed"),
+                logged for future diagnosis.
+
         Returns:
             True if logging stopped successfully
         """
+        logger.info(f"Stopping file logging (reason: {reason})")
         try:
             # Check if service is running first
             result = subprocess.run(
@@ -172,11 +178,11 @@ class SurveyController:
                 capture_output=True,
                 text=True
             )
-            
+
             if result.returncode != 0:  # Service not active
                 logger.info("File logging service already stopped")
                 return True
-            
+
             # Stop the service
             logger.info("Stopping file logging service to prevent disk space issues...")
             result = subprocess.run(
@@ -251,7 +257,7 @@ class SurveyController:
         # Stop file logging to prevent disk space issues
         if self.auto_mode:
             logger.info("Stopping file logging after survey stop...")
-            self._stop_file_logging()
+            self._stop_file_logging(reason="manual_stop")
         
         logger.info("Survey stopped")
         return True
@@ -686,7 +692,7 @@ class SurveyController:
                 # CRITICAL: Stop file logging to prevent disk space issues
                 if self.auto_mode:
                     logger.info("Stopping file logging to prevent disk filling...")
-                    self._stop_file_logging()
+                    self._stop_file_logging(reason="survey_completed")
             else:
                 logger.error("No position available for finalization")
                 self._fail("No final position computed")
@@ -772,7 +778,7 @@ class SurveyController:
     def _fail(self, reason: str):
         """Mark survey as failed and ensure file logging is stopped (prevents orphaned File Service / disk fill)."""
         try:
-            self._stop_file_logging()
+            self._stop_file_logging(reason="survey_failed")
         except Exception as e:
             logger.error(f"Failed to stop file logging during failure handling: {e}")
         self.state.fail_survey(reason)
