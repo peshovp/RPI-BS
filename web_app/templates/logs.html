@@ -7,18 +7,48 @@
 
 {% block content %}
 <div class="container">
-    <table id="logtable" data-mobile-responsive="true" data-toggle="table">
-        
-        <thead>
-          <tr>
-            <th data-field="name" data-sortable="true">File name</th>
-            <th data-field="format" data-sortable="true">type</th>
-            <th data-field="size" data-sortable="true">size (MB)</th>
-            <th data-field="actions" data-formatter="actionFormatter" data-events="operateEvents">actions</th>
-            
-          </tr>
-        </thead>
-      </table>
+  <div class="row">
+    <div class="col-12">
+      <ul class="nav nav-tabs" id="logs-tab" role="tablist">
+        <li class="nav-item">
+          <a class="nav-link active" id="tab-gnss-data" data-toggle="tab" href="#panel-gnss-data" role="tab" aria-controls="panel-gnss-data">GNSS Data Files</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" id="tab-audit-log" data-toggle="tab" href="#panel-audit-log" role="tab" aria-controls="panel-audit-log">Audit Log</a>
+        </li>
+      </ul>
+      <div class="tab-content" id="logs-tabContent">
+        <div class="tab-pane fade show active" id="panel-gnss-data" role="tabpanel" aria-labelledby="tab-gnss-data">
+          <table id="logtable" data-mobile-responsive="true" data-toggle="table">
+
+            <thead>
+              <tr>
+                <th data-field="name" data-sortable="true">File name</th>
+                <th data-field="format" data-sortable="true">type</th>
+                <th data-field="size" data-sortable="true">size (MB)</th>
+                <th data-field="actions" data-formatter="actionFormatter" data-events="operateEvents">actions</th>
+
+              </tr>
+            </thead>
+          </table>
+        </div>
+        <div class="tab-pane fade" id="panel-audit-log" role="tabpanel" aria-labelledby="tab-audit-log">
+          <button id="audit-log-refresh-btn" class="btn btn-sm btn-secondary mb-2 mt-2">Refresh</button>
+          <table id="auditlogtable" class="table table-sm">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Category</th>
+                <th>Event</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- The delete Modal dialog box-->
