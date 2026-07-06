@@ -551,6 +551,19 @@ def auto_survey_stop():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/auto_survey/reset', methods=['POST'])
+@login_required
+def auto_survey_reset():
+    """Fully reset Auto Survey-In to clean idle state"""
+    try:
+        if SurveyController is None:
+            return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        controller = get_survey_controller()
+        controller.reset_survey()
+        return jsonify({"status": "reset"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/auto_survey/status', methods=['GET'])
 @login_required
 def auto_survey_status():

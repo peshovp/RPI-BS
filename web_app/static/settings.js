@@ -1017,6 +1017,22 @@ $(document).ready(function () {
 
     loadAutoSurveyGeoidStatus();
 
+    $("#auto-survey-reset-btn").on("click", function() {
+        if (!confirm("This will permanently clear all Auto Survey-In progress and history. Continue?")) {
+            return;
+        }
+        fetch('/api/auto_survey/reset', {method: 'POST'})
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    alert("Reset failed: " + data.error);
+                } else {
+                    pollAutoSurveyStatus();
+                }
+            })
+            .catch(() => alert("Reset request failed"));
+    });
+
     // Show current state on page load (in case a survey is already running)
     pollAutoSurveyStatus();
 
