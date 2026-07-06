@@ -31,6 +31,11 @@ from .geoid_corrector import GeoidCorrector
 from .config_manager import ConfigManager
 from .state_manager import StateManager, SurveyState
 
+try:
+    from audit_logger import log_event
+except ImportError:
+    log_event = lambda *a, **k: None
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,6 +239,7 @@ class SurveyController:
         self._thread.start()
         
         logger.info(f"✓ Started {target_hours}-hour auto survey")
+        log_event("auto_survey", "start", {"target_hours": target_hours})
         return True
     
     def stop_survey(self) -> bool:
@@ -260,6 +266,7 @@ class SurveyController:
             self._stop_file_logging(reason="manual_stop")
         
         logger.info("Survey stopped")
+        log_event("auto_survey", "stop", {"reason": "manual"})
         return True
     
     def restart_rtkbase_services(self) -> Dict[str, any]:
@@ -782,6 +789,7 @@ class SurveyController:
         except Exception as e:
             logger.error(f"Failed to stop file logging during failure handling: {e}")
         self.state.fail_survey(reason)
+        log_event("auto_survey", "failed", {"reason": reason})
 
     def reset_survey(self) -> bool:
         """
@@ -793,6 +801,7 @@ class SurveyController:
             self.stop_survey()
         result = self.state.reset_survey()
         logger.info("Survey manually reset to idle state")
+        log_event("auto_survey", "reset", {})
         return result
 
     def recover_survey(self) -> bool:
@@ -848,4 +857,5 @@ class SurveyController:
         self._thread.start()
         
         logger.info("Survey recovered successfully")
+        log_event("auto_survey", "recovered", {})
         return True
