@@ -183,10 +183,11 @@ class StateManager:
         if self.survey_state == SurveyState.RUNNING:
             logger.warning("Survey already running")
             return False
-        
+
+        now = datetime.utcnow().isoformat()
         self._state.update({
             'survey_state': SurveyState.RUNNING.value,
-            'start_time': datetime.utcnow().isoformat(),
+            'start_time': now,
             'end_time': None,
             'target_hours': target_hours,
             'completed_hours': 0,
@@ -201,6 +202,12 @@ class StateManager:
             'applied': False,
             'applied_time': None,
             'applied_position': None,
+            # Reset failure/timeout tracking so stale data from a previous
+            # session can't immediately trip the hard-timeout guard.
+            'last_success_update_time': now,
+            'consecutive_failures': 0,
+            'last_failure_reason': None,
+            'last_failure_time': None,
         })
         
         logger.info(f"Started {target_hours}-hour survey")
