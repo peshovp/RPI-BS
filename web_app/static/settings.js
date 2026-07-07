@@ -789,6 +789,15 @@ $(document).ready(function () {
     var autoSurveySwitch = $("#auto-survey-switch");
     var autoSurveyPollInterval = null;
 
+    function parseUtcTimestamp(timestampStr) {
+        // Backend timestamps (datetime.utcnow().isoformat()) have no timezone
+        // suffix, so the browser would otherwise parse them as local time.
+        if (timestampStr && timestampStr.indexOf('Z') === -1 && timestampStr.indexOf('+') === -1) {
+            timestampStr += 'Z';
+        }
+        return new Date(timestampStr);
+    }
+
     function setAutoSurveyBadge(state) {
         var el = document.getElementById("auto-survey-badge");
         el.classList.remove("badge-success", "badge-warning", "badge-danger", "badge-secondary");
@@ -887,12 +896,12 @@ $(document).ready(function () {
                 if (state === "completed" && finalPos) {
                     var detailsText = "Final position: " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
                     if (status.start_time) {
-                        var elapsedMs = Date.now() - new Date(status.start_time).getTime();
+                        var elapsedMs = Date.now() - parseUtcTimestamp(status.start_time).getTime();
                         detailsText += " - Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
                     }
                     autoSurveyDetailsElt.textContent = detailsText;
                 } else if (status.start_time && state === "running") {
-                    var elapsedMs = Date.now() - new Date(status.start_time).getTime();
+                    var elapsedMs = Date.now() - parseUtcTimestamp(status.start_time).getTime();
                     autoSurveyDetailsElt.textContent = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
                 } else {
                     autoSurveyDetailsElt.textContent = "";
