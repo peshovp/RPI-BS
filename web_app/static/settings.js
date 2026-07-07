@@ -855,6 +855,10 @@ $(document).ready(function () {
                 var targetEpochs = targetHours * 3600;
                 var percent = targetEpochs > 0 ? Math.min(100, Math.round((numEpochs / targetEpochs) * 100)) : 0;
 
+                if (status.target_hours && document.activeElement !== document.getElementById("auto-survey-target-hours")) {
+                    $("#auto-survey-target-hours").val(status.target_hours);
+                }
+
                 if (state === "running") {
                     autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
                     setAutoSurveyBadge("running");
