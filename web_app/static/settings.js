@@ -894,6 +894,8 @@ $(document).ready(function () {
                 } else if (status.start_time && state === "running") {
                     var elapsedMs = Date.now() - new Date(status.start_time).getTime();
                     autoSurveyDetailsElt.textContent = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+                } else {
+                    autoSurveyDetailsElt.textContent = "";
                 }
             })
             .catch(function(err) {
