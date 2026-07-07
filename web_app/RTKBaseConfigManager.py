@@ -81,6 +81,16 @@ class RTKBaseConfigManager:
         config.read(settings_path)
         self.config=config
 
+    def reload(self):
+        """
+            Re-read the merged default+user settings.conf from disk, discarding any
+            stale in-memory state. Mirrors the __init__ load sequence, so callers see
+            changes written by other processes/objects (e.g. an external ConfigParser
+            instance writing settings.conf directly).
+        """
+        self.merge_default_and_user(self.default_settings_path, self.user_settings_path)
+        self.expand_path()
+
     def expand_path(self):
         """
             get the paths and convert $BASEDIR to the real path

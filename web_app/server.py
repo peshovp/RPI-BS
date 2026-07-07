@@ -457,6 +457,7 @@ def settings_page():
         else:
             print("wrong update file")
         return ('', 204)
+    rtkbaseconfig.reload()
     # variable needed when the gnss receiver offer a web interface
     host_url =  urllib.parse.urlparse(request.host_url)
     gnss_rcv_url = urllib.parse.ParseResult(scheme=host_url.scheme,
