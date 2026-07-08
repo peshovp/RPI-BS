@@ -1051,5 +1051,109 @@ $(document).ready(function () {
     // Show current state on page load (in case a survey is already running)
     pollAutoSurveyStatus();
 
+    // ####################### HANDLE GEOMAXIMA OTA UPDATE #######################
+
+    var otaCurrentVersionElt = document.getElementById("ota-current-version");
+    var otaCheckBtn = document.getElementById("ota-check-button");
+    var otaUpdateBtn = document.getElementById("ota-update-button");
+    var otaStatusRowElt = document.getElementById("ota-status-row");
+    var otaStatusTextElt = document.getElementById("ota-status-text");
+    var otaChangelogElt = document.getElementById("ota-changelog");
+    var otaPollInterval = null;
+
+    fetch('/api/ota/version')
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            if (data && !data.error && data.commit_short) {
+                otaCurrentVersionElt.textContent = data.commit_short + " (" + (data.branch || "?") + ")";
+            } else {
+                otaCurrentVersionElt.textContent = "unavailable";
+            }
+        })
+        .catch(function() {
+            otaCurrentVersionElt.textContent = "unavailable";
+        });
+
+    otaCheckBtn.addEventListener("click", function() {
+        otaStatusRowElt.style.display = "";
+        otaStatusTextElt.textContent = "Checking for updates...";
+        otaChangelogElt.textContent = "";
+        otaUpdateBtn.hidden = true;
+
+        fetch('/api/ota/check', { method: 'POST' })
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    otaStatusTextElt.textContent = "Error: " + data.error;
+                    otaChangelogElt.textContent = "";
+                    otaUpdateBtn.hidden = true;
+                } else if (data.updates_available) {
+                    otaStatusTextElt.textContent = "Update available: " + data.commits_behind + " commits behind";
+                    otaChangelogElt.textContent = data.changelog || "";
+                    otaUpdateBtn.hidden = false;
+                } else {
+                    otaStatusTextElt.textContent = "Already up to date";
+                    otaChangelogElt.textContent = "";
+                    otaUpdateBtn.hidden = true;
+                }
+            })
+            .catch(function(err) {
+                otaStatusTextElt.textContent = "Error checking for updates";
+                console.log("OTA check failed: " + err);
+            });
+    });
+
+    function pollOtaStatus() {
+        fetch('/api/ota/status')
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
+                var lastUpdate = data && data.last_update;
+                if (!lastUpdate) {
+                    return;
+                }
+                if (lastUpdate.completed) {
+                    if (otaPollInterval !== null) {
+                        clearInterval(otaPollInterval);
+                        otaPollInterval = null;
+                    }
+                    if (lastUpdate.success) {
+                        otaStatusTextElt.textContent = "Update completed successfully. Please reload the page.";
+                    } else {
+                        otaStatusTextElt.textContent = "Update failed: " + (lastUpdate.error || "unknown error");
+                    }
+                    otaChangelogElt.textContent = lastUpdate.log || "";
+                } else {
+                    otaStatusTextElt.textContent = "Update in progress...";
+                    otaChangelogElt.textContent = lastUpdate.log || "";
+                }
+            })
+            .catch(function(err) {
+                console.log("OTA status poll failed: " + err);
+            });
+    }
+
+    otaUpdateBtn.addEventListener("click", function() {
+        if (!confirm("This will update and restart the service. Continue?")) {
+            return;
+        }
+        otaUpdateBtn.hidden = true;
+        otaStatusRowElt.style.display = "";
+        otaStatusTextElt.textContent = "Update started...";
+        otaChangelogElt.textContent = "";
+
+        fetch('/api/ota/update', { method: 'POST' })
+            .then(function(response) { return response.json(); })
+            .then(function() {
+                if (otaPollInterval === null) {
+                    otaPollInterval = setInterval(pollOtaStatus, 3000);
+                }
+                pollOtaStatus();
+            })
+            .catch(function(err) {
+                otaStatusTextElt.textContent = "Error starting update";
+                console.log("OTA update start failed: " + err);
+            });
+    });
+
     // end of document.ready
 });
