@@ -686,7 +686,9 @@ def ota_check():
         if UpdateController is None:
             return jsonify({"error": "OTA Update feature unavailable"}), 503
         controller = get_update_controller()
-        return jsonify(controller.check_for_updates())
+        result = controller.check_for_updates()
+        log_event("ota", "check_performed", {"updates_available": result.get("updates_available", False)})
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -698,7 +700,9 @@ def ota_update():
         if UpdateController is None:
             return jsonify({"error": "OTA Update feature unavailable"}), 503
         controller = get_update_controller()
-        return jsonify(controller.perform_update())
+        log_event("ota", "update_started", {})
+        result = controller.perform_update()
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -739,7 +743,9 @@ def ota_rollback():
         commit_hash = data.get('commit_hash')
         if not commit_hash:
             return jsonify({"error": "commit_hash is required"}), 400
-        return jsonify(controller.rollback_to_commit(commit_hash))
+        log_event("ota", "rollback_started", {"commit_hash": commit_hash[:7]})
+        result = controller.rollback_to_commit(commit_hash)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -777,7 +783,9 @@ def ota_set_token():
         controller = get_update_controller()
         data = request.get_json(silent=True) or {}
         token = data.get('token', '')
-        return jsonify(controller.set_github_token(token))
+        result = controller.set_github_token(token)
+        log_event("ota", "token_configured" if token else "token_cleared", {})
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
