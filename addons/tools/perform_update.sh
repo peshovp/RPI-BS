@@ -14,56 +14,14 @@ echo "=========================================="
 echo "OTA UPDATE STARTED: $(date)"
 echo "=========================================="
 
-DEPLOYED_PATH="$1"  # Where Flask is running (/home/user/rtkbase/geomaxima)
+DEV_REPO_PATH="${1:?Repo path argument required}"
 STATUS_FILE="$2"
-PASSED_REPO_PATH="$3"
 
-echo "DEPLOYED_PATH=$DEPLOYED_PATH"
+echo "DEV_REPO_PATH=$DEV_REPO_PATH"
 echo "STATUS_FILE=$STATUS_FILE"
-echo "PASSED_REPO_PATH=$PASSED_REPO_PATH"
 
-# Auto-detect development repo location
-DEV_REPO_PATH=""
-
-# 1. Use passed path if valid
-if [ -n "$PASSED_REPO_PATH" ] && [ -d "$PASSED_REPO_PATH/.git" ]; then
-    DEV_REPO_PATH="$PASSED_REPO_PATH"
-    echo "Using passed repo path: $DEV_REPO_PATH"
-else
-    # 2. Look for GeoMaxima git repo in home directory of current user
-    for candidate in "/home/$(whoami)/GeoMaxima" "/home/$(whoami)/GeoMaxima-BS" "/home/$(whoami)/geomaxima"; do
-        if [ -d "$candidate/.git" ]; then
-            DEV_REPO_PATH="$candidate"
-            break
-        fi
-    done
-    
-    # 3. Look in all user home directories (if running as root/other user)
-    if [ -z "$DEV_REPO_PATH" ]; then
-        for home_dir in /home/*; do
-            for candidate in "$home_dir/GeoMaxima" "$home_dir/GeoMaxima-BS" "$home_dir/geomaxima"; do
-                if [ -d "$candidate/.git" ]; then
-                    DEV_REPO_PATH="$candidate"
-                    break 2
-                fi
-            done
-        done
-    fi
-fi
-
-if [ -z "$DEV_REPO_PATH" ]; then
-    python3 -c "
-import json
-from pathlib import Path
-data = {
-    'success': False,
-    'completed': True,
-    'error': 'Git repository not found in home directory',
-    'log': '❌ Could not find development git repository\nSearched: ~/GeoMaxima, ~/GeoMaxima-BS, ~/geomaxima\n'
-}
-with open('${STATUS_FILE}', 'w') as f:
-    json.dump(data, f, indent=2)
-"
+if [ ! -d "$DEV_REPO_PATH/.git" ]; then
+    echo "❌ ERROR: $DEV_REPO_PATH is not a valid git repository"
     exit 1
 fi
 
@@ -104,8 +62,7 @@ except Exception as e:
 " || true
 }
 
-log_status "info" "📦 Development repo: $DEV_REPO_PATH"
-log_status "info" "🚀 Deployed location: $DEPLOYED_PATH"
+log_status "info" "📦 Repo: $DEV_REPO_PATH"
 
 cd "$DEV_REPO_PATH" || exit 1
 
@@ -178,23 +135,8 @@ fi
 # root, and running it here duplicated setup that's already handled elsewhere.
 # Kept only git reset --hard + service restart below.
 
-log_status "info" "Syncing to deployed location..."
-
-# Rsync to deployed location (preserve permissions with -p flag)
-if [ -d "$DEPLOYED_PATH" ] && [ "$DEPLOYED_PATH" != "$DEV_REPO_PATH" ]; then
-    log_status "info" "Copying files: $DEV_REPO_PATH → $DEPLOYED_PATH"
-    if rsync -avp --delete --exclude=.git --exclude='__pycache__' --exclude='*.pyc' "${DEV_REPO_PATH}/" "${DEPLOYED_PATH}/" 2>&1 | tee -a /tmp/ota_update.log; then
-        log_status "info" "✓ Files synced to deployed location"
-        # Ensure critical scripts are executable
-        chmod +x "${DEPLOYED_PATH}/tools/"*.sh 2>/dev/null || true
-        log_status "info" "✓ Script permissions verified"
-    else
-        log_status "error" "Rsync failed - check permissions"
-        exit 1
-    fi
-else
-    log_status "info" "ℹ Deployed path same as repo, skipping sync"
-fi
+# Rsync-to-deployed-location step removed: dev repo and deployed app are the
+# same single directory in this architecture, so there is nothing to sync.
 
 log_status "info" "Scheduling service restart..."
 
