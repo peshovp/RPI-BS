@@ -158,6 +158,11 @@ install_gpsd_chrony() {
       grep -qi '^RestartSec=' /etc/systemd/system/gpsd.service || sed -i '/^Restart=always.*/a RestartSec=30' /etc/systemd/system/gpsd.service
       #Add ExecStartPre condition to not start gpsd if str2str_tcp is not running. See https://github.com/systemd/systemd/issues/1312
       grep -qi '^ExecStartPre=' /etc/systemd/system/gpsd.service || sed -i '/^ExecStart=.*/i ExecStartPre=systemctl is-active str2str_tcp.service' /etc/systemd/system/gpsd.service
+      # Add circuit breaker to stop the restart loop after repeated ExecStartPre
+      # failures (gpsd correctly refuses to start without an active GNSS stream,
+      # but without this it retries forever every 30s, spamming the journal)
+      grep -qi '^StartLimitIntervalSec=' /etc/systemd/system/gpsd.service || sed -i '/^\[Unit\]/a StartLimitIntervalSec=600' /etc/systemd/system/gpsd.service
+      grep -qi '^StartLimitBurst=' /etc/systemd/system/gpsd.service || sed -i '/^StartLimitIntervalSec=.*/a StartLimitBurst=5' /etc/systemd/system/gpsd.service
 
       #Reload systemd services and enable chrony and gpsd
       systemctl daemon-reload
