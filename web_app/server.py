@@ -639,11 +639,14 @@ def auto_survey_geoid_upload():
         dest_path = dest_dir / filename
         file.save(dest_path)
         if controller.set_geoid_model(dest_path):
+            log_event("geoid", "upload_success", {"filename": filename})
             return jsonify({'success': True, 'ggf_path': str(dest_path)})
         error = controller.geoid.last_error or 'Failed to load geoid model'
         dest_path.unlink(missing_ok=True)
+        log_event("geoid", "upload_failed", {"filename": filename, "error": error})
         return jsonify({'success': False, 'error': error}), 500
     except Exception as e:
+        log_event("geoid", "upload_error", {"error": str(e)})
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/logs')
@@ -672,9 +675,11 @@ def login_page():
         user = User('admin')
         password = loginform.password.data
         if not user.check_password(password):
+            log_event("auth", "login_failed", {"ip": request.remote_addr})
             return abort(401)
 
         login_user(user, remember=loginform.remember_me.data)
+        log_event("auth", "login_success", {"ip": request.remote_addr})
         next_page = request.args.get('next')
         if not next_page or urllib.parse.urlsplit(next_page).netloc != '':
             next_page = url_for('status_page')
@@ -834,6 +839,10 @@ def detect_receiver(json_msg):
     #result = {"result" : "failed"}
     #result = {"result" : "success", "port" : "/dev/ttybestport", "gnss_type" : "F12P", "port_speed" : "115200", "firmware" : "1.55"}
     result.update(json_msg) ## get back "then_configure" key/value
+    if result["result"] == "success":
+        log_event("gnss", "detect_success", {"port": result.get("port"), "gnss_type": result.get("gnss_type")})
+    else:
+        log_event("gnss", "detect_failed", {})
     socketio.emit("gnss_detection_result", json.dumps(result), namespace="/test")
 
 @socketio.on("apply_receiver_settings", namespace="/test")
@@ -1150,15 +1159,19 @@ def update_settings(json_msg):
         # instead of rtkbaseconfig.update_setting()/write_file().
         wireguard_fields = {form_input.get("name") : form_input.get("value") for form_input in json_msg}
         if write_wireguard_config(wireguard_fields):
+            log_event("wireguard", "config_updated", {})
             restartServices(("wireguard",))
         else:
+            log_event("wireguard", "config_update_failed", {})
             print("ERROR, FAILED TO WRITE WIREGUARD CONFIG!")
     else:
+        field_names = [form_input.get("name") for form_input in json_msg]
         for form_input in json_msg:
             #print("name: ", form_input.get("name"))
             #print("value: ", form_input.get("value"))
             rtkbaseconfig.update_setting(source_section, form_input.get("name"), form_input.get("value"), write_file=False)
         rtkbaseconfig.write_file()
+        log_event("settings", "form_saved", {"section": source_section, "fields": field_names})
 
         #Restart service if needed
         if source_section == "main":
