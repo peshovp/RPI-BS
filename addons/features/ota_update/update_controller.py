@@ -24,10 +24,16 @@ class UpdateController:
     def __init__(self, repo_path: str = None, git_user: str = 'peshovp'):
         """
         Initialize update controller
-        
+
         Args:
             repo_path: Path to GeoMaxima repository (auto-detected if None)
             git_user: User to run git commands as (default: peshovp)
+
+        Note: The 'peshovp' default is an intentional match with the current
+        single-user deploy environment (this is the actual system/repo owner
+        on the deployed device), not a universal default. If this project is
+        ever deployed under a different Linux user, this must be passed
+        explicitly rather than relying on the default.
         """
         if repo_path is None:
             # Auto-detect repository path
@@ -876,20 +882,7 @@ fi
                     capture_output=True, text=True, check=True
                 )
                 rollback_log.append("✓ Rollback completed")
-                
-                # Run install script
-                install_script = self.repo_path / 'install_local.sh'
-                if install_script.exists():
-                    rollback_log.append("Running install script...")
-                    result = subprocess.run(
-                        ['sudo', 'bash', str(install_script)],
-                        capture_output=True, text=True, timeout=300
-                    )
-                    if result.returncode == 0:
-                        rollback_log.append("✓ Installation completed")
-                    else:
-                        rollback_log.append(f"⚠ Install script warning: {result.stderr[-200:]}")
-                
+
                 # Restart service if requested
                 if restart_service:
                     rollback_log.append("Restarting rtkbase_web service...")
