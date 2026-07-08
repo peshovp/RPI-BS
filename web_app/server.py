@@ -95,6 +95,12 @@ except ImportError as e:
     print(f"Auto Survey-In feature unavailable (addons import failed): {e}")
     SurveyController = None
 
+try:
+    from addons.features.ota_update.update_controller import UpdateController
+except ImportError as e:
+    print(f"OTA Update feature unavailable (addons import failed): {e}")
+    UpdateController = None
+
 login=LoginManager(app)
 login.login_view = 'login_page'
 socketio = SocketIO(app, async_mode = 'gevent')
@@ -648,6 +654,132 @@ def auto_survey_geoid_upload():
     except Exception as e:
         log_event("geoid", "upload_error", {"error": str(e)})
         return jsonify({'success': False, 'error': str(e)}), 500
+
+#### OTA Update ####
+
+_update_controller = None
+
+def get_update_controller():
+    """Lazily instantiate the singleton UpdateController"""
+    global _update_controller
+    if _update_controller is None:
+        _update_controller = UpdateController()
+    return _update_controller
+
+@app.route('/api/ota/version', methods=['GET'])
+@login_required
+def ota_version():
+    """Get current OTA version information"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        return jsonify(controller.get_current_version())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/check', methods=['POST'])
+@login_required
+def ota_check():
+    """Check for available OTA updates"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        return jsonify(controller.check_for_updates())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/update', methods=['POST'])
+@login_required
+def ota_update():
+    """Perform OTA update (starts detached background script)"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        return jsonify(controller.perform_update())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/status', methods=['GET'])
+@login_required
+def ota_status():
+    """Get OTA update operation status"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        return jsonify(controller.get_update_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/log', methods=['GET'])
+@login_required
+def ota_log():
+    """Get OTA git commit history"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        limit = request.args.get('limit', 20, type=int)
+        return jsonify(controller.get_git_log(limit=limit))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/rollback', methods=['POST'])
+@login_required
+def ota_rollback():
+    """Rollback to a previous OTA commit"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        data = request.get_json(silent=True) or {}
+        commit_hash = data.get('commit_hash')
+        if not commit_hash:
+            return jsonify({"error": "commit_hash is required"}), 400
+        return jsonify(controller.rollback_to_commit(commit_hash))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/previous', methods=['GET'])
+@login_required
+def ota_previous():
+    """Get previous OTA commit for quick rollback"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        return jsonify(controller.get_previous_commit())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/token-status', methods=['GET'])
+@login_required
+def ota_token_status():
+    """Return whether a GitHub token is configured for OTA updates"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        return jsonify({"configured": controller.is_token_configured()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ota/token', methods=['POST'])
+@login_required
+def ota_set_token():
+    """Store or clear the GitHub token used for OTA updates"""
+    try:
+        if UpdateController is None:
+            return jsonify({"error": "OTA Update feature unavailable"}), 503
+        controller = get_update_controller()
+        data = request.get_json(silent=True) or {}
+        token = data.get('token', '')
+        return jsonify(controller.set_github_token(token))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/logs')
 @login_required
