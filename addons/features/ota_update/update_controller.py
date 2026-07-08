@@ -181,38 +181,16 @@ fi
         return subprocess.run(cmd, env=env, **kwargs)
     
     def _find_repo_path(self) -> str:
-        """Auto-detect GeoMaxima repository path"""
-        # Try common locations for git repository
-        possible_paths = [
-            '/home/peshovp/GeoMaxima',              # Legacy production repo
-            os.path.expanduser('~/GeoMaxima'),      # With expansion
-            '/home/peshovp/GeoMaxima-BS',           # Current production repo name
-            os.path.expanduser('~/GeoMaxima-BS'),   # With expansion
-            '/home/peshovp/rtkbase/geomaxima',      # Deployed location (fallback)
-            '/opt/geomaxima',
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),  # Development
-        ]
-        
-        # Add search in all /home/* directories to support different usernames
-        for home in glob.glob('/home/*'):
-            possible_paths.append(os.path.join(home, 'GeoMaxima'))
-            possible_paths.append(os.path.join(home, 'GeoMaxima-BS'))
-            possible_paths.append(os.path.join(home, 'geomaxima'))
-            
-        # Deduplicate paths
-        possible_paths = list(dict.fromkeys([os.path.abspath(p) for p in possible_paths]))
-        
-        checked_paths = []
-        for path in possible_paths:
-            checked_paths.append(path)
-            git_dir = Path(path) / '.git'
-            if git_dir.exists():
-                logger.info(f"Found GeoMaxima repository at: {path}")
-                return str(path)
-        
-        msg = f"Could not find development git repository. Searched: {', '.join(checked_paths)}"
-        logger.error(msg)
-        raise RuntimeError(msg)
+        """
+        Compute the repo root path directly from this file's location.
+        This file lives at <repo_root>/addons/features/ota_update/update_controller.py,
+        so three parent levels up is always the repo root - no candidate search needed,
+        since dev repo and deployed app are the same single repo in this architecture.
+        """
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        if not (repo_root / '.git').exists():
+            raise RuntimeError(f"Expected git repo at {repo_root}, but no .git directory found")
+        return str(repo_root)
     
     def get_current_version(self) -> Dict:
         """
@@ -408,11 +386,7 @@ fi
             # Use standalone update script that runs independently
             update_script = self.repo_path / 'tools' / 'perform_update.sh'
             status_file = self.repo_path / '.update_status.json'
-            
-            # Find actual deployed path (where Flask is running from)
-            # This is typically ~/rtkbase/geomaxima, not the git repo
-            deployed_path = Path(__file__).parent.parent.parent  # Up from ota_update/update_controller.py
-            
+
             if not update_script.exists():
                 error_msg = f"Update script not found: {update_script}"
                 logger.error(error_msg)
@@ -431,18 +405,17 @@ fi
             
             # Launch update script in fully detached background process
             logger.info(f"Launching detached update script: {update_script}")
-            logger.info(f"Deployed path: {deployed_path}")
             logger.info(f"Status file: {status_file}")
-            
+
             # Use nohup and background process to survive Flask restart
-            # Pass deployed_path and status_file as arguments
+            # Pass repo_path and status_file as arguments (dev repo and
+            # deployed app are the same single repo, so only one path is needed)
             cmd = [
                 'nohup',
                 'bash',
                 str(update_script),
-                str(deployed_path),
-                str(status_file),
-                str(self.repo_path)
+                str(self.repo_path),
+                str(status_file)
             ]
 
             subprocess.Popen(
