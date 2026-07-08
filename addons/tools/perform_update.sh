@@ -174,14 +174,9 @@ else
     log_status "error" "Git reset failed - repository may be corrupted"
     exit 1
 fi
-log_status "info" "Running install script..."
-
-if [ -f "${DEV_REPO_PATH}/install_local.sh" ]; then
-    bash "${DEV_REPO_PATH}/install_local.sh" 2>&1 || log_status "info" "⚠ Install script warning (continuing)"
-    log_status "info" "✓ Install script completed"
-else
-    log_status "info" "ℹ No install script found"
-fi
+# Install script step removed: install_local.sh lives under addons/, not repo
+# root, and running it here duplicated setup that's already handled elsewhere.
+# Kept only git reset --hard + service restart below.
 
 log_status "info" "Syncing to deployed location..."
 
