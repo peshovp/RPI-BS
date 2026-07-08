@@ -139,11 +139,13 @@ class SurveyController:
                 capture_output=True,
                 text=True
             )
-            
-            if result.returncode == 0:  # Service is active
-                logger.info("✓ File logging service already running")
+
+            was_already_active = (result.returncode == 0)
+            if was_already_active:
+                logger.info("✓ File logging service already running (not owned by this survey)")
+                self.state.set_file_service_owned(False)
                 return True
-            
+
             # Try to start the service
             logger.info("Starting file logging service...")
             result = subprocess.run(
@@ -151,14 +153,15 @@ class SurveyController:
                 capture_output=True,
                 text=True
             )
-            
+
             if result.returncode == 0:
-                logger.info("✓ File logging service started")
+                logger.info("✓ File logging service started (owned by this survey)")
+                self.state.set_file_service_owned(True)
                 return True
             else:
                 logger.warning(f"Could not start file logging: {result.stderr}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Failed to enable file logging: {e}")
             return False
@@ -175,6 +178,10 @@ class SurveyController:
         Returns:
             True if logging stopped successfully
         """
+        if not self.state.get_file_service_owned():
+            logger.info(f"Skipping file logging stop (reason: {reason}) - service was not started by this survey")
+            return True
+
         logger.info(f"Stopping file logging (reason: {reason})")
         try:
             # Check if service is running first

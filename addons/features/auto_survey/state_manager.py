@@ -80,7 +80,9 @@ class StateManager:
                 state['last_failure_reason'] = None
             if 'consecutive_failures' not in state:
                 state['consecutive_failures'] = 0
-            
+            if 'file_service_owned' not in state:
+                state['file_service_owned'] = False
+
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
             
@@ -112,6 +114,10 @@ class StateManager:
             'last_failure_time': None,
             'last_failure_reason': None,
             'consecutive_failures': 0,
+            # Tracks whether this survey session started str2str_file.service
+            # (vs. it already being active before start_survey() was called),
+            # so _stop_file_logging() only stops a service it actually owns.
+            'file_service_owned': False,
         }
     
     def _convert_numpy(self, obj):
@@ -169,7 +175,16 @@ class StateManager:
         """Set survey state"""
         self._state['survey_state'] = value.value
         self.save_state()
-    
+
+    def set_file_service_owned(self, owned: bool) -> bool:
+        """Record whether this survey session started str2str_file.service"""
+        self._state['file_service_owned'] = bool(owned)
+        return self.save_state()
+
+    def get_file_service_owned(self) -> bool:
+        """Whether this survey session started str2str_file.service"""
+        return bool(self._state.get('file_service_owned', False))
+
     def start_survey(self, target_hours: int = 24) -> bool:
         """
         Start new survey session
