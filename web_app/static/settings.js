@@ -1117,7 +1117,8 @@ $(document).ready(function () {
                         otaPollInterval = null;
                     }
                     if (lastUpdate.success) {
-                        otaStatusTextElt.textContent = "Update completed successfully. Please reload the page.";
+                        otaStatusTextElt.textContent = "Update completed successfully. Reloading in 10 seconds...";
+                        setTimeout(function() { window.location.reload(); }, 10000);
                     } else {
                         otaStatusTextElt.textContent = "Update failed: " + (lastUpdate.error || "unknown error");
                     }
