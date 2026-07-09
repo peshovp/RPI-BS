@@ -205,33 +205,21 @@ function loadAuditLog() {
     fetch('/api/audit_log?limit=200')
         .then(function(response) { return response.json(); })
         .then(function(entries) {
-            var tbody = document.querySelector('#auditlogtable tbody');
-            tbody.replaceChildren();
-            if (!Array.isArray(entries)) {
-                return;
-            }
-            entries.forEach(function(entry) {
-                var row = document.createElement('tr');
-
-                var timeCell = document.createElement('td');
+            if (!Array.isArray(entries)) { entries = []; }
+            var tableData = entries.map(function(entry) {
                 var parsedTime = new Date(entry.timestamp);
-                timeCell.textContent = isNaN(parsedTime.getTime()) ? (entry.timestamp || '') : parsedTime.toLocaleString();
-                row.appendChild(timeCell);
-
-                var categoryCell = document.createElement('td');
-                categoryCell.textContent = entry.category || '';
-                row.appendChild(categoryCell);
-
-                var eventCell = document.createElement('td');
-                eventCell.textContent = entry.event || '';
-                row.appendChild(eventCell);
-
-                var detailsCell = document.createElement('td');
-                detailsCell.textContent = entry.details ? JSON.stringify(entry.details) : '';
-                row.appendChild(detailsCell);
-
-                tbody.appendChild(row);
+                var timeStr = isNaN(parsedTime.getTime()) ? (entry.timestamp || '') : parsedTime.toLocaleString();
+                var detailsStr = entry.details && Object.keys(entry.details).length > 0
+                    ? Object.entries(entry.details).map(function(kv) { return kv[0] + ": " + kv[1]; }).join(", ")
+                    : '';
+                return {
+                    time: timeStr,
+                    category: entry.category || '',
+                    event: entry.event || '',
+                    details: detailsStr
+                };
             });
+            $('#auditlogtable').bootstrapTable('load', tableData);
         })
         .catch(function(err) {
             console.log("Audit log fetch failed: " + err);
