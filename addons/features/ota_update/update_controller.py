@@ -384,7 +384,7 @@ fi
             self._save_status_to_file()
             
             # Use standalone update script that runs independently
-            update_script = self.repo_path / 'tools' / 'perform_update.sh'
+            update_script = self.repo_path / 'addons' / 'tools' / 'perform_update.sh'
             status_file = self.repo_path / '.update_status.json'
 
             if not update_script.exists():
