@@ -25,7 +25,7 @@ if [ ! -d "$DEV_REPO_PATH/.git" ]; then
     exit 1
 fi
 
-git config --global --replace-all safe.directory "$DEV_REPO_PATH" 2>/dev/null || true
+git config --system --replace-all safe.directory "$DEV_REPO_PATH" 2>/dev/null || true
 
 # Logging function
 log_status() {
