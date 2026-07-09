@@ -184,10 +184,10 @@ fi
         """
         Compute the repo root path directly from this file's location.
         This file lives at <repo_root>/addons/features/ota_update/update_controller.py,
-        so three parent levels up is always the repo root - no candidate search needed,
+        so four parent levels up is always the repo root - no candidate search needed,
         since dev repo and deployed app are the same single repo in this architecture.
         """
-        repo_root = Path(__file__).resolve().parent.parent.parent
+        repo_root = Path(__file__).resolve().parent.parent.parent.parent
         if not (repo_root / '.git').exists():
             raise RuntimeError(f"Expected git repo at {repo_root}, but no .git directory found")
         return str(repo_root)
