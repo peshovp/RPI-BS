@@ -134,6 +134,14 @@ chmod +x tools/bin/RTKLIB-2.5.0/aarch64/str2str tools/bin/RTKLIB-2.5.0/aarch64/r
 
 ./tools/install.sh --all repo --rtkbase-repo main --user "${SUDO_USER:-$USER}" --start-services
 
+# tools/install.sh's internal git operations run as root (whole script is
+# sudo'd), which can leave a few .git internal files (FETCH_HEAD, ORIG_HEAD)
+# root-owned even though bootstrap_repo() already chown'd everything earlier.
+# Fix ownership again here, now that tools/install.sh has finished running.
+if [[ -n "${SUDO_USER:-}" ]]; then
+    chown -R "${SUDO_USER}":"${SUDO_USER}" "${SCRIPT_DIR}/.git" 2>/dev/null || true
+fi
+
 # --- 4. Final checklist ---
 echo ""
 echo "============================================================================"
