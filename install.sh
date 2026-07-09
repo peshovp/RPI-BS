@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OTA update test marker: v1
+# OTA update test marker: v2
 # =============================================================================
 # install.sh - Master installation script for RTKBase on Raspberry Pi OS Trixie
 # =============================================================================
