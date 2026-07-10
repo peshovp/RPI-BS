@@ -356,3 +356,5 @@ RTKBase uses some parts of other software:
 + [gpsd](https://gitlab.com/gpsd/gpsd) (BSD-2-Clause)
 
 RTKBase uses [OpenStreetMap](https://www.openstreetmap.org) tiles. Thank you to all the contributors!
+
+<!-- OTA auto-reload test: verifying end-to-end update + reload cycle -->
