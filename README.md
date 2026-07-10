@@ -358,3 +358,5 @@ RTKBase uses some parts of other software:
 RTKBase uses [OpenStreetMap](https://www.openstreetmap.org) tiles. Thank you to all the contributors!
 
 <!-- OTA auto-reload test: verifying end-to-end update + reload cycle -->
+
+<!-- OTA progress bar test: verifying animated progress + 20s reload cycle -->
