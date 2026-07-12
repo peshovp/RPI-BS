@@ -15,8 +15,26 @@
     <div class="col py-3 border bg-light"><b>Longitude: </b><span id="lon_value"></span></div>
     <div class="col py-3 border bg-light"><b>Height: </b><span id="height_value"></span></div>
     <div class="col-auto py-3 border bg-light"><span id="solution_status"></span></div>
-    <div class="col-auto py-3 border bg-light" id="clipboard_cell" ><img class="mx-auto align-baseline" src="../static/images/paste-solid-svgrepo-com.svg" 
+    <div class="col-auto py-3 border bg-light" id="clipboard_cell" ><img class="mx-auto align-baseline" src="../static/images/paste-solid-svgrepo-com.svg"
       title="copy coordinates to clipboard" alt="clipboard"></div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-12"><small class="text-muted">Base Station Reference Coordinates (WGS84 Ellipsoidal — used for RTK/RTCM corrections)</small></div>
+</div>
+<div class="row">
+    <div class="col py-3 border bg-light"><b>Latitude: </b><span id="base_lat_value">{{ base_coordinates.lat }}</span> °</div>
+    <div class="col py-3 border bg-light"><b>Longitude: </b><span id="base_lon_value">{{ base_coordinates.lon }}</span> °</div>
+    <div class="col py-3 border bg-light"><b>Height: </b><span id="base_height_value">{{ base_coordinates.height if base_coordinates.height else '-' }}</span> m</div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-12"><small class="text-muted">Orthometric Coordinates (MSL — geoid-corrected, for surveying reference)</small></div>
+</div>
+<div class="row">
+    <div class="col py-3 border bg-light"><b>Latitude: </b><span id="msl_lat_value">-</span> °</div>
+    <div class="col py-3 border bg-light"><b>Longitude: </b><span id="msl_lon_value">-</span> °</div>
+    <div class="col py-3 border bg-light"><b>Height: </b><span id="msl_height_value">-</span> m</div>
 </div>
 
 <div id="map" style="height: 420px; margin-top: 2em; margin-bottom: 2em;">    

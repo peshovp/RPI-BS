@@ -551,27 +551,32 @@ class SurveyController:
             logger.info(f"Position estimate: {estimate.lat:.8f}°, {estimate.lon:.8f}°, {estimate.height:.3f}m")
             logger.info(f"Std: H={estimate.horizontal_std_meters*1000:.1f}mm, V={estimate.std_height*1000:.1f}mm")
             
-            # Step 6: Apply geoid correction
+            # Step 6: Compute orthometric (MSL) height via geoid model, for
+            # DISPLAY/RECORD purposes only. RTCM 1005/1006 (broadcast to
+            # rovers via str2str -p) requires the WGS84 ELLIPSOIDAL height,
+            # so h_ortho must NEVER be passed to update_position() below.
             h_ortho = self.geoid.ellipsoidal_to_orthometric(
                 estimate.lat,
                 estimate.lon,
                 estimate.height
             )
-            
+
             if h_ortho is None:
-                logger.warning("Geoid correction failed, using ellipsoidal height")
-                h_ortho = estimate.height
+                logger.info("No geoid model loaded / position outside grid bounds - orthometric height unavailable")
             else:
                 geoid_sep = estimate.height - h_ortho
                 logger.info(f"Geoid correction: {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m")
-            
+
             # Step 7: Update RTKBase configuration
+            # CRITICAL: always pass the ELLIPSOIDAL height (estimate.height)
+            # here, never h_ortho. This is the value str2str -p embeds into
+            # RTCM 1005/1006 for rover baseline calculations.
             if is_final:
                 logger.info("🎯 FINAL UPDATE - Applying permanent coordinates...")
             else:
                 logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates...")
-            
-            if self.rtkbase.update_position(estimate.lat, estimate.lon, h_ortho):
+
+            if self.rtkbase.update_position(estimate.lat, estimate.lon, estimate.height):
                 if is_final:
                     logger.info("✓ Final configuration applied successfully")
                 else:
@@ -596,7 +601,8 @@ class SurveyController:
             position = {
                 'lat': float(estimate.lat),
                 'lon': float(estimate.lon),
-                'height': float(h_ortho)
+                'height': float(estimate.height),  # WGS84 ellipsoidal - matches settings.conf / RTCM
+                'height_msl': float(h_ortho) if h_ortho is not None else None  # orthometric (MSL), display only
             }
 
             position_std = {
@@ -682,7 +688,8 @@ class SurveyController:
                         self.state.mark_applied({
                             'lat': pos['lat'],
                             'lon': pos['lon'],
-                            'height': pos['height']
+                            'height': pos['height'],
+                            'height_msl': pos.get('height_msl')
                         })
                         
                         # CRITICAL: Wait for filesystem to stabilize (settings.conf is flushed)

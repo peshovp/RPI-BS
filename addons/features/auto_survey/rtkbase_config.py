@@ -161,7 +161,9 @@ class RTKBaseConfig:
         Args:
             lat: Latitude (degrees)
             lon: Longitude (degrees)
-            height: Height (meters, MSL)
+            height: Height (meters, WGS84 ellipsoidal - NOT MSL/orthometric.
+                    This value is embedded into RTCM 1005/1006 via str2str -p,
+                    which requires ellipsoidal height for correct ARP coordinates.)
             
         Returns:
             True if updated successfully
