@@ -29,6 +29,15 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+echo "============================================================================"
+echo "STAGE 1/5: System Update & Prerequisites"
+echo "============================================================================"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get upgrade -y -qq
+apt-get install -y -qq curl git ca-certificates
+echo "System packages updated. curl, git, and ca-certificates confirmed installed."
+
 # Checks whether BASH_SOURCE[0] points at a real file on disk that is part of
 # an actual RPI-BS checkout. Under "curl | sudo bash", BASH_SOURCE[0] is
 # something like "bash" or "/dev/stdin" -- not a real path -- so this
@@ -91,7 +100,7 @@ echo ""
 
 # --- 2. Security setup (interactive UFW confirmation happens inside) ---
 echo "============================================================================"
-echo "STAGE 1/4: Running Security Setup (tools/security_setup.sh)"
+echo "STAGE 2/5: Running Security Setup (tools/security_setup.sh)"
 echo "============================================================================"
 echo "NOTE: This script will prompt you for confirmation (e.g., enabling UFW)."
 
@@ -110,7 +119,7 @@ chmod +x tools/security_setup.sh
 # itself (it calls tools/copy_unit.sh internally) -- do not duplicate those steps here.
 echo ""
 echo "============================================================================"
-echo "STAGE 2/4: Running Upstream RTKBase Base Installation (tools/install.sh)"
+echo "STAGE 3/5: Running Upstream RTKBase Base Installation (tools/install.sh)"
 echo "============================================================================"
 
 if [ ! -L "rtkbase" ]; then
@@ -146,7 +155,7 @@ fi
 # --- 4. Final checklist ---
 echo ""
 echo "============================================================================"
-echo "STAGE 3/4: Finalization and Checklist"
+echo "STAGE 4/5: Finalization and Checklist"
 echo "============================================================================"
 
 WEB_PORT=$(python3 -c "import os; print(os.getenv('WEB_PORT', 80))")
@@ -172,6 +181,6 @@ echo 'Git remote: ' && git -C rtkbase remote get-url origin
 
 echo ""
 echo "============================================================================"
-echo "STAGE 4/4: INSTALLATION COMPLETE! Please review the status above."
+echo "STAGE 5/5: INSTALLATION COMPLETE! Please review the status above."
 echo "============================================================================"
 echo "Remember to check the logs and test connectivity."
