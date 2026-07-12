@@ -101,7 +101,7 @@ class StateManager:
             'num_epochs': 0,
             'num_updates': 0,
             'last_update_time': None,
-            'current_position': None,  # dict with lat, lon, height
+            'current_position': None,  # dict with lat, lon, height (ellipsoidal), height_msl (orthometric, nullable)
             'position_std': None,  # dict with std_lat, std_lon, std_height
             'quality_metrics': {},  # mean_ratio, mean_sats, fix_ratio
             'errors': [],
@@ -283,8 +283,9 @@ class StateManager:
         Mark survey as completed
         
         Args:
-            final_position: dict with lat, lon, height (orthometric)
-            
+            final_position: dict with lat, lon, height (WGS84 ellipsoidal),
+                             height_msl (orthometric MSL, nullable)
+
         Returns:
             True if completed successfully
         """

@@ -446,7 +446,11 @@ def status_page():
         The status web page with the gnss satellites levels and a map
     """
     base_position = rtkbaseconfig.get("main", "position").replace("'", "").split()
-    base_coordinates = {"lat" : base_position[0], "lon" : base_position[1]}
+    base_coordinates = {
+        "lat" : base_position[0],
+        "lon" : base_position[1],
+        "height" : base_position[2] if len(base_position) > 2 else None
+    }
     return render_template("status.html", base_coordinates = base_coordinates, tms_key = {"maptiler_key" : rtkbaseconfig.get("general", "maptiler_key")})
 
 @app.route('/settings', methods=['GET', 'POST'])

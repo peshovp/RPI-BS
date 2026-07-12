@@ -28,6 +28,25 @@ function copy_Coord() {
 
 $(document).ready(function () {
 
+    // Fetch Auto Survey-In's geoid-corrected (orthometric/MSL) position, if available
+    fetch('/api/auto_survey/status')
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            var pos = data && (data.applied_position || data.final_position);
+            if (pos && typeof pos.lat === "number" && typeof pos.lon === "number") {
+                document.getElementById('msl_lat_value').textContent = pos.lat.toFixed(8);
+                document.getElementById('msl_lon_value').textContent = pos.lon.toFixed(8);
+                if (typeof pos.height_msl === "number") {
+                    document.getElementById('msl_height_value').textContent = pos.height_msl.toFixed(3);
+                } else {
+                    document.getElementById('msl_height_value').textContent = "N/A (no geoid model)";
+                }
+            }
+        })
+        .catch(function(err) {
+            console.log("Failed to fetch auto survey MSL position: " + err);
+        });
+
     // SocketIO namespace:
     namespace = "/test";
 
