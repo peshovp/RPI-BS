@@ -19,7 +19,7 @@ WEB_APP_DIR = os.path.join(RTKBASE_DIR, "web_app")
 
 # Feature flags
 FEATURES = {
-    "wireguard_client": True,
+    "wireguard_client": False,
     "auto_survey_feature": True,  # Auto Survey-In for precise positioning
     "ota_update_feature": True,   # OTA Update Manager for remote updates
     "watchdog_feature": True,     # System monitoring and auto-recovery
