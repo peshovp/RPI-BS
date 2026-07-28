@@ -133,12 +133,32 @@ else
     log_status "error" "Git reset failed - repository may be corrupted"
     exit 1
 fi
-# Install script step removed: install_local.sh lives under addons/, not repo
-# root, and running it here duplicated setup that's already handled elsewhere.
-# Kept only git reset --hard + service restart below.
+log_status "info" "Redeploying systemd units (unit/ and addons/unit/)..."
 
-# Rsync-to-deployed-location step removed: dev repo and deployed app are the
-# same single directory in this architecture, so there is nothing to sync.
+REPO_OWNER=$(stat -c '%U' "$DEV_REPO_PATH")
+VENV_PYTHON="$DEV_REPO_PATH/rtkbase/venv/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+    VENV_PYTHON="$DEV_REPO_PATH/venv/bin/python"
+fi
+
+if [ -x "$DEV_REPO_PATH/tools/copy_unit.sh" ] && [ -x "$VENV_PYTHON" ]; then
+    if sudo "$DEV_REPO_PATH/tools/copy_unit.sh" --python_path "$VENV_PYTHON" --user "$REPO_OWNER" 2>&1 | tee -a /tmp/ota_update.log; then
+        log_status "info" "✓ Systemd units redeployed"
+    else
+        log_status "info" "⚠ copy_unit.sh reported an error - continuing anyway (existing units untouched)"
+    fi
+
+    # Enable (idempotent) any addon timers - e.g. geomaxima_watchdog.timer -
+    # so new addon units introduced by an update start running automatically,
+    # with no manual systemctl step required on any existing station.
+    for timer_file in "$DEV_REPO_PATH"/addons/unit/*.timer; do
+        [ -e "$timer_file" ] || continue
+        timer_name=$(basename "$timer_file")
+        sudo systemctl enable --now "$timer_name" 2>&1 | tee -a /tmp/ota_update.log || true
+    done
+else
+    log_status "info" "⚠ copy_unit.sh or venv python not found - skipping unit redeploy"
+fi
 
 log_status "info" "Scheduling service restart..."
 
