@@ -4,10 +4,10 @@ Documentation=https://github.com/peshovp/GeoMaxima-BS
 
 [Service]
 Type=oneshot
-User=peshovp
+User={user}
 AmbientCapabilities=CAP_NET_ADMIN
-WorkingDirectory=/home/peshovp/rtkbase/geomaxima
-ExecStart=/usr/bin/python3 /home/peshovp/rtkbase/geomaxima/tools/run_watchdog_check.py
+WorkingDirectory={script_path}/addons/tools
+ExecStart={python_path} {script_path}/addons/tools/run_watchdog_check.py
 StandardOutput=journal
 StandardError=journal
 
