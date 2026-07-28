@@ -39,6 +39,7 @@ _FIELD_MAP = (
     ("endpoint", "Peer", "Endpoint"),
     ("allowed_ips", "Peer", "AllowedIPs"),
     ("persistent_keepalive", "Peer", "PersistentKeepalive"),
+    ("preshared_key", "Peer", "PresharedKey"),
 )
 
 
@@ -87,15 +88,36 @@ def write_wireguard_config(fields_dict, config_file=WG_CONFIG_FILE):
         convention already used by addons/features/wireguard_client.py), then
         writes the new file with 0600 permissions (private key material).
 
+        SECRET FIELD PRESERVATION: private_key and preshared_key are treated
+        specially. The Settings form never re-populates these fields with the
+        real on-disk secret (see settings.html), so an empty incoming value
+        means "user did not intend to change this" rather than "clear it".
+        In that case, the existing value already on disk is preserved instead
+        of being silently dropped. This fixes a prior bug where any save with
+        a blank private_key field wiped PrivateKey from wg0.conf entirely,
+        causing wg-quick to fall back to an ephemeral auto-generated key on
+        next start (a new keypair every restart, permanently desyncing from
+        the peer's registered public key on the remote WireGuard server).
+
         :param fields_dict: dict with keys matching _FIELD_MAP source keys
             (private_key, address, dns, peer_public_key, endpoint,
-            allowed_ips, persistent_keepalive)
+            allowed_ips, persistent_keepalive, preshared_key)
         :param config_file: path to the wg0.conf file (overridable for tests)
         :return: True on success, False on failure
     """
     try:
         config_dir = os.path.dirname(config_file)
         os.makedirs(config_dir, mode=0o700, exist_ok=True)
+
+        _SECRET_KEYS = ("private_key", "preshared_key")
+        existing_values = {}
+        if os.path.exists(config_file):
+            try:
+                existing = get_wireguard_settings(config_file)
+                for item in existing[1:]:
+                    existing_values.update(item)
+            except Exception as e:
+                logger.warning(f"Could not read existing config for secret-field merge: {e}")
 
         # Backup existing config before overwriting
         if os.path.exists(config_file):
@@ -109,6 +131,8 @@ def write_wireguard_config(fields_dict, config_file=WG_CONFIG_FILE):
 
         for key, section, option in _FIELD_MAP:
             value = fields_dict.get(key, "")
+            if not value and key in _SECRET_KEYS:
+                value = existing_values.get(key, "")
             if value:
                 parser.set(section, option, value)
 
