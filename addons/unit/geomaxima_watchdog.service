@@ -5,6 +5,7 @@ Documentation=https://github.com/peshovp/GeoMaxima-BS
 [Service]
 Type=oneshot
 User=peshovp
+AmbientCapabilities=CAP_NET_ADMIN
 WorkingDirectory=/home/peshovp/rtkbase/geomaxima
 ExecStart=/usr/bin/python3 /home/peshovp/rtkbase/geomaxima/tools/run_watchdog_check.py
 StandardOutput=journal
