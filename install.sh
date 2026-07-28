@@ -35,7 +35,7 @@ echo "==========================================================================
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get upgrade -y -qq
-apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools
+apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv
 echo "System packages updated. curl, git, and ca-certificates confirmed installed."
 
 # Checks whether BASH_SOURCE[0] points at a real file on disk that is part of
