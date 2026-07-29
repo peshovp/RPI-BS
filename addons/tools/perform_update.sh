@@ -133,12 +133,26 @@ else
     log_status "error" "Git reset failed - repository may be corrupted"
     exit 1
 fi
+log_status "info" "Ensuring SPI is enabled (idempotent, needed for optional LCD display feature)..."
+sudo raspi-config nonint do_spi 0 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ raspi-config SPI enable failed - continuing anyway"
+
 log_status "info" "Redeploying systemd units (unit/ and addons/unit/)..."
 
 REPO_OWNER=$(stat -c '%U' "$DEV_REPO_PATH")
 VENV_PYTHON="$DEV_REPO_PATH/rtkbase/venv/bin/python"
 if [ ! -x "$VENV_PYTHON" ]; then
     VENV_PYTHON="$DEV_REPO_PATH/venv/bin/python"
+fi
+
+if [ -x "$VENV_PYTHON" ]; then
+    log_status "info" "Refreshing Python dependencies (requirements.txt) in venv..."
+    if sudo "$VENV_PYTHON" -m pip install -q -r "$DEV_REPO_PATH/web_app/requirements.txt" 2>&1 | tee -a /tmp/ota_update.log; then
+        log_status "info" "✓ Python dependencies refreshed"
+    else
+        log_status "info" "⚠ pip install refresh reported an error - continuing anyway (existing packages untouched)"
+    fi
+else
+    log_status "info" "⚠ venv python not found - skipping dependency refresh"
 fi
 
 if [ -x "$DEV_REPO_PATH/tools/copy_unit.sh" ] && [ -x "$VENV_PYTHON" ]; then
