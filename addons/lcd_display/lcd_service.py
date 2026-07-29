@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""
+GeoMaxima LCD Display Service
+==============================
+
+Drives a small SPI-connected TFT display (e.g. a 3.5" ILI9486/MPI3501
+touchscreen) showing rotating info slides about this base station:
+station identity/network addresses, GNSS fix status, system health,
+and a satellite count summary.
+
+Runs as its own standalone systemd service, entirely separate from the
+main rtkbase_web Flask process. It reads GNSS/fix data by connecting
+to the ALREADY-RUNNING Flask/SocketIO server as a client (the same way
+a browser viewing the Status page does), rather than duplicating or
+competing with the single rtkrcv process that server already owns.
+
+Hardware: SPI must be enabled (raspi-config nonint do_spi 0, done
+automatically during install.sh Stage 1/5 - requires a reboot to take
+effect on first setup).
+
+GPIO pin assignment (DC=24, RST=25, hardware SPI0/CE0) matches the
+common default pinout for MPI3501-family 3.5" displays. If your
+specific board uses different pins, adjust LCD_DC_PIN/LCD_RST_PIN
+below - this has NOT been hardware-verified and may need adjustment
+based on the actual physical wiring.
+"""
+
+import os
+import sys
+import time
+import socket as pysocket
+import threading
+import configparser
+import logging
+from datetime import timedelta
+
+import psutil
+import socketio
+from PIL import ImageFont
+
+from luma.core.interface.serial import spi
+from luma.lcd.device import ili9486
+from luma.core.render import canvas
+
+# --- Make web_app/ importable so we can reuse existing config/network code ---
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+_WEB_APP_DIR = os.path.join(_REPO_ROOT, "web_app")
+if _WEB_APP_DIR not in sys.path:
+    sys.path.insert(0, _WEB_APP_DIR)
+
+from network_infos import get_interfaces_infos  # noqa: E402
+from wireguard_settings import get_wireguard_settings  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("lcd_display")
+
+# --- Hardware configuration ---
+LCD_DC_PIN = 24
+LCD_RST_PIN = 25
+LCD_WIDTH = 480
+LCD_HEIGHT = 320
+LCD_ROTATE = 0  # 0/1/2/3 - adjust if the display is physically mounted rotated
+
+SLIDE_SECONDS = 5
+SOCKETIO_RECONNECT_DELAY = 5
+
+
+def _get_web_port():
+    """Read [general] web_port from settings.conf, falling back to settings.conf.default, then 80."""
+    config = configparser.ConfigParser()
+    default_path = os.path.join(_REPO_ROOT, "settings.conf.default")
+    live_path = os.path.join(_REPO_ROOT, "settings.conf")
+    read_files = [p for p in (default_path, live_path) if os.path.exists(p)]
+    if read_files:
+        config.read(read_files)
+    if config.has_section("general") and config.has_option("general", "web_port"):
+        return config.get("general", "web_port")
+    return "80"
+
+
+class StationData:
+    """Thread-safe holder for the latest known values from all data sources."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.solution_status = "unknown"
+        self.lat = None
+        self.lon = None
+        self.height = None
+        self.sat_counts = {}  # e.g. {"G": 8, "R": 6, "E": 5, "C": 7}
+        self.sat_total = 0
+
+    def update_coordinate(self, msg):
+        with self._lock:
+            self.solution_status = msg.get("solution status", self.solution_status)
+            pos_key = "pos llh single (deg,m) rover"
+            pos_value = msg.get(pos_key)
+            if pos_value:
+                parts = pos_value.split()
+                if len(parts) >= 3:
+                    try:
+                        self.lat = float(parts[0])
+                        self.lon = float(parts[1])
+                        self.height = float(parts[2])
+                    except ValueError:
+                        pass
+
+    def update_satellites(self, obs_rover):
+        if not isinstance(obs_rover, dict):
+            return
+        counts = {}
+        for key in obs_rover.keys():
+            if key == "gps_time":
+                continue
+            prefix = key[0].upper() if key else "?"
+            counts[prefix] = counts.get(prefix, 0) + 1
+        with self._lock:
+            self.sat_counts = counts
+            self.sat_total = sum(counts.values())
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "solution_status": self.solution_status,
+                "lat": self.lat,
+                "lon": self.lon,
+                "height": self.height,
+                "sat_counts": dict(self.sat_counts),
+                "sat_total": self.sat_total,
+            }
+
+
+station_data = StationData()
+
+
+def _start_socketio_client():
+    """Runs forever in a background thread, connecting/reconnecting to the
+    local Flask/SocketIO server's "/test" namespace and updating
+    station_data as broadcasts arrive."""
+    port = _get_web_port()
+    url = "http://127.0.0.1:%s" % port
+
+    sio = socketio.Client(reconnection=True, reconnection_delay=SOCKETIO_RECONNECT_DELAY)
+
+    @sio.on("connect", namespace="/test")
+    def on_connect():
+        logger.info("Connected to local Flask/SocketIO server at %s", url)
+
+    @sio.on("disconnect", namespace="/test")
+    def on_disconnect():
+        logger.warning("Disconnected from local Flask/SocketIO server")
+
+    @sio.on("coordinate broadcast", namespace="/test")
+    def on_coordinate(msg):
+        try:
+            station_data.update_coordinate(msg)
+        except Exception as e:
+            logger.error("Failed to process coordinate broadcast: %s", e)
+
+    @sio.on("satellite broadcast rover", namespace="/test")
+    def on_satellites(msg):
+        try:
+            station_data.update_satellites(msg)
+        except Exception as e:
+            logger.error("Failed to process satellite broadcast: %s", e)
+
+    while True:
+        try:
+            sio.connect(url, namespaces=["/test"])
+            sio.wait()
+        except Exception as e:
+            logger.warning("SocketIO connection failed (%s), retrying in %ss", e, SOCKETIO_RECONNECT_DELAY)
+            time.sleep(SOCKETIO_RECONNECT_DELAY)
+
+
+def _get_router_ip():
+    try:
+        for iface in get_interfaces_infos():
+            device = (iface.get("device") or "")
+            if device.startswith("eth") or device.startswith("en"):
+                ipv4 = iface.get("ipv4")
+                if ipv4:
+                    return ipv4[0]
+    except Exception as e:
+        logger.error("Failed to read router IP: %s", e)
+    return "N/A"
+
+
+def _get_wireguard_ip():
+    try:
+        settings = get_wireguard_settings()
+        for item in settings:
+            if isinstance(item, dict) and "address" in item:
+                addr = item["address"]
+                return addr.split("/")[0] if addr else "N/A"
+    except Exception as e:
+        logger.error("Failed to read WireGuard IP: %s", e)
+    return "N/A"
+
+
+def _get_cpu_temp_c():
+    try:
+        temps = psutil.sensors_temperatures()
+        for key in ("cpu_thermal", "cpu-thermal", "coretemp"):
+            if key in temps and temps[key]:
+                return temps[key][0].current
+        for entries in temps.values():
+            if entries:
+                return entries[0].current
+    except Exception as e:
+        logger.error("Failed to read CPU temp: %s", e)
+    return None
+
+
+def _get_disk_usage_percent(path="/"):
+    try:
+        return psutil.disk_usage(path).percent
+    except Exception as e:
+        logger.error("Failed to read disk usage: %s", e)
+        return None
+
+
+def _get_uptime_str():
+    try:
+        seconds = time.time() - psutil.boot_time()
+        return str(timedelta(seconds=int(seconds)))
+    except Exception as e:
+        logger.error("Failed to read uptime: %s", e)
+        return "N/A"
+
+
+# --- Slide rendering ---
+
+FONT_LARGE = ImageFont.load_default()
+FONT_SMALL = ImageFont.load_default()
+try:
+    FONT_LARGE = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+    FONT_SMALL = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+except Exception:
+    logger.warning("DejaVu fonts not found, falling back to default PIL font (will look small)")
+
+
+def draw_slide_identity(draw, data):
+    hostname = pysocket.gethostname()
+    draw.text((10, 10), "GeoMaxima", font=FONT_LARGE, fill="white")
+    draw.text((10, 50), "Host: %s" % hostname, font=FONT_SMALL, fill="white")
+    draw.text((10, 80), "LAN IP: %s" % _get_router_ip(), font=FONT_SMALL, fill="white")
+    draw.text((10, 110), "VPN IP: %s" % _get_wireguard_ip(), font=FONT_SMALL, fill="white")
+
+
+def draw_slide_gnss(draw, data):
+    status = data["solution_status"] or "unknown"
+    color = {"fix": "lime", "float": "yellow", "single": "orange"}.get(status.lower(), "white")
+    draw.text((10, 10), "GNSS Status", font=FONT_LARGE, fill="white")
+    draw.text((10, 50), "Solution: %s" % status.upper(), font=FONT_SMALL, fill=color)
+    if data["lat"] is not None:
+        draw.text((10, 80), "Lat: %.8f" % data["lat"], font=FONT_SMALL, fill="white")
+        draw.text((10, 105), "Lon: %.8f" % data["lon"], font=FONT_SMALL, fill="white")
+        draw.text((10, 130), "Height: %.3f m" % data["height"], font=FONT_SMALL, fill="white")
+    else:
+        draw.text((10, 80), "No position data yet", font=FONT_SMALL, fill="gray")
+
+
+def draw_slide_health(draw, data):
+    draw.text((10, 10), "System Health", font=FONT_LARGE, fill="white")
+    temp = _get_cpu_temp_c()
+    temp_str = ("%.1f C" % temp) if temp is not None else "N/A"
+    temp_color = "lime"
+    if temp is not None:
+        if temp >= 80:
+            temp_color = "red"
+        elif temp >= 70:
+            temp_color = "yellow"
+    draw.text((10, 50), "CPU Temp: %s" % temp_str, font=FONT_SMALL, fill=temp_color)
+
+    disk = _get_disk_usage_percent("/")
+    disk_str = ("%.0f%%" % disk) if disk is not None else "N/A"
+    disk_color = "lime" if (disk is None or disk < 80) else ("yellow" if disk < 90 else "red")
+    draw.text((10, 80), "Disk Used: %s" % disk_str, font=FONT_SMALL, fill=disk_color)
+
+    draw.text((10, 110), "Uptime: %s" % _get_uptime_str(), font=FONT_SMALL, fill="white")
+
+
+def draw_slide_satellites(draw, data):
+    draw.text((10, 10), "Satellites", font=FONT_LARGE, fill="white")
+    draw.text((10, 50), "Total: %d" % data["sat_total"], font=FONT_SMALL, fill="white")
+    labels = {"G": "GPS", "R": "GLONASS", "E": "Galileo", "C": "BeiDou"}
+    y = 80
+    for prefix, name in labels.items():
+        count = data["sat_counts"].get(prefix, 0)
+        draw.text((10, y), "%s: %d" % (name, count), font=FONT_SMALL, fill="white")
+        y += 25
+
+
+SLIDES = [draw_slide_identity, draw_slide_gnss, draw_slide_health, draw_slide_satellites]
+
+
+def main():
+    logger.info("Starting GeoMaxima LCD Display service")
+
+    listener_thread = threading.Thread(target=_start_socketio_client, daemon=True)
+    listener_thread.start()
+
+    serial = spi(port=0, device=0, gpio_DC=LCD_DC_PIN, gpio_RST=LCD_RST_PIN)
+    device = ili9486(serial, width=LCD_WIDTH, height=LCD_HEIGHT, rotate=LCD_ROTATE)
+
+    slide_index = 0
+    while True:
+        data = station_data.snapshot()
+        try:
+            with canvas(device) as draw:
+                draw.rectangle(device.bounding_box, outline="black", fill="black")
+                SLIDES[slide_index](draw, data)
+        except Exception as e:
+            logger.error("Failed to render slide %d: %s", slide_index, e)
+
+        slide_index = (slide_index + 1) % len(SLIDES)
+        time.sleep(SLIDE_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
