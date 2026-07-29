@@ -202,7 +202,7 @@ class ServiceMonitor:
             logger.info(f"Attempting to restart {service_name}...")
             
             result = subprocess.run(
-                ['sudo', 'systemctl', 'restart', service_name],
+                ['systemctl', 'restart', service_name],
                 capture_output=True,
                 text=True,
                 timeout=30
