@@ -44,3 +44,5 @@ zope.interface==7.2
 luma.lcd==2.13.0
 luma.core
 Pillow
+RPi.GPIO
+spidev

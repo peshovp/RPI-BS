@@ -57,9 +57,14 @@ logger = logging.getLogger("lcd_display")
 # --- Hardware configuration ---
 LCD_DC_PIN = 24
 LCD_RST_PIN = 25
-LCD_WIDTH = 480
-LCD_HEIGHT = 320
-LCD_ROTATE = 0  # 0/1/2/3 - adjust if the display is physically mounted rotated
+# luma.lcd's ili9486 class only supports native portrait mode
+# (width=320, height=480) - landscape orientation is achieved via the
+# rotate parameter (1 or 3), not by passing swapped width/height
+# values directly. Try rotate=1 first; switch to rotate=3 if the image
+# appears upside-down on the actual hardware.
+LCD_WIDTH = 320
+LCD_HEIGHT = 480
+LCD_ROTATE = 1
 
 SLIDE_SECONDS = 5
 SOCKETIO_RECONNECT_DELAY = 5
