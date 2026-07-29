@@ -1195,5 +1195,221 @@ $(document).ready(function () {
             });
     });
 
+    // ####################### WATCHDOG #######################
+
+    function watchdogToggleMaster() {
+        var enabled = $('#watchdog-master-switch').is(':checked');
+        fetch('/geomaxima/watchdog/api/toggle-watchdog', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: enabled})
+        })
+            .then(function(r) { return r.json(); })
+            .catch(function(err) { console.log('Watchdog toggle failed: ' + err); });
+    }
+
+    function watchdogToggleMonitor(monitorName, checkboxId) {
+        var enabled = $('#' + checkboxId).is(':checked');
+        fetch('/geomaxima/watchdog/api/toggle-monitor', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({monitor: monitorName, enabled: enabled})
+        })
+            .then(function(r) { return r.json(); })
+            .catch(function(err) { console.log('Watchdog monitor toggle failed (' + monitorName + '): ' + err); });
+    }
+
+    $('#watchdog-master-switch').change(watchdogToggleMaster);
+    $('#watchdog-service-switch').change(function() { watchdogToggleMonitor('service', 'watchdog-service-switch'); });
+    $('#watchdog-network-switch').change(function() { watchdogToggleMonitor('network', 'watchdog-network-switch'); });
+    $('#watchdog-disk-switch').change(function() { watchdogToggleMonitor('disk', 'watchdog-disk-switch'); });
+    $('#watchdog-gnss-switch').change(function() { watchdogToggleMonitor('gnss', 'watchdog-gnss-switch'); });
+    $('#watchdog-temperature-switch').change(function() { watchdogToggleMonitor('temperature', 'watchdog-temperature-switch'); });
+    $('#watchdog-cpu-switch').change(function() { watchdogToggleMonitor('cpu', 'watchdog-cpu-switch'); });
+    $('#watchdog-memory-switch').change(function() { watchdogToggleMonitor('memory', 'watchdog-memory-switch'); });
+
+    $('#watchdog-save-btn').on('click', function() {
+        var statusElt = document.getElementById('watchdog-save-status');
+        statusElt.textContent = 'Saving...';
+        statusElt.className = 'small text-right text-muted';
+
+        var config = {
+            monitors: {
+                service: {
+                    auto_restart: $('#watchdog-service-auto-restart').is(':checked'),
+                    max_restart_attempts: parseInt($('#watchdog-service-max-attempts').val(), 10)
+                },
+                network: {
+                    check_internet: $('#watchdog-network-check-internet').is(':checked'),
+                    check_vpn: $('#watchdog-network-check-vpn').is(':checked'),
+                    vpn_auto_restart: $('#watchdog-vpn-auto-restart').is(':checked'),
+                    vpn_max_restart_attempts: parseInt($('#watchdog-vpn-max-attempts').val(), 10),
+                    vpn_restart_cooldown_seconds: parseInt($('#watchdog-vpn-cooldown').val(), 10),
+                    vpn_handshake_max_age_seconds: parseInt($('#watchdog-vpn-handshake-age').val(), 10)
+                },
+                disk: {
+                    warning_threshold_percent: parseInt($('#watchdog-disk-warning').val(), 10),
+                    critical_threshold_percent: parseInt($('#watchdog-disk-critical').val(), 10)
+                },
+                gnss: {
+                    serial_port: $('#watchdog-gnss-serial-port').val()
+                },
+                temperature: {
+                    warning_threshold: parseInt($('#watchdog-temp-warning').val(), 10),
+                    critical_threshold: parseInt($('#watchdog-temp-critical').val(), 10)
+                },
+                cpu: {
+                    warning_threshold: parseInt($('#watchdog-cpu-warning').val(), 10),
+                    critical_threshold: parseInt($('#watchdog-cpu-critical').val(), 10)
+                },
+                memory: {
+                    warning_threshold: parseInt($('#watchdog-mem-warning').val(), 10),
+                    critical_threshold: parseInt($('#watchdog-mem-critical').val(), 10),
+                    check_swap: $('#watchdog-mem-check-swap').is(':checked')
+                }
+            },
+            notifications: {
+                email: {
+                    enabled: $('#watchdog-email-switch').is(':checked'),
+                    smtp_server: $('#watchdog-email-smtp-server').val(),
+                    smtp_port: parseInt($('#watchdog-email-smtp-port').val(), 10),
+                    use_tls: $('#watchdog-email-use-tls').is(':checked'),
+                    from_address: $('#watchdog-email-from').val(),
+                    smtp_user: $('#watchdog-email-smtp-user').val(),
+                    to_addresses: $('#watchdog-email-to').val().split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; })
+                },
+                telegram: {
+                    enabled: $('#watchdog-telegram-switch').is(':checked'),
+                    chat_id: $('#watchdog-telegram-chat-id').val()
+                }
+            }
+        };
+
+        var emailPassword = $('#watchdog-email-smtp-password').val();
+        if (emailPassword) {
+            config.notifications.email.smtp_password = emailPassword;
+        }
+        var telegramToken = $('#watchdog-telegram-token').val();
+        if (telegramToken) {
+            config.notifications.telegram.bot_token = telegramToken;
+        }
+
+        fetch('/geomaxima/watchdog/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    statusElt.textContent = 'Configuration saved.';
+                    statusElt.className = 'small text-right text-success';
+                    $('#watchdog-email-smtp-password').val('');
+                    $('#watchdog-telegram-token').val('');
+                } else {
+                    statusElt.textContent = 'Error: ' + (data.error || 'Save failed');
+                    statusElt.className = 'small text-right text-danger';
+                }
+            })
+            .catch(function(err) {
+                statusElt.textContent = 'Error saving configuration';
+                statusElt.className = 'small text-right text-danger';
+                console.log('Watchdog config save failed: ' + err);
+            });
+    });
+
+    $('#watchdog-run-checks-btn').on('click', function() {
+        var btn = this;
+        $(btn).prop('disabled', true).text('Running...');
+        fetch('/geomaxima/watchdog/api/run-checks', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    alert('Checks completed.');
+                } else {
+                    alert('Error: ' + (data.error || 'Run checks failed'));
+                }
+            })
+            .catch(function(err) {
+                alert('Error running checks');
+                console.log('Watchdog run-checks failed: ' + err);
+            })
+            .then(function() {
+                $(btn).prop('disabled', false).text('Run Checks Now');
+            });
+    });
+
+    $('#watchdog-test-email-btn').on('click', function() {
+        var btn = this;
+        var statusElt = document.getElementById('watchdog-test-email-status');
+        $(btn).prop('disabled', true);
+        statusElt.textContent = 'Sending...';
+        statusElt.className = 'small ml-2 text-muted';
+
+        var emailConfig = {
+            enabled: true,
+            smtp_server: $('#watchdog-email-smtp-server').val(),
+            smtp_port: parseInt($('#watchdog-email-smtp-port').val(), 10),
+            use_tls: $('#watchdog-email-use-tls').is(':checked'),
+            from_address: $('#watchdog-email-from').val(),
+            smtp_user: $('#watchdog-email-smtp-user').val(),
+            smtp_password: $('#watchdog-email-smtp-password').val(),
+            to_addresses: $('#watchdog-email-to').val().split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; })
+        };
+
+        fetch('/geomaxima/watchdog/api/test-email', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(emailConfig)
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                statusElt.textContent = data.message || (data.success ? 'Sent.' : 'Failed.');
+                statusElt.className = 'small ml-2 ' + (data.success ? 'text-success' : 'text-danger');
+            })
+            .catch(function(err) {
+                statusElt.textContent = 'Error sending test email';
+                statusElt.className = 'small ml-2 text-danger';
+            })
+            .then(function() {
+                $(btn).prop('disabled', false);
+            });
+    });
+
+    $('#watchdog-test-telegram-btn').on('click', function() {
+        var btn = this;
+        var statusElt = document.getElementById('watchdog-test-telegram-status');
+        var token = $('#watchdog-telegram-token').val();
+        var chatId = $('#watchdog-telegram-chat-id').val();
+
+        if (!token) {
+            statusElt.textContent = 'Enter a bot token first.';
+            statusElt.className = 'small ml-2 text-danger';
+            return;
+        }
+
+        $(btn).prop('disabled', true);
+        statusElt.textContent = 'Sending...';
+        statusElt.className = 'small ml-2 text-muted';
+
+        fetch('/geomaxima/watchdog/api/test-telegram', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: true, bot_token: token, chat_id: chatId})
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                statusElt.textContent = data.message || (data.success ? 'Sent.' : 'Failed.');
+                statusElt.className = 'small ml-2 ' + (data.success ? 'text-success' : 'text-danger');
+            })
+            .catch(function(err) {
+                statusElt.textContent = 'Error sending test message';
+                statusElt.className = 'small ml-2 text-danger';
+            })
+            .then(function() {
+                $(btn).prop('disabled', false);
+            });
+    });
+
     // end of document.ready
 });
