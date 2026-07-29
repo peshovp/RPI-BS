@@ -102,10 +102,11 @@ except ImportError as e:
     UpdateController = None
 
 try:
-    from addons.features.watchdog_feature import watchdog_bp
+    from addons.features.watchdog_feature import watchdog_bp, watchdog_controller
     app.register_blueprint(watchdog_bp)
 except ImportError as e:
     print(f"Watchdog feature unavailable (addons import failed): {e}")
+    watchdog_controller = None
 
 login=LoginManager(app)
 login.login_view = 'login_page'
@@ -495,6 +496,14 @@ def settings_page():
     file_settings = rtkbaseconfig.get_file_settings()
     wireguard_settings = get_wireguard_settings()
 
+    if watchdog_controller is not None:
+        watchdog_status = watchdog_controller.get_status()
+        watchdog_config = watchdog_controller.get_config()
+    else:
+        watchdog_status = {"enabled": False}
+        watchdog_config = {"monitors": {"service": {"enabled": False, "auto_restart": False, "max_restart_attempts": 3, "services": []},
+                                          "network": {"enabled": False, "check_internet": True, "check_vpn": False, "vpn_auto_restart": True, "vpn_max_restart_attempts": 3, "vpn_restart_cooldown_seconds": 300, "vpn_handshake_max_age_seconds": 300}}}
+
     return render_template("settings.html", main_settings = main_settings,
                                             ntrip_A_settings = ntrip_A_settings,
                                             ntrip_B_settings = ntrip_B_settings,
@@ -506,6 +515,8 @@ def settings_page():
                                             rtcm_serial_settings = rtcm_serial_settings,
                                             file_settings = file_settings,
                                             wireguard_settings = wireguard_settings,
+                                            watchdog_status = watchdog_status,
+                                            watchdog_config = watchdog_config,
                                             os_infos = distro.info(),)
 
 #### Auto Survey-In ####

@@ -46,14 +46,14 @@ class WatchdogController:
         logger.info("Watchdog controller initialized")
     
     def _load_config(self) -> Dict:
-        """Load watchdog configuration or create default"""
-        if self.config_file.exists():
-            try:
-                with open(self.config_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load config: {e}")
-        
+        """Load watchdog configuration or create default, merging in any
+        keys added to the in-code defaults since a config file was first
+        written to disk (e.g. an existing installation's watchdog_config.json
+        predates newer keys like vpn_auto_restart) - without this merge,
+        get_config() would silently omit those keys forever for any station
+        whose config file already existed, since the old code returned the
+        loaded file verbatim with no defaults applied at all once the file
+        was found to exist and parse successfully."""
         # Default configuration
         default_config = {
             'enabled': False,
@@ -77,7 +77,11 @@ class WatchdogController:
                     'check_vpn': True,
                     'ping_hosts': ['8.8.8.8', '1.1.1.1'],
                     'vpn_interface': 'wg0',
-                    'alert_on_failure': True
+                    'alert_on_failure': True,
+                    'vpn_auto_restart': True,
+                    'vpn_max_restart_attempts': 3,
+                    'vpn_restart_cooldown_seconds': 300,
+                    'vpn_handshake_max_age_seconds': 300
                 },
                 'disk': {
                     'enabled': True,
@@ -128,9 +132,24 @@ class WatchdogController:
             }
         }
         
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r') as f:
+                    loaded_config = json.load(f)
+                # _deep_merge mutates its first argument (default_config) in
+                # place and returns None - it does not return a new dict.
+                # The merged result lives in default_config itself after
+                # this call, not in a captured return value.
+                self._deep_merge(default_config, loaded_config)
+                if default_config != loaded_config:
+                    self._save_config(default_config)
+                return default_config
+            except Exception as e:
+                logger.error(f"Failed to load config: {e}")
+
         self._save_config(default_config)
         return default_config
-    
+
     def _save_config(self, config: Dict) -> bool:
         """Save configuration to file"""
         try:

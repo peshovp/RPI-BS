@@ -662,6 +662,97 @@
   </div>
 </div>
 
+<!-- ######## Watchdog ########-->
+<div class="container">
+  <div id="watchdog_space" class="form-group row">
+    <div class="col">
+      <label class="col-4 col-form-label col-form-label-lg">Watchdog</label>
+      <input id="watchdog-master-switch" type="checkbox" data-toggle="toggle" data-onstyle="info" data-offstyle="outline-secondary" {% if watchdog_status.enabled %}checked{% endif %}>
+      <button class="btn btn-secondary" type="button" data-toggle="collapse" data-target="#watchdog_options" aria-expanded="false" aria-controls="watchdog_options">Options</button>
+      <a data-toggle="tooltip" id="watchdog_tooltip" title="Automatically monitors system health (services, network/VPN, disk, GNSS, temperature, CPU, memory) and can self-heal by restarting failed services or the VPN tunnel.">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#6c757d" class="bi bi-info-circle" viewBox="0 0 16 16">
+          <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+          <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+        </svg>
+      </a>
+    </div>
+  </div>
+  <div id="watchdog_options" class="collapse">
+
+    <!-- Service Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">Service Monitor</h6>
+          <input id="watchdog-service-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.service.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Monitors RTKBase services and automatically restarts them on failure.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label class="col-sm-4 col-form-label col-form-label-sm">Auto-restart:</label>
+          <div class="col-sm-8">
+            <input id="watchdog-service-auto-restart" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.service.auto_restart %}checked{% endif %}>
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-service-max-attempts" class="col-sm-4 col-form-label col-form-label-sm">Max restart attempts:</label>
+          <div class="col-sm-8">
+            <input id="watchdog-service-max-attempts" type="number" class="form-control form-control-sm" min="1" max="10" value="{{ watchdog_config.monitors.service.max_restart_attempts }}">
+          </div>
+        </div>
+        <small class="form-text text-muted">Monitored services: {{ ', '.join(watchdog_config.monitors.service.services) }}</small>
+      </div>
+    </div>
+
+    <!-- Network / VPN Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">Network / VPN Monitor</h6>
+          <input id="watchdog-network-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.network.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Checks internet connectivity and VPN tunnel health (handshake-based, not just link state), with automatic tunnel restart on stale/missing handshake.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label class="col-sm-5 col-form-label col-form-label-sm">Check internet:</label>
+          <div class="col-sm-7">
+            <input id="watchdog-network-check-internet" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.network.check_internet %}checked{% endif %}>
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label class="col-sm-5 col-form-label col-form-label-sm">Check VPN:</label>
+          <div class="col-sm-7">
+            <input id="watchdog-network-check-vpn" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.network.check_vpn %}checked{% endif %}>
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label class="col-sm-5 col-form-label col-form-label-sm">VPN auto-restart:</label>
+          <div class="col-sm-7">
+            <input id="watchdog-vpn-auto-restart" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.network.vpn_auto_restart %}checked{% endif %}>
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-vpn-max-attempts" class="col-sm-5 col-form-label col-form-label-sm">VPN max restart attempts:</label>
+          <div class="col-sm-7">
+            <input id="watchdog-vpn-max-attempts" type="number" class="form-control form-control-sm" min="1" max="10" value="{{ watchdog_config.monitors.network.vpn_max_restart_attempts }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-vpn-cooldown" class="col-sm-5 col-form-label col-form-label-sm">VPN restart cooldown (sec):</label>
+          <div class="col-sm-7">
+            <input id="watchdog-vpn-cooldown" type="number" class="form-control form-control-sm" min="30" max="3600" value="{{ watchdog_config.monitors.network.vpn_restart_cooldown_seconds }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-vpn-handshake-age" class="col-sm-5 col-form-label col-form-label-sm">Max handshake age (sec):</label>
+          <div class="col-sm-7">
+            <input id="watchdog-vpn-handshake-age" type="number" class="form-control form-control-sm" min="30" max="3600" value="{{ watchdog_config.monitors.network.vpn_handshake_max_age_seconds }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <div id="system_settings" class="container">
     <h4> System Settings:</h4>
     <div class="row py-2 align-items-center">
