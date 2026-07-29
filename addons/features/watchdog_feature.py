@@ -5,6 +5,7 @@ Watchdog Feature - Flask Blueprint
 import logging
 import socket
 from flask import Blueprint, render_template, jsonify, request
+from flask_login import login_required
 from .watchdog.watchdog_controller import WatchdogController
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ def register_routes(app, gm_blueprint):
 
 
 @watchdog_bp.route('/')
+@login_required
 def index():
     """Watchdog dashboard"""
     try:
@@ -48,6 +50,7 @@ def index():
 # API Endpoints
 
 @watchdog_bp.route('/api/status', methods=['GET'])
+@login_required
 def api_get_status():
     """Get watchdog status"""
     try:
@@ -59,6 +62,7 @@ def api_get_status():
 
 
 @watchdog_bp.route('/api/config', methods=['GET'])
+@login_required
 def api_get_config():
     """Get watchdog configuration"""
     try:
@@ -70,6 +74,7 @@ def api_get_config():
 
 
 @watchdog_bp.route('/api/config', methods=['POST'])
+@login_required
 def api_update_config():
     """Update watchdog configuration"""
     try:
@@ -91,6 +96,7 @@ def api_update_config():
 
 
 @watchdog_bp.route('/api/run-checks', methods=['POST'])
+@login_required
 def api_run_checks():
     """Run all monitoring checks manually"""
     try:
@@ -102,6 +108,7 @@ def api_run_checks():
 
 
 @watchdog_bp.route('/api/incidents', methods=['GET'])
+@login_required
 def api_get_incidents():
     """Get incident history"""
     try:
@@ -114,6 +121,7 @@ def api_get_incidents():
 
 
 @watchdog_bp.route('/api/toggle-monitor', methods=['POST'])
+@login_required
 def api_toggle_monitor():
     """Enable/disable a specific monitor"""
     try:
@@ -149,6 +157,7 @@ def api_toggle_monitor():
 
 
 @watchdog_bp.route('/api/toggle-watchdog', methods=['POST'])
+@login_required
 def api_toggle_watchdog():
     """Enable/disable entire watchdog system"""
     try:
@@ -172,6 +181,7 @@ def api_toggle_watchdog():
 
 
 @watchdog_bp.route('/api/test-email', methods=['POST'])
+@login_required
 def api_test_email():
     """Test email notification configuration"""
     try:
@@ -188,6 +198,7 @@ def api_test_email():
 
 
 @watchdog_bp.route('/api/test-telegram', methods=['POST'])
+@login_required
 def api_test_telegram():
     """Test Telegram notification configuration"""
     try:
