@@ -35,7 +35,7 @@ echo "==========================================================================
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get upgrade -y -qq
-apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv
+apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv fonts-dejavu-core
 raspi-config nonint do_spi 0
 echo "System packages updated. curl, git, and ca-certificates confirmed installed."
 
