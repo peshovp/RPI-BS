@@ -121,6 +121,7 @@ class WatchdogController:
                     'smtp_server': '',
                     'smtp_port': 587,
                     'from_address': '',
+                    'smtp_user': '',
                     'to_addresses': [],
                     'use_tls': True
                 },
