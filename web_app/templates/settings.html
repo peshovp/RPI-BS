@@ -750,6 +750,122 @@
       </div>
     </div>
 
+    <!-- Disk Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">Disk Monitor</h6>
+          <input id="watchdog-disk-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.disk.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Monitors disk space usage on configured paths and alerts when thresholds are exceeded.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label for="watchdog-disk-warning" class="col-sm-6 col-form-label col-form-label-sm">Warning threshold (%):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-disk-warning" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.disk.warning_threshold_percent }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-disk-critical" class="col-sm-6 col-form-label col-form-label-sm">Critical threshold (%):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-disk-critical" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.disk.critical_threshold_percent }}">
+          </div>
+        </div>
+        <small class="form-text text-muted">Checked paths: {{ ', '.join(watchdog_config.monitors.disk.check_paths) }}</small>
+      </div>
+    </div>
+
+    <!-- GNSS Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">GNSS Receiver Monitor</h6>
+          <input id="watchdog-gnss-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.gnss.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Checks GNSS receiver connectivity and data stream health.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label for="watchdog-gnss-serial-port" class="col-sm-4 col-form-label col-form-label-sm">Serial port:</label>
+          <div class="col-sm-8">
+            <input id="watchdog-gnss-serial-port" type="text" class="form-control form-control-sm" value="{{ watchdog_config.monitors.gnss.serial_port }}" placeholder="/dev/ttyACM0">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Temperature Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">Temperature Monitor</h6>
+          <input id="watchdog-temperature-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.temperature.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Monitors CPU temperature and alerts on overheating.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label for="watchdog-temp-warning" class="col-sm-6 col-form-label col-form-label-sm">Warning threshold (°C):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-temp-warning" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.temperature.warning_threshold }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-temp-critical" class="col-sm-6 col-form-label col-form-label-sm">Critical threshold (°C):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-temp-critical" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.temperature.critical_threshold }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CPU Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">CPU Monitor</h6>
+          <input id="watchdog-cpu-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.cpu.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Monitors CPU load.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label for="watchdog-cpu-warning" class="col-sm-6 col-form-label col-form-label-sm">Warning threshold (%):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-cpu-warning" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.cpu.warning_threshold }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-cpu-critical" class="col-sm-6 col-form-label col-form-label-sm">Critical threshold (%):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-cpu-critical" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.cpu.critical_threshold }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Memory Monitor -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-0">Memory Monitor</h6>
+          <input id="watchdog-memory-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.memory.enabled %}checked{% endif %}>
+        </div>
+        <small class="form-text text-muted mb-2">Monitors RAM and swap usage.</small>
+        <div class="form-group row mt-2 mb-1">
+          <label for="watchdog-mem-warning" class="col-sm-6 col-form-label col-form-label-sm">Warning threshold (%):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-mem-warning" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.memory.warning_threshold }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label for="watchdog-mem-critical" class="col-sm-6 col-form-label col-form-label-sm">Critical threshold (%):</label>
+          <div class="col-sm-6">
+            <input id="watchdog-mem-critical" type="number" class="form-control form-control-sm" min="50" max="100" value="{{ watchdog_config.monitors.memory.critical_threshold }}">
+          </div>
+        </div>
+        <div class="form-group row mb-1">
+          <label class="col-sm-6 col-form-label col-form-label-sm">Check swap:</label>
+          <div class="col-sm-6">
+            <input id="watchdog-mem-check-swap" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="success" data-offstyle="outline-secondary" {% if watchdog_config.monitors.memory.check_swap %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
