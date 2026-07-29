@@ -1,0 +1,18 @@
+[Unit]
+Description=GeoMaxima LCD Display Service
+Documentation=https://github.com/peshovp/GeoMaxima-BS
+After=rtkbase_web.service
+Wants=rtkbase_web.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory={script_path}/addons/lcd_display
+ExecStart={python_path} {script_path}/addons/lcd_display/lcd_service.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
