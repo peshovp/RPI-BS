@@ -101,6 +101,12 @@ except ImportError as e:
     print(f"OTA Update feature unavailable (addons import failed): {e}")
     UpdateController = None
 
+try:
+    from addons.features.watchdog_feature import watchdog_bp
+    app.register_blueprint(watchdog_bp)
+except ImportError as e:
+    print(f"Watchdog feature unavailable (addons import failed): {e}")
+
 login=LoginManager(app)
 login.login_view = 'login_page'
 socketio = SocketIO(app, async_mode = 'gevent')
