@@ -41,6 +41,7 @@ from PIL import ImageFont
 from luma.core.interface.serial import spi
 from luma.lcd.device import ili9486
 from luma.core.render import canvas
+from luma.core.framebuffer import full_frame
 
 # --- Make web_app/ importable so we can reuse existing config/network code ---
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -306,8 +307,8 @@ def main():
     listener_thread = threading.Thread(target=_start_socketio_client, daemon=True)
     listener_thread.start()
 
-    serial = spi(port=0, device=0, gpio_DC=LCD_DC_PIN, gpio_RST=LCD_RST_PIN)
-    device = ili9486(serial, width=LCD_WIDTH, height=LCD_HEIGHT, rotate=LCD_ROTATE)
+    serial = spi(port=0, device=0, gpio_DC=LCD_DC_PIN, gpio_RST=LCD_RST_PIN, bus_speed_hz=8000000)
+    device = ili9486(serial, width=LCD_WIDTH, height=LCD_HEIGHT, rotate=LCD_ROTATE, framebuffer=full_frame())
 
     slide_index = 0
     while True:
