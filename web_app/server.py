@@ -801,6 +801,18 @@ def logs_page():
     """
     return render_template("logs.html")
 
+@app.route('/watchdog')
+@login_required
+def watchdog_page():
+    """
+        Redirects to the GeoMaxima Watchdog dashboard (a self-contained
+        Jinja template under addons/templates/geomaxima/watchdog.html that
+        already extends base.html), so it appears as a native nav tab
+        instead of only being reachable via the separate /geomaxima/
+        addon URL prefix.
+    """
+    return redirect(url_for('watchdog.index'))
+
 @app.route("/logs/download/<path:log_name>")
 @login_required
 def downloadLog(log_name):
