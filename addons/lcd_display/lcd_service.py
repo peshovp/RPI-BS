@@ -40,8 +40,56 @@ from PIL import ImageFont
 
 from luma.core.interface.serial import spi
 from luma.lcd.device import ili9486
+import luma.lcd.const
+from time import sleep as _sleep
 from luma.core.render import canvas
 from luma.core.framebuffer import full_frame
+
+
+class ili9486_clone(ili9486):
+    """
+    Alternate ILI9486 init sequence for cheap clone boards (e.g. MPI3501)
+    that don't use the Waveshare-specific 16-bit-padded command format
+    the standard luma.lcd ili9486 class was built for. Many clone boards
+    render only a quarter of the screen or show interlacing artifacts
+    with the stock init sequence.
+
+    Based on a community-reported fix at:
+    https://github.com/rm-hull/luma.lcd/issues/135
+    """
+
+    def __init__(self, serial_interface=None, width=320, height=480, rotate=0,
+                 framebuffer=None, h_offset=0, v_offset=0, bgr=False, invert=True,
+                 **kwargs):
+        # Deliberately skip ili9486.__init__ (which runs the incompatible
+        # padded init sequence) and go straight to its parent instead.
+        super(ili9486, self).__init__(luma.lcd.const.ili9486, serial_interface, **kwargs)
+        self.capabilities(width, height, rotate, mode="RGB")
+        self.init_framebuffer(framebuffer, 25)
+
+        if h_offset != 0 or v_offset != 0:
+            def offset(bbox):
+                left, top, right, bottom = bbox
+                return (left + h_offset, top + v_offset, right + h_offset, bottom + v_offset)
+            self.apply_offsets = offset
+        else:
+            self.apply_offsets = lambda bbox: bbox
+
+        order = 0x00 if bgr else 0x08
+
+        self.command(0x11)  # sleep out
+        _sleep(0.150)
+        self.command(0x3a, 0x66)  # Interface Pixel Format
+        self.command(0x36, 0x88 | order)  # Memory Access control (MADCTL)
+        self.command(0xc2, 0x44)  # Power Control 3
+        self.command(0xc5, 0x00, 0x00, 0x00, 0x00)  # VCOM control
+        self.command(0xe0,
+            0x0f, 0x1f, 0x1c, 0x0c, 0x0f, 0x08, 0x48, 0x98,
+            0x37, 0x0a, 0x13, 0x04, 0x11, 0x0d, 0x00)  # Positive Gamma control
+        self.command(0x11)
+        _sleep(0.150)
+        self.clear()
+        self.show()
 
 # --- Make web_app/ importable so we can reuse existing config/network code ---
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -102,7 +150,7 @@ class StationData:
             pos_key = "pos llh single (deg,m) rover"
             pos_value = msg.get(pos_key)
             if pos_value:
-                parts = pos_value.split()
+                parts = pos_value.split(",")
                 if len(parts) >= 3:
                     try:
                         self.lat = float(parts[0])
@@ -308,7 +356,7 @@ def main():
     listener_thread.start()
 
     serial = spi(port=0, device=0, gpio_DC=LCD_DC_PIN, gpio_RST=LCD_RST_PIN, bus_speed_hz=8000000)
-    device = ili9486(serial, width=LCD_WIDTH, height=LCD_HEIGHT, rotate=LCD_ROTATE, framebuffer=full_frame())
+    device = ili9486_clone(serial, width=LCD_WIDTH, height=LCD_HEIGHT, rotate=LCD_ROTATE, framebuffer=full_frame())
 
     slide_index = 0
     while True:
