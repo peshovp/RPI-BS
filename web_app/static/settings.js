@@ -788,6 +788,9 @@ $(document).ready(function () {
     var autoSurveyDetailsElt = document.getElementById("auto-survey-details");
     var autoSurveySwitch = $("#auto-survey-switch");
     var autoSurveyPollInterval = null;
+    var autoSurveyCountdownInterval = null;
+    var autoSurveyStartTime = null;
+    var autoSurveyTargetHours = 24;
 
     function parseUtcTimestamp(timestampStr) {
         // Backend timestamps (datetime.utcnow().isoformat()) have no timezone
@@ -811,6 +814,10 @@ $(document).ready(function () {
             clearInterval(autoSurveyPollInterval);
             autoSurveyPollInterval = null;
         }
+        if (autoSurveyCountdownInterval !== null) {
+            clearInterval(autoSurveyCountdownInterval);
+            autoSurveyCountdownInterval = null;
+        }
         autoSurveyStatusTextElt.textContent = "Status: Idle";
         setAutoSurveyBadge("idle");
         autoSurveyProgressBarElt.style.width = "0%";
@@ -820,10 +827,29 @@ $(document).ready(function () {
         autoSurveySwitch.bootstrapToggle("off", true);
     }
 
+    function autoSurveyTickCountdown() {
+        if (!autoSurveyStartTime) {
+            return;
+        }
+        var elapsedMs = Date.now() - autoSurveyStartTime.getTime();
+        var targetMs = autoSurveyTargetHours * 3600 * 1000;
+        var percent = targetMs > 0 ? Math.min(100, Math.round((elapsedMs / targetMs) * 100)) : 0;
+
+        autoSurveyProgressBarElt.style.width = percent + "%";
+        autoSurveyProgressBarElt.setAttribute("aria-valuenow", percent);
+        autoSurveyProgressBarElt.textContent = percent + "%";
+
+        autoSurveyDetailsElt.textContent = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+    }
+
     function autoSurveyUnavailable() {
         if (autoSurveyPollInterval !== null) {
             clearInterval(autoSurveyPollInterval);
             autoSurveyPollInterval = null;
+        }
+        if (autoSurveyCountdownInterval !== null) {
+            clearInterval(autoSurveyCountdownInterval);
+            autoSurveyCountdownInterval = null;
         }
         autoSurveyStatusTextElt.textContent = "Status: Auto Survey-In feature unavailable";
         setAutoSurveyBadge("idle");
@@ -866,6 +892,14 @@ $(document).ready(function () {
                     if (autoSurveyPollInterval === null) {
                         autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
                     }
+                    if (status.start_time) {
+                        autoSurveyStartTime = parseUtcTimestamp(status.start_time);
+                        autoSurveyTargetHours = targetHours;
+                    }
+                    if (autoSurveyCountdownInterval === null) {
+                        autoSurveyCountdownInterval = setInterval(autoSurveyTickCountdown, 1000);
+                        autoSurveyTickCountdown();
+                    }
                 } else if (state === "completed") {
                     autoSurveyStatusTextElt.textContent = "Status: Completed";
                     setAutoSurveyBadge("completed");
@@ -874,6 +908,13 @@ $(document).ready(function () {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
                     }
+                    if (autoSurveyCountdownInterval !== null) {
+                        clearInterval(autoSurveyCountdownInterval);
+                        autoSurveyCountdownInterval = null;
+                    }
+                    autoSurveyProgressBarElt.style.width = "100%";
+                    autoSurveyProgressBarElt.setAttribute("aria-valuenow", 100);
+                    autoSurveyProgressBarElt.textContent = "100%";
                     var finalPos = status.applied_position || status.current_position;
                 } else if (state === "failed") {
                     autoSurveyStatusTextElt.textContent = "Status: Failed - " + (status.last_failure_reason || "unknown error");
@@ -883,6 +924,10 @@ $(document).ready(function () {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
                     }
+                    if (autoSurveyCountdownInterval !== null) {
+                        clearInterval(autoSurveyCountdownInterval);
+                        autoSurveyCountdownInterval = null;
+                    }
                 } else {
                     autoSurveyStatusTextElt.textContent = "Status: Idle";
                     setAutoSurveyBadge("idle");
@@ -891,11 +936,14 @@ $(document).ready(function () {
                         clearInterval(autoSurveyPollInterval);
                         autoSurveyPollInterval = null;
                     }
+                    if (autoSurveyCountdownInterval !== null) {
+                        clearInterval(autoSurveyCountdownInterval);
+                        autoSurveyCountdownInterval = null;
+                    }
+                    autoSurveyProgressBarElt.style.width = "0%";
+                    autoSurveyProgressBarElt.setAttribute("aria-valuenow", 0);
+                    autoSurveyProgressBarElt.textContent = "0%";
                 }
-
-                autoSurveyProgressBarElt.style.width = percent + "%";
-                autoSurveyProgressBarElt.setAttribute("aria-valuenow", percent);
-                autoSurveyProgressBarElt.textContent = percent + "%";
 
                 if (state === "completed" && finalPos) {
                     var detailsText = "Final position: " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
@@ -904,10 +952,7 @@ $(document).ready(function () {
                         detailsText += " - Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
                     }
                     autoSurveyDetailsElt.textContent = detailsText;
-                } else if (status.start_time && state === "running") {
-                    var elapsedMs = Date.now() - parseUtcTimestamp(status.start_time).getTime();
-                    autoSurveyDetailsElt.textContent = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
-                } else {
+                } else if (state !== "running") {
                     autoSurveyDetailsElt.textContent = "";
                 }
             })
