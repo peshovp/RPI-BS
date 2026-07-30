@@ -1394,6 +1394,18 @@ if __name__ == "__main__":
         manager_thread = Thread(target=manager, daemon=True)
         manager_thread.start()
 
+        #Ensure Auto Survey-In recovers automatically on every server
+        #startup/restart (OTA update, watchdog auto-restart, manual
+        #restart, reboot, etc.) - not lazily on the next browser poll,
+        #which could otherwise leave a survey silently abandoned for
+        #hours/days on an unattended station. get_survey_controller()
+        #instantiates the singleton and calls recover_survey() internally.
+        if SurveyController is not None:
+            try:
+                get_survey_controller()
+            except Exception as e:
+                print(f"Auto Survey-In startup recovery failed: {e}")
+
         app.secret_key = rtkbaseconfig.get_secret_key()
         #socketio.run(app, host = "::", port = args.port or rtkbaseconfig.get("general", "web_port", fallback=80), debug=args.debug) # IPv6 "::" is mapped to IPv4
         gunicorn_options = {

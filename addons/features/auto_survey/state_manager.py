@@ -386,8 +386,17 @@ class StateManager:
                 now = datetime.utcnow()
                 elapsed_hours = (now - start).total_seconds() / 3600
                 
-                # Can recover if within target duration + 1 hour grace period
-                return elapsed_hours < (self._state['target_hours'] + 1)
+                # Can recover if within target duration + a generous grace
+                # period. Widened from the original 1-hour grace window:
+                # these stations can sit unattended (no operator, no browser
+                # tab open) for days, and automatic recovery is now triggered
+                # unconditionally at server startup (not lazily on the next
+                # browser poll) - so a much larger window is both safe and
+                # necessary to avoid silently abandoning a near-complete
+                # 24h survey just because nobody happened to look at it
+                # within an hour of an OTA update or watchdog restart.
+                grace_period_hours = 48
+                return elapsed_hours < (self._state['target_hours'] + grace_period_hours)
         
         return False
 
