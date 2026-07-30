@@ -791,6 +791,7 @@ $(document).ready(function () {
     var autoSurveyCountdownInterval = null;
     var autoSurveyStartTime = null;
     var autoSurveyTargetHours = 24;
+    var autoSurveyLatestPositionStd = null;
 
     function parseUtcTimestamp(timestampStr) {
         // Backend timestamps (datetime.utcnow().isoformat()) have no timezone
@@ -839,7 +840,11 @@ $(document).ready(function () {
         autoSurveyProgressBarElt.setAttribute("aria-valuenow", percent);
         autoSurveyProgressBarElt.textContent = percent + "%";
 
-        autoSurveyDetailsElt.textContent = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+        var detailsText = "Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+        if (autoSurveyLatestPositionStd && typeof autoSurveyLatestPositionStd.std_h_meters === "number" && typeof autoSurveyLatestPositionStd.std_height === "number") {
+            detailsText += " - Current accuracy: ±" + (autoSurveyLatestPositionStd.std_h_meters * 100).toFixed(1) + "cm horizontal, ±" + (autoSurveyLatestPositionStd.std_height * 100).toFixed(1) + "cm vertical";
+        }
+        autoSurveyDetailsElt.textContent = detailsText;
     }
 
     function autoSurveyUnavailable() {
@@ -896,6 +901,7 @@ $(document).ready(function () {
                         autoSurveyStartTime = parseUtcTimestamp(status.start_time);
                         autoSurveyTargetHours = targetHours;
                     }
+                    autoSurveyLatestPositionStd = status.position_std || null;
                     if (autoSurveyCountdownInterval === null) {
                         autoSurveyCountdownInterval = setInterval(autoSurveyTickCountdown, 1000);
                         autoSurveyTickCountdown();
@@ -950,6 +956,9 @@ $(document).ready(function () {
                     if (status.start_time) {
                         var elapsedMs = Date.now() - parseUtcTimestamp(status.start_time).getTime();
                         detailsText += " - Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
+                    }
+                    if (status.position_std && typeof status.position_std.std_h_meters === "number" && typeof status.position_std.std_height === "number") {
+                        detailsText += " - Final accuracy: ±" + (status.position_std.std_h_meters * 100).toFixed(1) + "cm horizontal, ±" + (status.position_std.std_height * 100).toFixed(1) + "cm vertical";
                     }
                     autoSurveyDetailsElt.textContent = detailsText;
                 } else if (state !== "running") {
