@@ -91,6 +91,28 @@ class ili9486_clone(ili9486):
         self.clear()
         self.show()
 
+    def display(self, image):
+        """
+        Renders a 24-bit RGB image, matching the parent class's method
+        but WITHOUT the Waveshare-specific 16-bit zero-padding on the
+        column/row address window commands (0x2a/0x2b) - this clone
+        board's controller does not expect that padding on per-frame
+        pixel writes, only the init sequence needed adjusting.
+        """
+        assert image.mode == self.mode
+        assert image.size == self.size
+
+        image = self.preprocess(image)
+
+        for image, bounding_box in self.framebuffer.redraw(image):
+            top, left, bottom, right = self.apply_offsets(bounding_box)
+
+            self.command(0x2a, top >> 8, top & 0xff, (bottom - 1) >> 8, (bottom - 1) & 0xff)     # Set row addr (no padding)
+            self.command(0x2b, left >> 8, left & 0xff, (right - 1) >> 8, (right - 1) & 0xff)     # Set column addr (no padding)
+            self.command(0x2c)                                                                    # Memory write
+
+            self.data(image.tobytes())
+
 # --- Make web_app/ importable so we can reuse existing config/network code ---
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _WEB_APP_DIR = os.path.join(_REPO_ROOT, "web_app")
