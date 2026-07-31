@@ -235,14 +235,27 @@ class RTKBaseConfig:
                     lines = ["[main]\n", insert_line] + lines
                     logger.info("  Created [main] section and inserted position at file start")
             
-            # Write back entire file
-            logger.info(f"  Writing updated file...")
-            with open(self.settings_file, 'w') as f:
+            # Write back entire file ATOMICALLY - a direct in-place write
+            # (open(path, 'w') truncates immediately, before new content is
+            # written) leaves a real window where a concurrent reader (e.g.
+            # run_cast.sh's "source settings.conf" during a service restart
+            # triggered by this same update) could see a truncated/partial
+            # file with the position line missing its value entirely -
+            # confirmed as the actual root cause of a live bug this session
+            # (str2str launched with "-p" immediately followed by the next
+            # flag, no lat/lon/height, because settings.conf was caught
+            # mid-write). Writing to a temp file in the same directory then
+            # os.replace()-ing it onto the real path is a single atomic
+            # filesystem operation - any concurrent reader always sees
+            # either the complete old file or the complete new file, never
+            # a partial one, regardless of timing.
+            logger.info(f"  Writing updated file (atomic)...")
+            tmp_path = f"{self.settings_file}.tmp"
+            with open(tmp_path, 'w') as f:
                 f.writelines(lines)
-                # CRITICAL: Force flush to disk before any service restart
                 f.flush()
-                import os
                 os.fsync(f.fileno())
+            os.replace(tmp_path, self.settings_file)
             logger.info(f"  ✓ File written and flushed to disk")
             
             # Verify the change
