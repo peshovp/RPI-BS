@@ -306,9 +306,24 @@ class RTKBaseConfigManager:
     def write_file(self, settings=None):
         """
             write on disk the settings to the config file
+
+            Writes atomically (temp file + os.replace()) rather than
+            truncating the live file in-place, to avoid a confirmed race
+            condition: any concurrent reader (e.g. run_cast.sh's "source
+            settings.conf" during a service restart triggered right after
+            a settings save) could otherwise see a truncated/partial file
+            mid-write - this exact class of bug was found and fixed for
+            Auto Survey-In's update_position() this session, and this
+            function shares the identical vulnerable pattern, reachable
+            via any manual Settings-page save (e.g. editing Base
+            coordinates) that triggers a service restart shortly after.
         """
         if settings is None:
             settings = self.config
 
-        with open(self.user_settings_path, "w") as configfile:
+        tmp_path = f"{self.user_settings_path}.tmp"
+        with open(tmp_path, "w") as configfile:
             settings.write(configfile, space_around_delimiters=False)
+            configfile.flush()
+            os.fsync(configfile.fileno())
+        os.replace(tmp_path, self.user_settings_path)
