@@ -6,8 +6,8 @@
 
 BASEDIR="$(dirname "$0")"
 source <( grep -v '^#' "${BASEDIR}"/settings.conf | grep '=' ) #import settings
-echo "DEBUG run_cast.sh $(date -Is) pid=$$ arg1=$1 arg2=$2 BASEDIR=${BASEDIR} settings_path=${BASEDIR}/settings.conf position=[${position}]" >> /tmp/run_cast_debug.log
-grep '^position' "${BASEDIR}"/settings.conf >> /tmp/run_cast_debug.log 2>&1
+echo "DEBUG run_cast.sh $(date -Is) pid=$$ arg1=$1 arg2=$2 BASEDIR=${BASEDIR} settings_path=${BASEDIR}/settings.conf position=[${position}]" >> "${BASEDIR}"/run_cast_debug.log
+grep '^position' "${BASEDIR}"/settings.conf >> "${BASEDIR}"/run_cast_debug.log 2>&1
 
 receiver_info="RTKBase ${receiver},${version} ${receiver_firmware}"
 in_serial="serial://${com_port}:${com_port_settings}#${receiver_format}"
