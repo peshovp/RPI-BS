@@ -205,7 +205,7 @@ class RTKBaseConfig:
                     old_value = line.strip()
                     logger.info(f"  Found at line {i+1}: {old_value}")
                     # Replace with proper RTKBase format (with single quotes)
-                    lines[i] = f"position = '{position_value}'\n"
+                    lines[i] = f"position='{position_value}'\n"
                     updated = True
                     logger.info(f"  New line: {lines[i].strip()}")
                     break
@@ -224,7 +224,7 @@ class RTKBaseConfig:
                                 main_end = j
                                 break
                         break
-                insert_line = f"position = '{position_value}'\n"
+                insert_line = f"position='{position_value}'\n"
                 if main_start is not None:
                     # Insert before next section or at end
                     insert_index = main_end if main_end is not None else len(lines)
