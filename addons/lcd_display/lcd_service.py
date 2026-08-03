@@ -167,6 +167,7 @@ class StationData:
         self.sat_total = 0
 
     def update_coordinate(self, msg):
+        logger.info("DEBUG coordinate broadcast raw payload: %r", msg)
         with self._lock:
             self.solution_status = msg.get("solution status", self.solution_status)
             pos_key = "pos llh single (deg,m) rover"

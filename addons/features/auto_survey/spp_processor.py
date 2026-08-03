@@ -251,6 +251,8 @@ class SPPProcessor:
                         if len(parts) > 14:
                             record['ratio'] = float(parts[14])
                         
+                        if record.get('ns', 0) > 60 or record.get('ns', 0) < 0:
+                            logger.warning(f"DEBUG implausible ns={record.get('ns')} - raw line: {line!r} - parsed parts: {parts!r}")
                         positions.append(record)
                         
                     except (ValueError, IndexError) as e:
