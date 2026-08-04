@@ -162,6 +162,43 @@ def latest_ultra_rapid_hour_mark(dt: datetime) -> str:
     return f"{hour_mark:02d}00"
 
 
+def generate_ultra_rapid_candidates(reference_dt: datetime, max_attempts: int = 8):
+    """
+    Generate a descending sequence of GPSDate candidates for ultra-rapid
+    probing, starting from "now, rounded down to the latest published 6h
+    mark" and stepping backward 6 hours at a time (correctly crossing day
+    boundaries via timedelta subtraction) for up to max_attempts candidates.
+
+    WHY THIS EXISTS: a live authenticated CDDIS directory listing on
+    BS-Aheloy (GPS week 2430, captured 2026-08-04T15:55 UTC) showed the
+    most recently published IGS0OPSULT file was for day-of-year 215
+    (2026-08-03) hour-mark 1200 - i.e. no file existed yet for day 215
+    hour 1800, nor for day 216 (the capture day) at all. Ultra-rapid
+    publication latency is NOT the fixed "round down to today's latest 6h
+    mark" the earlier fix assumed - it can lag by up to a day or more
+    depending on analysis center processing time. Deterministically
+    guessing a single hour-mark is not reliable; the only robust approach
+    is to probe backward until a real file is found.
+
+    max_attempts=8 covers up to 48 hours back (8 * 6h), which comfortably
+    covers the ~1-day lag observed on BS-Aheloy while remaining a small,
+    bounded number of requests rather than an open-ended search.
+
+    Yields GPSDate objects, most recent candidate first.
+    """
+    dt = reference_dt
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    marks = (0, 6, 12, 18)
+    latest_mark = max(m for m in marks if m <= dt.hour)
+    candidate_dt = dt.replace(hour=latest_mark, minute=0, second=0, microsecond=0)
+
+    for _ in range(max_attempts):
+        yield compute_gps_date(candidate_dt)
+        candidate_dt = candidate_dt - timedelta(hours=6)
+
+
 def _get_credentials(settings_file: Optional[str] = None) -> Dict[str, str]:
     """
     Read Earthdata username/password from settings.conf via
@@ -559,6 +596,9 @@ class PPPDownloader:
         if tier not in ("ultra-rapid", "rapid", "final"):
             raise ValueError(f"Unknown tier: {tier!r}")
 
+        if tier == "ultra-rapid":
+            return self._fetch_ultra_rapid_with_retry(survey_start_time)
+
         gps_date = compute_gps_date(survey_start_time)
 
         result = {}
@@ -577,6 +617,74 @@ class PPPDownloader:
                 result[product_type] = self._download_one(legacy_url)
 
         return result
+
+    def _fetch_ultra_rapid_with_retry(self, survey_start_time: datetime,
+                                       max_attempts: int = 8) -> Dict[str, Path]:
+        """
+        Ultra-rapid-only probe/retry variant of fetch_products(). NOT used
+        for rapid/final - those tiers' single-URL-per-product-type approach
+        is already confirmed working end-to-end on BS-Aheloy and is left
+        untouched by this method.
+
+        Publication latency for ultra-rapid is variable (see
+        generate_ultra_rapid_candidates()'s docstring for the live evidence
+        that motivated this) - a single deterministic hour-mark guess is
+        not reliable. This instead probes a descending sequence of
+        candidate (day, hour-mark) pairs, most recent first, trying the
+        long-form URL then the legacy short-form fallback at each candidate
+        (same per-candidate fallback behavior fetch_products() already uses
+        for rapid/final), and stops at the first candidate where BOTH sp3
+        and clk succeed.
+
+        Raises ProductNotPublishedError, with a clear summary of how many
+        candidates were tried and the date/hour range covered, if every
+        candidate 404s. Any other exception (auth failure, network
+        unreachable, invalid content) propagates immediately rather than
+        being treated as "try the next candidate" - those are not
+        publication-latency issues and retrying a different date won't fix
+        them.
+        """
+        candidates = list(generate_ultra_rapid_candidates(survey_start_time, max_attempts))
+
+        for attempt_num, gps_date in enumerate(candidates, start=1):
+            candidate_label = (
+                f"{gps_date.year}-day{gps_date.day_of_year:03d} "
+                f"{gps_date.reference_dt.hour:02d}00 UTC"
+            )
+            logger.info(
+                f"Ultra-rapid probe attempt {attempt_num}/{len(candidates)}: "
+                f"trying {candidate_label}"
+            )
+            try:
+                result = {}
+                for product_type in ("sp3", "clk"):
+                    url = self._build_url(product_type, "ultra-rapid", gps_date)
+                    try:
+                        result[product_type] = self._download_one(url)
+                    except ProductNotPublishedError:
+                        legacy_url = self._build_legacy_url(product_type, "ultra-rapid", gps_date)
+                        logger.debug(
+                            f"Ultra-rapid long-form URL 404'd for {product_type} "
+                            f"at {candidate_label}, trying legacy short-form: {legacy_url}"
+                        )
+                        result[product_type] = self._download_one(legacy_url)
+
+                logger.info(f"Ultra-rapid probe succeeded at {candidate_label} (attempt {attempt_num})")
+                return result
+
+            except ProductNotPublishedError:
+                logger.debug(f"Ultra-rapid probe miss at {candidate_label} (attempt {attempt_num}) - trying older candidate")
+                continue
+
+        oldest = candidates[-1]
+        newest = candidates[0]
+        raise ProductNotPublishedError(
+            f"Ultra-rapid product not found after {len(candidates)} probe attempts, "
+            f"covering {oldest.year}-day{oldest.day_of_year:03d} "
+            f"{oldest.reference_dt.hour:02d}00 UTC through "
+            f"{newest.year}-day{newest.day_of_year:03d} "
+            f"{newest.reference_dt.hour:02d}00 UTC"
+        )
 
     def ensure_antex(self, bundled_path: Optional[Path] = None) -> Path:
         """
