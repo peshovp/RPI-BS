@@ -28,6 +28,20 @@ urs.earthdata.nasa.gov. This has been fixed with a manual redirect-replay
 login (see PPPDownloader._ensure_session()/_login_via_redirect()), but the
 FIX ITSELF has not yet been live-tested. See _KNOWN_LIMITATIONS at the
 bottom of this file.
+
+IMPORTANT ASYMMETRY - ULTRA-RAPID HAS NO SEPARATE CLK FILE: unlike rapid
+and final (each of which publishes distinct SP3 orbit and CLK clock
+products), the IGS COMBINED ultra-rapid product only publishes an SP3
+file. A full authenticated CDDIS directory listing confirmed zero
+IGS0OPSULT_*_CLK.CLK.gz entries exist for any date in GPS week 2430 -
+per documented IGS convention, ultra-rapid's satellite clock offsets are
+embedded directly inside the SP3 file itself (for the observed half of
+the window) rather than published as a separate, higher-precision CLK
+product. fetch_products() therefore returns {"sp3": Path, "clk": Path}
+for tier in ("rapid", "final"), but only {"sp3": Path} (no "clk" key) for
+tier == "ultra-rapid" - see _fetch_ultra_rapid_with_retry()'s docstring
+for the full explanation. This is a structural fact about the product,
+not a bug to fix later - do not add a clk fetch attempt for ultra-rapid.
 """
 
 import gzip
@@ -583,7 +597,12 @@ class PPPDownloader:
             are accepted - see compute_gps_date() for the exact
             normalization rule. Callers should be consistent about which
             form they pass, but either works correctly.
-        :return: {"sp3": Path, "clk": Path} to decompressed local files
+        :return: for tier in ("rapid", "final"): {"sp3": Path, "clk": Path}.
+            For tier == "ultra-rapid": {"sp3": Path} ONLY - see
+            _fetch_ultra_rapid_with_retry()'s docstring for why no separate
+            clk file exists for this tier. CALLERS (eventually
+            PPPProcessor in Phase 2c) MUST check tier before assuming a
+            "clk" key is present in the returned dict.
 
         Raises NoCredentialsConfiguredError, CredentialsRejectedError,
         ProductNotPublishedError, NetworkUnreachableError, or
@@ -633,8 +652,26 @@ class PPPDownloader:
         candidate (day, hour-mark) pairs, most recent first, trying the
         long-form URL then the legacy short-form fallback at each candidate
         (same per-candidate fallback behavior fetch_products() already uses
-        for rapid/final), and stops at the first candidate where BOTH sp3
-        and clk succeed.
+        for rapid/final), and stops at the first candidate where sp3
+        succeeds.
+
+        NO SEPARATE CLK FILE FOR ULTRA-RAPID: a full authenticated CDDIS
+        directory listing for GPS week 2430 showed IGS0OPSULT_*.SP3.gz
+        entries but ZERO IGS0OPSULT_*_CLK.CLK.gz entries anywhere in the
+        listing (other analysis centers, e.g. GRG0OPSULT/WHU0OPSULT, DO
+        publish a separate ultra-rapid clk product - but this module
+        requests the IGS COMBINED product specifically, which does not).
+        This matches documented IGS convention: the ultra-rapid combined
+        SP3 file has satellite clock offset values embedded directly in the
+        SP3 format itself for the observed half of the window, rather than
+        a separate higher-precision CLK product the way rapid/final have.
+        Consequently this method only ever fetches "sp3" - attempting a
+        "clk" fetch here would always 404 regardless of which candidate
+        date/hour-mark is tried, which is what originally caused every one
+        of the 8 probe candidates to be exhausted before this fix.
+
+        Returns {"sp3": Path} - NO "clk" key, unlike rapid/final's
+        {"sp3": Path, "clk": Path}. See fetch_products()'s docstring.
 
         Raises ProductNotPublishedError, with a clear summary of how many
         candidates were tried and the date/hour range covered, if every
@@ -656,21 +693,19 @@ class PPPDownloader:
                 f"trying {candidate_label}"
             )
             try:
-                result = {}
-                for product_type in ("sp3", "clk"):
-                    url = self._build_url(product_type, "ultra-rapid", gps_date)
-                    try:
-                        result[product_type] = self._download_one(url)
-                    except ProductNotPublishedError:
-                        legacy_url = self._build_legacy_url(product_type, "ultra-rapid", gps_date)
-                        logger.debug(
-                            f"Ultra-rapid long-form URL 404'd for {product_type} "
-                            f"at {candidate_label}, trying legacy short-form: {legacy_url}"
-                        )
-                        result[product_type] = self._download_one(legacy_url)
+                url = self._build_url("sp3", "ultra-rapid", gps_date)
+                try:
+                    sp3_path = self._download_one(url)
+                except ProductNotPublishedError:
+                    legacy_url = self._build_legacy_url("sp3", "ultra-rapid", gps_date)
+                    logger.debug(
+                        f"Ultra-rapid long-form URL 404'd for sp3 "
+                        f"at {candidate_label}, trying legacy short-form: {legacy_url}"
+                    )
+                    sp3_path = self._download_one(legacy_url)
 
                 logger.info(f"Ultra-rapid probe succeeded at {candidate_label} (attempt {attempt_num})")
-                return result
+                return {"sp3": sp3_path}
 
             except ProductNotPublishedError:
                 logger.debug(f"Ultra-rapid probe miss at {candidate_label} (attempt {attempt_num}) - trying older candidate")
