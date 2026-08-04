@@ -394,21 +394,35 @@ class PPPDownloader:
         Construct the CDDIS download URL for a given product type
         ("sp3" or "clk"), tier, and GPS date.
 
-        UNVERIFIED (Phase 2a hit the auth wall before any filename could be
-        confirmed correct): this targets CDDIS's long-filename convention
-        (adopted IGS-wide since Nov 2022), which is the convention CDDIS's
-        own product-naming documentation describes as current. The legacy
-        short-form (igu/igr/igs + WWWWD) tested in Phase 2a is treated here
-        as a documented fallback, not the primary attempt, since Phase 2a's
-        404s on that pattern could indicate the mirror has already fully
-        migrated to long-form naming.
+        Long-filename convention confirmed via a real authenticated CDDIS
+        directory listing on BS-Aheloy
+        (https://cddis.nasa.gov/archive/gnss/products/2429/), rapid tier:
+            IGS0OPSRAP_20262130000_01D_15M_ORB.SP3.gz   (SP3: 15-min interval)
+            IGS0OPSRAP_20262130000_01D_05M_CLK.CLK.gz   (CLK: 5-min interval)
+        The sampling-interval token ("15M" vs "05M") differs by PRODUCT TYPE,
+        not just by tier - SP3 orbit products use a 15-minute interval, CLK
+        clock products use a 5-minute interval. This was the actual cause of
+        a live ProductNotPublishedError on CLK downloads (the code
+        previously hardcoded "15M" for both product types).
+
+        ASSUMPTION, NOT INDEPENDENTLY CONFIRMED: the 15M/05M split above was
+        only observed for the "rapid" tier's directory listing. This
+        function applies the same per-product-type interval uniformly to
+        "ultra-rapid" and "final" as well, since IGS's stated convention is
+        that the interval reflects product type rather than tier - but no
+        real directory listing for ultra-rapid or final has been inspected
+        to confirm this holds for those two tiers specifically.
         """
         tier_infix = {"ultra-rapid": "ULT", "rapid": "RAP", "final": "FIN"}[tier]
         product_infix = {"sp3": "ORB", "clk": "CLK"}[product_type]
         ext = "SP3" if product_type == "sp3" else "CLK"
+        # Confirmed for "rapid" via live CDDIS listing (see docstring above);
+        # applied uniformly to all tiers as an unconfirmed assumption for
+        # ultra-rapid/final.
+        interval = {"sp3": "15M", "clk": "05M"}[product_type]
 
         yyyyddd = f"{gps_date.year}{gps_date.day_of_year:03d}"
-        filename = f"IGS0OPS{tier_infix}_{yyyyddd}0000_01D_15M_{product_infix}.{ext}.gz"
+        filename = f"IGS0OPS{tier_infix}_{yyyyddd}0000_01D_{interval}_{product_infix}.{ext}.gz"
         # Directory layout: /archive/gnss/products/<gps_week>/
         return f"{CDDIS_BASE_URL}/{gps_date.gps_week}/{filename}"
 
