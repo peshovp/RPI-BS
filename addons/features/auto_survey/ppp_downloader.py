@@ -93,6 +93,11 @@ class GPSDate:
     day_of_week: int   # 0=Sunday .. 6=Saturday
     year: int
     day_of_year: int    # 1-366
+    # The normalized (naive UTC) datetime this GPSDate was computed from,
+    # retained so ultra-rapid's hour-mark selection (which needs the actual
+    # hour/minute, not just the calendar day) doesn't have to reconstruct a
+    # datetime from year+day_of_year and lose that information.
+    reference_dt: datetime
 
     @property
     def wwwwd(self) -> str:
@@ -127,7 +132,34 @@ def compute_gps_date(dt: datetime) -> GPSDate:
         day_of_week=day_of_week,
         year=dt.year,
         day_of_year=dt.timetuple().tm_yday,
+        reference_dt=dt,
     )
+
+
+def latest_ultra_rapid_hour_mark(dt: datetime) -> str:
+    """
+    Select the most recent ultra-rapid publication hour-mark ("0000", "0600",
+    "1200", "1800") at or before the given UTC datetime.
+
+    Ultra-rapid products are published 4x/day at these fixed hour marks
+    (confirmed via a real authenticated CDDIS directory listing on
+    BS-Aheloy, GPS week 2429/2430 range - e.g.
+    IGS0OPSULT_20262070000_..., IGS0OPSULT_20262070600_...,
+    IGS0OPSULT_20262071200_..., IGS0OPSULT_20262071800_...). Since
+    ultra-rapid's whole purpose is "best available right now", picking a
+    mark that hasn't been published yet (e.g. 1800 when it's currently
+    14:32 UTC) would always 404 - this always rounds DOWN to the latest
+    already-published mark, never up.
+
+    Accepts naive or timezone-aware input, same convention as
+    compute_gps_date().
+    """
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    marks = (0, 6, 12, 18)
+    hour_mark = max(m for m in marks if m <= dt.hour)
+    return f"{hour_mark:02d}00"
 
 
 def _get_credentials(settings_file: Optional[str] = None) -> Dict[str, str]:
@@ -412,6 +444,20 @@ class PPPDownloader:
         that the interval reflects product type rather than tier - but no
         real directory listing for ultra-rapid or final has been inspected
         to confirm this holds for those two tiers specifically.
+
+        ULTRA-RAPID DIFFERS IN TWO MORE WAYS, both confirmed via a real
+        authenticated CDDIS directory listing on BS-Aheloy (GPS week
+        2429/2430 range):
+            IGS0OPSULT_20262070000_02D_15M_ORB.SP3.gz
+            IGS0OPSULT_20262070600_02D_15M_ORB.SP3.gz
+            IGS0OPSULT_20262071200_02D_15M_ORB.SP3.gz
+            IGS0OPSULT_20262071800_02D_15M_ORB.SP3.gz
+        (1) the day-span token is "02D" (ultra-rapid spans a 2-day window -
+            observed + predicted half), not "01D" like rapid/final; (2)
+        the timestamp's hour field is one of 0000/0600/1200/1800 (4
+        publications/day), not always "0000" - see
+        latest_ultra_rapid_hour_mark() for how the correct, already-published
+        mark is selected.
         """
         tier_infix = {"ultra-rapid": "ULT", "rapid": "RAP", "final": "FIN"}[tier]
         product_infix = {"sp3": "ORB", "clk": "CLK"}[product_type]
@@ -420,19 +466,31 @@ class PPPDownloader:
         # applied uniformly to all tiers as an unconfirmed assumption for
         # ultra-rapid/final.
         interval = {"sp3": "15M", "clk": "05M"}[product_type]
+        day_span = "02D" if tier == "ultra-rapid" else "01D"
+        hour_mark = latest_ultra_rapid_hour_mark(gps_date.reference_dt) if tier == "ultra-rapid" else "0000"
 
         yyyyddd = f"{gps_date.year}{gps_date.day_of_year:03d}"
-        filename = f"IGS0OPS{tier_infix}_{yyyyddd}0000_01D_{interval}_{product_infix}.{ext}.gz"
+        filename = f"IGS0OPS{tier_infix}_{yyyyddd}{hour_mark}_{day_span}_{interval}_{product_infix}.{ext}.gz"
         # Directory layout: /archive/gnss/products/<gps_week>/
         return f"{CDDIS_BASE_URL}/{gps_date.gps_week}/{filename}"
 
     def _build_legacy_url(self, product_type: str, tier: Tier, gps_date: GPSDate) -> str:
-        """Legacy short-form fallback URL (igu/igr/igs + WWWWD), per §5 of
-        the design doc. Documented fallback only - not the primary attempt."""
+        """
+        Legacy short-form fallback URL (igu/igr/igs + WWWWD), per §5 of
+        the design doc. Documented fallback only - not the primary attempt.
+
+        For ultra-rapid, CDDIS's legacy short-form already encodes the same
+        4x/day hour-mark concept as a "_00"/"_06"/"_12"/"_18" filename
+        suffix (matching the four hour marks confirmed in _build_url()'s
+        docstring) - this was previously hardcoded to always "_00", which
+        would 404 for any time after the first publication of the day, same
+        root cause as the long-form URL's bug.
+        """
         tier_prefix = {"ultra-rapid": "igu", "rapid": "igr", "final": "igs"}[tier]
         ext = "sp3" if product_type == "sp3" else "clk"
         if tier == "ultra-rapid":
-            filename = f"{tier_prefix}{gps_date.wwwwd}_00.{ext}.Z"
+            legacy_hour_suffix = latest_ultra_rapid_hour_mark(gps_date.reference_dt)[:2]
+            filename = f"{tier_prefix}{gps_date.wwwwd}_{legacy_hour_suffix}.{ext}.Z"
         else:
             filename = f"{tier_prefix}{gps_date.wwwwd}.{ext}.Z"
         return f"{CDDIS_BASE_URL}/{gps_date.gps_week}/{filename}"
