@@ -18,11 +18,16 @@ _validate_downloaded_product()).
 CDDIS's exact current directory/filename convention was NOT confirmed during
 Phase 2a (every attempt hit the auth wall before a real filename could be
 tested). This module's URL construction is written against CDDIS's publicly
-documented layout as of this writing, but per the task's explicit instruction,
-the live authenticated download path is UNTESTED in this session - a manual
-live test with real credentials on-station is the required next step before
-Phase 2c/2d can depend on this module. See _KNOWN_LIMITATIONS at the bottom
-of this file.
+documented layout as of this writing.
+
+A live test on BS-Aheloy with real Earthdata credentials subsequently found
+that the original login implementation never actually authenticated -
+`requests` strips Authorization headers on cross-host redirects, so
+Basic Auth credentials attached via `session.auth` never reached
+urs.earthdata.nasa.gov. This has been fixed with a manual redirect-replay
+login (see PPPDownloader._ensure_session()/_login_via_redirect()), but the
+FIX ITSELF has not yet been live-tested. See _KNOWN_LIMITATIONS at the
+bottom of this file.
 """
 
 import gzip
@@ -31,7 +36,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Literal, Optional
 
@@ -101,7 +106,18 @@ def compute_gps_date(dt: datetime) -> GPSDate:
     datetime. Ported from the shell logic validated in Phase 2a.
 
     GPS epoch: 1980-01-06 (Sunday).
+
+    Accepts either naive or timezone-aware input. CALLERS (including
+    fetch_products() and, later, survey_controller.py in Phase 2c/2d) MUST
+    treat the input as UTC either way - a naive datetime is assumed to
+    already be UTC (never local time), and an aware datetime is converted
+    to UTC before use. This function never raises on mixed naive/aware
+    input; it normalizes internally instead, since the GPS epoch constant
+    below has no timezone of its own to compare against.
     """
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
     gps_epoch = datetime(1980, 1, 6)
     delta_days = (dt - gps_epoch).days
     gps_week = delta_days // 7
@@ -246,25 +262,57 @@ class PPPDownloader:
         Lazily create and authenticate a requests.Session against Earthdata
         Login, unless one was injected (for tests).
 
-        AUTH FLOW (per NASA's documented EDL bulk-download approach):
-        CDDIS relies on the standard Earthdata Login OAuth redirect chain -
-        an unauthenticated request to a CDDIS product URL receives a 302 to
-        urs.earthdata.nasa.gov/oauth/authorize (confirmed directly in Phase
-        2a testing). NASA's documented scripted-access pattern for this
-        flow is HTTP Basic Auth submitted to the urs.earthdata.nasa.gov
-        redirect target, with `requests.Session()` configured to persist
-        cookies and follow the full redirect chain back to
-        cddis.nasa.gov/proxyauth (also observed directly in the Phase 2a
-        redirect URL's `redirect_uri` parameter). This mirrors the
-        `~/.netrc`-based approach NASA documents for curl/wget bulk access:
-        a `.netrc` entry is just HTTP Basic Auth credentials scoped to the
-        urs.earthdata.nasa.gov host, which `requests.Session.auth` achieves
-        identically without requiring an actual .netrc file on disk (per
-        Pesho's explicit decision to store credentials in settings.conf,
-        not a separate .netrc file).
+        AUTH FLOW - CONFIRMED BROKEN, THEN FIXED, VIA LIVE TESTING ON
+        BS-AHELOY WITH REAL EARTHDATA CREDENTIALS:
 
-        NOT LIVE-TESTED in this session - see module docstring and
-        _KNOWN_LIMITATIONS.
+        The original implementation set `session.auth = (username,
+        password)` and relied on `requests`' automatic redirect-following
+        (CDDIS -> urs.earthdata.nasa.gov -> back to CDDIS) to deliver those
+        credentials to the login host. Live testing showed this does NOT
+        work: `requests` deliberately strips the Authorization header on
+        any redirect that crosses to a different host (documented,
+        intentional `requests` security behavior - see
+        https://requests.readthedocs.io/en/latest/user/authentication/,
+        "the Authorization header will be removed if you get redirected
+        off-host"). Since CDDIS's product URLs redirect to
+        urs.earthdata.nasa.gov, the credentials never actually reached the
+        login host - the login page was served anonymously and returned as
+        a 200 OK, which _download_one() correctly identified as
+        InvalidProductContentError (HTML, not a binary product), rather
+        than the CredentialsRejectedError a real 401/403 would produce.
+
+        FIX - matches NASA's own documented EDL scripted-access pattern
+        (the same approach used by NASA's own example download scripts,
+        e.g. the podaac-tools/GES-DISC "wget/curl without .netrc" examples,
+        which manually replay the redirect with Basic Auth attached rather
+        than relying on a single auto-followed request):
+          1. Issue the request to the CDDIS product URL with
+             allow_redirects=False, to capture the redirect Location header
+             pointing at urs.earthdata.nasa.gov WITHOUT `requests` silently
+             stripping anything (no redirect is followed yet, so nothing to
+             strip).
+          2. Issue a SEPARATE, explicit request directly to that
+             urs.earthdata.nasa.gov URL, with Basic Auth passed via the
+             `auth=` parameter on that one call (not `session.auth`, so it
+             is never subject to the same-session redirect-stripping logic
+             either). Because this request targets urs.earthdata.nasa.gov
+             directly (not a redirect hop within a single call), the
+             Authorization header is actually sent.
+          3. That login exchange sets session cookies (via the shared
+             requests.Session cookie jar) that authenticate subsequent
+             requests back to cddis.nasa.gov. Follow any further redirects
+             from that response (allow_redirects=True is safe here - by
+             this point the session is cookie-authenticated, so credential
+             stripping on redirect is a non-issue).
+          4. Re-issue the ORIGINAL CDDIS product URL request. The session
+             cookie jar now carries the CDDIS-side session, so this second
+             attempt should receive the actual binary product instead of
+             another redirect to the login page.
+
+        This exchange happens once per PPPDownloader instance (session
+        cookies persist for the life of the requests.Session), not on every
+        product download - see _login_via_redirect() and its call site in
+        _download_one().
         """
         if self._session is not None:
             return self._session
@@ -282,18 +330,64 @@ class PPPDownloader:
         creds = self._credentials or _get_credentials(self._settings_file)
 
         session = requests.Session()
-        session.auth = (creds["username"], creds["password"])
-        # Earthdata's redirect chain (CDDIS -> urs.earthdata.nasa.gov ->
-        # back to CDDIS) requires cross-host redirects to be followed with
-        # the Basic Auth credentials still attached only to the
-        # urs.earthdata.nasa.gov leg - requests' default Session behavior
-        # strips Authorization headers on redirect to a different host,
-        # which is the CORRECT behavior here (we do not want our Basic Auth
-        # credentials sent to any host except urs.earthdata.nasa.gov). No
-        # special redirect handling should be needed beyond
-        # requests' defaults; flagged for live verification.
+        # Deliberately NOT session.auth = (...) here - that was the root
+        # cause of the bug described above. Credentials are applied
+        # explicitly, once, in _login_via_redirect() instead.
         self._session = session
+        self._creds = creds
+        self._logged_in = False
         return session
+
+    def _login_via_redirect(self, product_url: str):
+        """
+        Perform the manual redirect-replay login exchange described in
+        _ensure_session()'s docstring, using product_url as the trigger
+        request whose redirect chain we need to authenticate through.
+
+        No-op if already logged in this session (cookies persist across
+        multiple product downloads within one PPPDownloader instance).
+        """
+        session = self._session
+        if getattr(self, "_logged_in", False):
+            return
+
+        try:
+            initial = session.get(product_url, timeout=60, allow_redirects=False)
+        except Exception as e:
+            raise NetworkUnreachableError(f"Could not reach {product_url}: {e}")
+
+        if initial.status_code not in (301, 302, 303, 307, 308):
+            # No redirect at all - either already authenticated (unlikely
+            # on a fresh session) or CDDIS is serving something unexpected.
+            # Either way, there's nothing to log in to; let the normal
+            # _download_one() flow handle whatever this response actually is.
+            self._logged_in = True
+            return
+
+        login_url = initial.headers.get("Location")
+        if not login_url:
+            raise PPPDownloaderError(
+                f"CDDIS returned redirect status {initial.status_code} for "
+                f"{product_url} but no Location header - cannot proceed with login"
+            )
+
+        try:
+            login_resp = session.get(
+                login_url,
+                auth=(self._creds["username"], self._creds["password"]),
+                timeout=60,
+                allow_redirects=True,
+            )
+        except Exception as e:
+            raise NetworkUnreachableError(f"Could not reach Earthdata Login at {login_url}: {e}")
+
+        if login_resp.status_code in (401, 403):
+            raise CredentialsRejectedError(
+                f"Earthdata Login rejected credentials at {login_url} "
+                f"(HTTP {login_resp.status_code})"
+            )
+
+        self._logged_in = True
 
     def _build_url(self, product_type: str, tier: Tier, gps_date: GPSDate) -> str:
         """
@@ -335,6 +429,8 @@ class PPPDownloader:
         HTML page, decompress it, and return the local decompressed path.
         """
         session = self._ensure_session()
+        self._login_via_redirect(url)
+
         filename = url.rsplit("/", 1)[-1]
         compressed_path = self.products_dir / filename
 
@@ -373,7 +469,11 @@ class PPPDownloader:
         already on disk).
 
         :param tier: "ultra-rapid" | "rapid" | "final"
-        :param survey_start_time: UTC datetime the survey/data window starts
+        :param survey_start_time: the survey/data window start, in UTC.
+            Both naive (assumed already UTC) and timezone-aware datetimes
+            are accepted - see compute_gps_date() for the exact
+            normalization rule. Callers should be consistent about which
+            form they pass, but either works correctly.
         :return: {"sp3": Path, "clk": Path} to decompressed local files
 
         Raises NoCredentialsConfiguredError, CredentialsRejectedError,
@@ -443,16 +543,20 @@ class PPPDownloader:
 # ---------------------------------------------------------------------------
 # _KNOWN_LIMITATIONS - carried into design_ppp_static_migration.md verbatim.
 # ---------------------------------------------------------------------------
-# 1. The Earthdata Basic-Auth-on-redirect flow in _ensure_session() has NOT
-#    been exercised against a real CDDIS request with real credentials in
-#    this session, per the task's explicit instruction not to attempt a
-#    live download here. Pesho must run a manual live test on-station with
-#    his registered credentials before Phase 2c/2d can depend on this
-#    module working end-to-end.
-# 2. _build_url()'s long-filename convention is UNVERIFIED against live
-#    CDDIS - Phase 2a's testing hit the auth wall before any filename
-#    pattern could be confirmed correct or incorrect. The legacy-format
-#    fallback in fetch_products() is a hedge, not a confirmed-working
-#    alternative - it was ALSO never tested past the auth wall in Phase 2a.
+# 1. The original session.auth-based redirect-following login was LIVE
+#    TESTED on BS-Aheloy with real Earthdata credentials and CONFIRMED
+#    BROKEN (requests strips Authorization headers on cross-host redirects,
+#    so credentials never reached urs.earthdata.nasa.gov - the login page
+#    was returned anonymously as a 200 OK). It has been replaced with the
+#    manual redirect-replay login in _login_via_redirect() (see
+#    _ensure_session()'s docstring for the full explanation). This NEW flow
+#    has NOT yet been live-tested - Pesho must re-run the same live test on
+#    BS-Aheloy to confirm it actually authenticates before Phase 2c/2d can
+#    depend on this module working end-to-end.
+# 2. _build_url()'s long-filename convention is still UNVERIFIED against
+#    live CDDIS - the previous live test never got far enough to reach a
+#    real product URL response (it failed at the login step, bug 2 above).
+#    The legacy-format fallback in fetch_products() is likewise still
+#    unverified.
 # 3. No ANTEX file is bundled yet - ensure_antex() will raise until one is
 #    added to the repo (see its docstring).
