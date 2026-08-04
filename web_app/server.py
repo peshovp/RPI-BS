@@ -46,6 +46,7 @@ from RTKLIB import RTKLIB
 from ServiceController import ServiceController
 from RTKBaseConfigManager import RTKBaseConfigManager
 from wireguard_settings import get_wireguard_settings, write_wireguard_config
+from ppp_earthdata_settings import get_earthdata_settings, write_earthdata_settings
 from audit_logger import log_event, read_recent
 import network_infos
 
@@ -614,6 +615,51 @@ def auto_survey_status():
         return jsonify(status)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auto_survey/ppp_credentials', methods=['GET'])
+@login_required
+def auto_survey_ppp_credentials_get():
+    """
+    Return whether NASA Earthdata Login credentials are configured for
+    PPP-static precise-product downloads. Never returns the actual
+    username/password - only a boolean, matching the WireGuard settings
+    page's convention of never re-populating secret fields.
+    """
+    try:
+        settings = get_earthdata_settings()
+        values = {}
+        for item in settings[1:]:
+            values.update(item)
+        return jsonify({
+            'success': True,
+            'username': values.get('username', ''),
+            'has_password': bool(values.get('password'))
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auto_survey/ppp_credentials', methods=['POST'])
+@login_required
+def auto_survey_ppp_credentials_set():
+    """
+    Save NASA Earthdata Login credentials for PPP-static downloads.
+    A blank password preserves the existing stored value (see
+    ppp_earthdata_settings.write_earthdata_settings() docstring).
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        fields = {
+            'username': (data.get('username') or '').strip(),
+            'password': data.get('password') or '',
+        }
+        if write_earthdata_settings(fields):
+            log_event("auto_survey", "ppp_credentials_updated", {})
+            return jsonify({'success': True})
+        else:
+            log_event("auto_survey", "ppp_credentials_update_failed", {})
+            return jsonify({'success': False, 'error': 'Failed to write credentials'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auto_survey/geoid', methods=['GET'])
 @login_required
