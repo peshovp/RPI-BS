@@ -1102,6 +1102,66 @@ $(document).ready(function () {
             .catch(() => alert("Reset request failed"));
     });
 
+    // ######## PPP-static / Earthdata Login credentials ########
+    var pppEarthdataUsernameElt = document.getElementById("ppp-earthdata-username");
+    var pppEarthdataPasswordElt = document.getElementById("ppp-earthdata-password");
+    var pppEarthdataSaveBtn = document.getElementById("ppp-earthdata-save-btn");
+    var pppEarthdataSaveStatusElt = document.getElementById("ppp-earthdata-save-status");
+
+    function loadPppEarthdataStatus() {
+        fetch('/api/auto_survey/ppp_credentials')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    // Username is not secret - safe to pre-populate.
+                    // Password is NEVER pre-populated, same convention as
+                    // WireGuard's private_key/preshared_key fields - only
+                    // the placeholder text hints whether one is stored.
+                    pppEarthdataUsernameElt.value = data.username || "";
+                    pppEarthdataPasswordElt.placeholder = data.has_password
+                        ? "Leave blank to keep current password"
+                        : "No password set";
+                }
+            })
+            .catch(function(err) {
+                console.log("Failed to load Earthdata credential status: " + err);
+            });
+    }
+
+    if (pppEarthdataSaveBtn) {
+        pppEarthdataSaveBtn.addEventListener("click", function() {
+            pppEarthdataSaveStatusElt.textContent = "Saving...";
+            pppEarthdataSaveStatusElt.className = "small ml-2 text-muted";
+            fetch('/api/auto_survey/ppp_credentials', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    username: pppEarthdataUsernameElt.value,
+                    password: pppEarthdataPasswordElt.value
+                })
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        pppEarthdataSaveStatusElt.textContent = "Saved";
+                        pppEarthdataSaveStatusElt.className = "small ml-2 text-success";
+                        pppEarthdataPasswordElt.value = "";
+                        loadPppEarthdataStatus();
+                    } else {
+                        pppEarthdataSaveStatusElt.textContent = "Error: " + (data.error || "unknown");
+                        pppEarthdataSaveStatusElt.className = "small ml-2 text-danger";
+                    }
+                })
+                .catch(function(err) {
+                    pppEarthdataSaveStatusElt.textContent = "Save request failed";
+                    pppEarthdataSaveStatusElt.className = "small ml-2 text-danger";
+                    console.log("Earthdata credential save failed: " + err);
+                });
+        });
+    }
+
+    loadPppEarthdataStatus();
+
     // Show current state on page load (in case a survey is already running)
     pollAutoSurveyStatus();
 

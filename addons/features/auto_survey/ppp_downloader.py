@@ -1,0 +1,458 @@
+"""
+Precise Product Downloader for PPP-static Processing
+======================================================
+
+Downloads SP3 (precise orbit) and CLK (precise clock) products from CDDIS,
+authenticated via NASA Earthdata Login, for use by PPPProcessor (Phase 2c).
+
+BACKGROUND (see design_ppp_static_migration.md, "Phase 2a: Verification Gate
+Results" for full evidence): igs.ign.fr and the WHU mirror were confirmed
+UNREACHABLE from station network during Phase 2a testing. CDDIS
+(cddis.nasa.gov) was confirmed reachable but requires NASA Earthdata Login -
+anonymous requests are redirected to an OAuth login page, and a naive
+`requests.get()` following that redirect will silently save the LOGIN PAGE
+ITSELF (an HTML document) as if it were the requested binary product. This
+module defends against that failure mode explicitly (see
+_validate_downloaded_product()).
+
+CDDIS's exact current directory/filename convention was NOT confirmed during
+Phase 2a (every attempt hit the auth wall before a real filename could be
+tested). This module's URL construction is written against CDDIS's publicly
+documented layout as of this writing, but per the task's explicit instruction,
+the live authenticated download path is UNTESTED in this session - a manual
+live test with real credentials on-station is the required next step before
+Phase 2c/2d can depend on this module. See _KNOWN_LIMITATIONS at the bottom
+of this file.
+"""
+
+import gzip
+import logging
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Literal, Optional
+
+logger = logging.getLogger(__name__)
+
+CDDIS_BASE_URL = "https://cddis.nasa.gov/archive/gnss/products"
+
+Tier = Literal["ultra-rapid", "rapid", "final"]
+
+# Typical publication latency per tier, used only for the "auto" tier-picker
+# in fetch_products() - not used to gate whether a download is attempted,
+# since actual availability can vary and the real signal is always the HTTP
+# response, not a guess based on elapsed time.
+_TIER_LATENCY_HOURS = {
+    "ultra-rapid": 0,      # predicted/observed halves published every 6h
+    "rapid": 41,            # up to ~41h
+    "final": 18 * 24,       # up to ~18 days
+}
+
+
+class PPPDownloaderError(Exception):
+    """Base class for all ppp_downloader errors."""
+
+
+class NoCredentialsConfiguredError(PPPDownloaderError):
+    """No Earthdata username/password found in settings.conf."""
+
+
+class CredentialsRejectedError(PPPDownloaderError):
+    """CDDIS/Earthdata rejected the provided credentials (HTTP 401/403)."""
+
+
+class ProductNotPublishedError(PPPDownloaderError):
+    """The requested tier/date combination is not yet available (HTTP 404)."""
+
+
+class NetworkUnreachableError(PPPDownloaderError):
+    """Could not reach CDDIS at all (DNS/connect/timeout failure)."""
+
+
+class InvalidProductContentError(PPPDownloaderError):
+    """
+    Downloaded content failed validation - most commonly an HTML auth-wall
+    page saved where a binary SP3/CLK file was expected. This exact failure
+    mode was directly observed during Phase 2a testing (a 200 OK response
+    whose body was the Earthdata Login page, not product data).
+    """
+
+
+@dataclass
+class GPSDate:
+    """GPS week/day-of-week and calendar-based fields needed for CDDIS URLs."""
+    gps_week: int
+    day_of_week: int   # 0=Sunday .. 6=Saturday
+    year: int
+    day_of_year: int    # 1-366
+
+    @property
+    def wwwwd(self) -> str:
+        """Legacy short-form identifier, e.g. '24302' for week 2430, day 2."""
+        return f"{self.gps_week}{self.day_of_week}"
+
+
+def compute_gps_date(dt: datetime) -> GPSDate:
+    """
+    Compute GPS week/day-of-week and year/day-of-year for a given UTC
+    datetime. Ported from the shell logic validated in Phase 2a.
+
+    GPS epoch: 1980-01-06 (Sunday).
+    """
+    gps_epoch = datetime(1980, 1, 6)
+    delta_days = (dt - gps_epoch).days
+    gps_week = delta_days // 7
+    day_of_week = delta_days % 7
+    return GPSDate(
+        gps_week=gps_week,
+        day_of_week=day_of_week,
+        year=dt.year,
+        day_of_year=dt.timetuple().tm_yday,
+    )
+
+
+def _get_credentials(settings_file: Optional[str] = None) -> Dict[str, str]:
+    """
+    Read Earthdata username/password from settings.conf via
+    web_app/ppp_earthdata_settings.py (the same reader used by the Settings
+    UI), reused here rather than reimplementing config parsing.
+    """
+    try:
+        import sys
+        _web_app_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../../../web_app")
+        )
+        if _web_app_dir not in sys.path:
+            sys.path.insert(0, _web_app_dir)
+        from ppp_earthdata_settings import get_earthdata_settings
+    except ImportError as e:
+        raise PPPDownloaderError(f"Could not import ppp_earthdata_settings: {e}")
+
+    settings = get_earthdata_settings(settings_file)
+    values = {}
+    for item in settings[1:]:
+        values.update(item)
+
+    if not values.get("username") or not values.get("password"):
+        raise NoCredentialsConfiguredError(
+            "No Earthdata Login credentials configured. Set them in the "
+            "Settings tab under Auto Survey-In > PPP-static / Earthdata Login."
+        )
+    return values
+
+
+def _validate_downloaded_product(content: bytes, filename: str) -> None:
+    """
+    Guard against the exact failure mode observed in Phase 2a: a 200 OK
+    response whose body is the Earthdata Login HTML page, not the requested
+    binary product. Raises InvalidProductContentError if the content looks
+    like HTML rather than a compressed SP3/CLK file.
+    """
+    if len(content) < 100:
+        raise InvalidProductContentError(
+            f"{filename}: downloaded content is implausibly small "
+            f"({len(content)} bytes) to be a real product file"
+        )
+
+    head = content[:512].lstrip()
+    if head[:1] in (b"<",) or b"<html" in head.lower() or b"<!doctype" in head.lower():
+        raise InvalidProductContentError(
+            f"{filename}: downloaded content is HTML, not a binary product "
+            f"(this is the auth-wall failure mode confirmed in Phase 2a - "
+            f"credentials were not accepted, or the session did not "
+            f"complete the Earthdata OAuth handshake)"
+        )
+
+    # .gz files start with the magic bytes 1f 8b; legacy .Z files start with
+    # 1f 9d. Anything else, for a filename claiming one of those extensions,
+    # is suspicious.
+    if filename.endswith(".gz") and content[:2] != b"\x1f\x8b":
+        raise InvalidProductContentError(
+            f"{filename}: claims .gz extension but does not have gzip magic bytes"
+        )
+    if filename.endswith(".Z") and content[:2] != b"\x1f\x9d":
+        raise InvalidProductContentError(
+            f"{filename}: claims .Z extension but does not have compress(1) magic bytes"
+        )
+
+
+def _decompress(compressed_path: Path) -> Path:
+    """
+    Decompress a downloaded .gz or .Z file. .gz is handled via the stdlib
+    gzip module (no new dependency). .Z (legacy Unix compress/LZW) is NOT
+    decompressible by Python's stdlib gzip module - GNU gzip's `gzip -d`
+    binary handles both formats natively (confirmed: GNU gzip auto-detects
+    and decompresses .Z/LZW input despite the name), and gzip is already a
+    base OS package on the target Raspberry Pi OS image, so no new
+    install.sh dependency is introduced here.
+    """
+    suffix = compressed_path.suffix
+    output_path = compressed_path.with_suffix("")
+
+    if suffix == ".gz":
+        with gzip.open(compressed_path, "rb") as f_in, open(output_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        return output_path
+
+    if suffix == ".Z":
+        gzip_bin = shutil.which("gzip")
+        if gzip_bin is None:
+            raise PPPDownloaderError(
+                "gzip binary not found in PATH - required to decompress .Z "
+                "legacy-format precise products. gzip is expected to already "
+                "be present on the base OS image; if missing, add it to "
+                "install.sh's apt-get package list."
+            )
+        result = subprocess.run(
+            [gzip_bin, "-d", "-k", "-f", str(compressed_path)],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise PPPDownloaderError(
+                f"Failed to decompress {compressed_path}: {result.stderr}"
+            )
+        return output_path
+
+    raise PPPDownloaderError(f"Unrecognized compression suffix on {compressed_path}: {suffix}")
+
+
+class PPPDownloader:
+    """
+    Downloads SP3/CLK precise products from CDDIS, authenticated via NASA
+    Earthdata Login.
+
+    Accepts an optional injected requests.Session and credentials dict for
+    testability (per Phase 2b requirements) - callers in production code
+    should leave both as None and let credentials be read from
+    settings.conf automatically.
+    """
+
+    def __init__(self,
+                 products_dir: Path,
+                 credentials: Optional[Dict[str, str]] = None,
+                 session=None,
+                 settings_file: Optional[str] = None):
+        self.products_dir = Path(products_dir)
+        self.products_dir.mkdir(parents=True, exist_ok=True)
+        self._settings_file = settings_file
+        self._credentials = credentials
+        self._session = session
+
+    def _ensure_session(self):
+        """
+        Lazily create and authenticate a requests.Session against Earthdata
+        Login, unless one was injected (for tests).
+
+        AUTH FLOW (per NASA's documented EDL bulk-download approach):
+        CDDIS relies on the standard Earthdata Login OAuth redirect chain -
+        an unauthenticated request to a CDDIS product URL receives a 302 to
+        urs.earthdata.nasa.gov/oauth/authorize (confirmed directly in Phase
+        2a testing). NASA's documented scripted-access pattern for this
+        flow is HTTP Basic Auth submitted to the urs.earthdata.nasa.gov
+        redirect target, with `requests.Session()` configured to persist
+        cookies and follow the full redirect chain back to
+        cddis.nasa.gov/proxyauth (also observed directly in the Phase 2a
+        redirect URL's `redirect_uri` parameter). This mirrors the
+        `~/.netrc`-based approach NASA documents for curl/wget bulk access:
+        a `.netrc` entry is just HTTP Basic Auth credentials scoped to the
+        urs.earthdata.nasa.gov host, which `requests.Session.auth` achieves
+        identically without requiring an actual .netrc file on disk (per
+        Pesho's explicit decision to store credentials in settings.conf,
+        not a separate .netrc file).
+
+        NOT LIVE-TESTED in this session - see module docstring and
+        _KNOWN_LIMITATIONS.
+        """
+        if self._session is not None:
+            return self._session
+
+        try:
+            import requests
+        except ImportError:
+            raise PPPDownloaderError(
+                "The 'requests' package is required but not installed. "
+                "It is already listed in web_app/requirements.txt and "
+                "addons/requirements.txt - run pip install -r on the "
+                "appropriate requirements file."
+            )
+
+        creds = self._credentials or _get_credentials(self._settings_file)
+
+        session = requests.Session()
+        session.auth = (creds["username"], creds["password"])
+        # Earthdata's redirect chain (CDDIS -> urs.earthdata.nasa.gov ->
+        # back to CDDIS) requires cross-host redirects to be followed with
+        # the Basic Auth credentials still attached only to the
+        # urs.earthdata.nasa.gov leg - requests' default Session behavior
+        # strips Authorization headers on redirect to a different host,
+        # which is the CORRECT behavior here (we do not want our Basic Auth
+        # credentials sent to any host except urs.earthdata.nasa.gov). No
+        # special redirect handling should be needed beyond
+        # requests' defaults; flagged for live verification.
+        self._session = session
+        return session
+
+    def _build_url(self, product_type: str, tier: Tier, gps_date: GPSDate) -> str:
+        """
+        Construct the CDDIS download URL for a given product type
+        ("sp3" or "clk"), tier, and GPS date.
+
+        UNVERIFIED (Phase 2a hit the auth wall before any filename could be
+        confirmed correct): this targets CDDIS's long-filename convention
+        (adopted IGS-wide since Nov 2022), which is the convention CDDIS's
+        own product-naming documentation describes as current. The legacy
+        short-form (igu/igr/igs + WWWWD) tested in Phase 2a is treated here
+        as a documented fallback, not the primary attempt, since Phase 2a's
+        404s on that pattern could indicate the mirror has already fully
+        migrated to long-form naming.
+        """
+        tier_infix = {"ultra-rapid": "ULT", "rapid": "RAP", "final": "FIN"}[tier]
+        product_infix = {"sp3": "ORB", "clk": "CLK"}[product_type]
+        ext = "SP3" if product_type == "sp3" else "CLK"
+
+        yyyyddd = f"{gps_date.year}{gps_date.day_of_year:03d}"
+        filename = f"IGS0OPS{tier_infix}_{yyyyddd}0000_01D_15M_{product_infix}.{ext}.gz"
+        # Directory layout: /archive/gnss/products/<gps_week>/
+        return f"{CDDIS_BASE_URL}/{gps_date.gps_week}/{filename}"
+
+    def _build_legacy_url(self, product_type: str, tier: Tier, gps_date: GPSDate) -> str:
+        """Legacy short-form fallback URL (igu/igr/igs + WWWWD), per §5 of
+        the design doc. Documented fallback only - not the primary attempt."""
+        tier_prefix = {"ultra-rapid": "igu", "rapid": "igr", "final": "igs"}[tier]
+        ext = "sp3" if product_type == "sp3" else "clk"
+        if tier == "ultra-rapid":
+            filename = f"{tier_prefix}{gps_date.wwwwd}_00.{ext}.Z"
+        else:
+            filename = f"{tier_prefix}{gps_date.wwwwd}.{ext}.Z"
+        return f"{CDDIS_BASE_URL}/{gps_date.gps_week}/{filename}"
+
+    def _download_one(self, url: str) -> Path:
+        """
+        Download a single product file, validate it isn't an auth-wall
+        HTML page, decompress it, and return the local decompressed path.
+        """
+        session = self._ensure_session()
+        filename = url.rsplit("/", 1)[-1]
+        compressed_path = self.products_dir / filename
+
+        try:
+            resp = session.get(url, timeout=60, allow_redirects=True)
+        except Exception as e:
+            # requests raises ConnectionError/Timeout/etc for unreachable hosts
+            raise NetworkUnreachableError(f"Could not reach {url}: {e}")
+
+        if resp.status_code in (401, 403):
+            raise CredentialsRejectedError(
+                f"CDDIS/Earthdata rejected credentials for {url} (HTTP {resp.status_code})"
+            )
+        if resp.status_code == 404:
+            raise ProductNotPublishedError(
+                f"Product not found at {url} (HTTP 404) - not yet published "
+                f"for this tier/date, or the naming convention is wrong "
+                f"(see _build_url() docstring - unverified against live CDDIS)"
+            )
+        if resp.status_code != 200:
+            raise PPPDownloaderError(f"Unexpected HTTP {resp.status_code} for {url}")
+
+        _validate_downloaded_product(resp.content, filename)
+
+        with open(compressed_path, "wb") as f:
+            f.write(resp.content)
+
+        return _decompress(compressed_path)
+
+    def fetch_products(self, tier: Tier, survey_start_time: datetime) -> Dict[str, Path]:
+        """
+        Public entry point matching the Phase 2b-requested signature
+        (download_precise_products in the task description; named
+        fetch_products here to match §5 of the design doc - same
+        signature/behavior, kept consistent with the design document
+        already on disk).
+
+        :param tier: "ultra-rapid" | "rapid" | "final"
+        :param survey_start_time: UTC datetime the survey/data window starts
+        :return: {"sp3": Path, "clk": Path} to decompressed local files
+
+        Raises NoCredentialsConfiguredError, CredentialsRejectedError,
+        ProductNotPublishedError, NetworkUnreachableError, or
+        InvalidProductContentError - callers should not treat any of these
+        as a reason to silently fall back to SPP; per Pesho's explicit
+        "no fallback, no silent start" decision, a failed precise-product
+        fetch should surface as a failed survey update, not a silent
+        degrade to broadcast ephemeris.
+        """
+        if tier not in ("ultra-rapid", "rapid", "final"):
+            raise ValueError(f"Unknown tier: {tier!r}")
+
+        gps_date = compute_gps_date(survey_start_time)
+
+        result = {}
+        for product_type in ("sp3", "clk"):
+            url = self._build_url(product_type, tier, gps_date)
+            try:
+                result[product_type] = self._download_one(url)
+            except ProductNotPublishedError:
+                # Try the legacy short-form URL as a documented fallback
+                # before giving up - see _build_legacy_url() docstring.
+                legacy_url = self._build_legacy_url(product_type, tier, gps_date)
+                logger.warning(
+                    f"Long-form URL 404'd for {product_type}/{tier}, "
+                    f"trying legacy short-form: {legacy_url}"
+                )
+                result[product_type] = self._download_one(legacy_url)
+
+        return result
+
+    def ensure_antex(self, bundled_path: Optional[Path] = None) -> Path:
+        """
+        Returns a path to an ANTEX (.atx) file for satellite/receiver
+        antenna PCO/PCV corrections.
+
+        Per §5/§7 of the design doc: ANTEX changes infrequently (new IGS
+        conventions every few years, not per-survey), so this should be a
+        STATIC, BUNDLED repo asset rather than downloaded fresh every
+        survey. This method does not implement downloading at all - it
+        only resolves a bundled file's path, and raises if it's missing,
+        so the absence of a required asset fails loudly rather than
+        silently proceeding without antenna corrections (which would
+        silently degrade PPP accuracy by several cm, defeating the purpose
+        of this migration).
+
+        Bundling the actual .atx file is a separate, still-open action item
+        - see design_ppp_static_migration.md Phase 2b open questions.
+        """
+        if bundled_path is None:
+            bundled_path = Path(__file__).parent / "igs20.atx"
+
+        if not bundled_path.exists():
+            raise PPPDownloaderError(
+                f"ANTEX file not found at {bundled_path}. Per the design "
+                f"doc, this should be bundled as a static repo asset "
+                f"(e.g. addons/features/auto_survey/igs20.atx) rather than "
+                f"downloaded per-survey - it has not yet been added. "
+                f"Download a current one from "
+                f"https://files.igs.org/pub/station/general/ and place it "
+                f"at this path."
+            )
+        return bundled_path
+
+
+# ---------------------------------------------------------------------------
+# _KNOWN_LIMITATIONS - carried into design_ppp_static_migration.md verbatim.
+# ---------------------------------------------------------------------------
+# 1. The Earthdata Basic-Auth-on-redirect flow in _ensure_session() has NOT
+#    been exercised against a real CDDIS request with real credentials in
+#    this session, per the task's explicit instruction not to attempt a
+#    live download here. Pesho must run a manual live test on-station with
+#    his registered credentials before Phase 2c/2d can depend on this
+#    module working end-to-end.
+# 2. _build_url()'s long-filename convention is UNVERIFIED against live
+#    CDDIS - Phase 2a's testing hit the auth wall before any filename
+#    pattern could be confirmed correct or incorrect. The legacy-format
+#    fallback in fetch_products() is a hedge, not a confirmed-working
+#    alternative - it was ALSO never tested past the auth wall in Phase 2a.
+# 3. No ANTEX file is bundled yet - ensure_antex() will raise until one is
+#    added to the repo (see its docstring).
