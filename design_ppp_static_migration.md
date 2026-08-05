@@ -287,6 +287,42 @@ Five distinct exception types were implemented directly against the task's requi
 3. **`settings.conf` permission hardening** — resolve the chmod question flagged above before this ships broadly.
 4. **Bundle an actual `igs20.atx` file** into the repo.
 
+## Phase 2c: PPPProcessor Implementation
+
+**Status:** code written, compile-checked, **not live-tested**. No `rnx2rtkp`-executable environment or real sp3/clk/atx/obs file set was available together on this dev machine to attempt even a partial live run (confirmed: no `.sp3`/`.clk` files exist anywhere on this checkout — the live product downloads from Phase 2b's testing happened entirely on BS-Aheloy over SSH and never touched this filesystem; a genuine RTKBase-produced `.obs` file does exist at `addons/coordinates_script/2026-08-03-Topolchane_nrcan.obs`, but with no matching `.nav`/`.sp3`/`.clk`/`.atx` alongside it, and no way to execute the aarch64 `rnx2rtkp` binary on this Windows host regardless). Pesho must run the first live `process_ppp()` test on BS-Aheloy.
+
+### Files changed
+
+- **New:** `addons/features/auto_survey/ppp_processor.py` — `PPPProcessor` class, `process_ppp()`, `AntexNotFoundError`.
+- **Modified:** `install.sh` — idempotent ANTEX download step (Stage 4/5, before the final checklist).
+- **Modified:** `addons/tools/perform_update.sh` — matching idempotent ANTEX download step, so existing OTA-updated stations get the file without a fresh install.
+- **No changes to `survey_controller.py` or `spp_processor.py`**, as instructed — Phase 2d's job, not this one.
+
+### Interface decisions
+
+`PPPProcessor` mirrors `SPPProcessor`'s constructor pattern exactly (`rnx2rtkp_path: Optional[str] = None`, same `find_rtklib_tool()` auto-discovery, imported directly from `spp_processor.py` rather than duplicated) and is designed to be swapped in for the position-generation half of `SPPProcessor` in Phase 2d with `self.spp = PPPProcessor()` replacing `self.spp = SPPProcessor()`. `parse_position_file()` is **not reimplemented** — per the original design doc (§1) and this session's earlier OLD-vs-CURRENT investigation, RTKLIB's `-f 2` output format is mode-independent, so `survey_controller.py` can keep calling `self.spp.parse_position_file(pos_file)` against a `PPPProcessor` instance unchanged, since `PPPProcessor` deliberately does not define its own `parse_position_file()` — Phase 2d will need to either call `SPPProcessor().parse_position_file()` as a static-ish helper or (cleaner) `PPPProcessor` could inherit/reuse it directly; **this composition detail is left as an explicit open question for Phase 2d**, not resolved here, since resolving it means touching how `survey_controller.py` wires the two classes together.
+
+**Precise-product paths are per-call, not per-instance** — `process_ppp(obs_file, sp3_file, nav_file=None, clk_file=None, antex_file=None, output_file=None)` — matching `PPPDownloader`'s dependency-injection style from Phase 2b: a single `PPPProcessor` instance is reusable across many surveys/tiers, while the actual product files differ every time.
+
+### RTKLIB CLI argument convention — confirmed from documentation, NOT independently tested
+
+This is the most important open item. `rnx2rtkp` takes SP3/CLK/ATX files as **trailing positional arguments** after obs/nav (auto-detected by extension/content), not via dedicated flags — this is standard, stable, well-documented RTKLIB behavior, but **could not be verified against this repo's actual installed binary** (`tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp`) since it's an ARM Linux ELF binary this Windows dev host cannot execute, and no bundled RTKLIB manual/help text exists anywhere in the repo (checked: no `.md`/`readme`/`manual` files under `tools/bin/RTKLIB-2.5.0/`). The `-ar off` CLI flag used to disable ambiguity resolution is similarly unverified — some RTKLIB processing options are `.conf`-file-only (loadable via `-k <optsfile>`, a genuinely different mechanism from the trailing-positional-args convention) and not exposed as bare CLI flags at all. **Pesho's live test on BS-Aheloy should specifically confirm both of these** before Phase 2d depends on this module; if `-ar off` isn't recognized, the fallback is a small `ppp_static_survey.conf` template loaded via `-k`, as originally scoped in the design doc's §4.
+
+### Ultra-rapid no-CLK handling
+
+`process_ppp()`'s `clk_file` parameter is `Optional[Path] = None`. When `None` (the expected case for ultra-rapid results from `PPPDownloader.fetch_products("ultra-rapid", ...)`, which returns `{"sp3": Path}` only per Phase 2b), the constructed `rnx2rtkp` command simply omits any clk argument. RTKLIB's documented behavior is that `readsp3()` always parses the clock-offset column embedded in the SP3 file itself, and a separate CLK file (when supplied) only refines/overrides those values — so omitting CLK should not error, just use lower-precision embedded clocks. **This fallback behavior itself was not independently exercised against a real ultra-rapid input in this session** — flagged in the file's own `_KNOWN_LIMITATIONS` block.
+
+### ANTEX handling
+
+Fixed install-time path: `<rtkbase_root>/geomaxima_ppp/igs20.atx`, chosen to match the existing convention `survey_controller.py` already established for downloaded/uploaded feature assets (`self.geoid_dir = self.rtkbase.rtkbase_root / "geomaxima_geoid"`) rather than inventing a new location pattern. `install.sh` downloads and decompresses it once, idempotently (skips if the file already exists — never re-fetches the ~54MB payload on repeat runs), with `chown` back to the installing user consistent with how `install.sh` already handles ownership elsewhere in the script. `perform_update.sh` runs the identical idempotent check so already-deployed stations pick it up automatically on their next OTA cycle, without requiring a fresh install. If the file is genuinely missing at call time, `PPPProcessor.resolve_antex()` raises `AntexNotFoundError` with an explicit, actionable message pointing at which install step fetches it — this was written specifically to avoid the alternative of a cryptic `rnx2rtkp` subprocess failure with no indication of what's actually wrong.
+
+### Open questions carried forward to Phase 2d
+
+1. **Live test required** — confirm `rnx2rtkp -p 8` actually accepts trailing SP3/CLK/ATX positional args and the `-ar off` flag as written, on BS-Aheloy, using this session's already-fetched live product files plus a real `.obs` file.
+2. **`parse_position_file()` composition** — decide how `survey_controller.py` calls this method against a `PPPProcessor` instance (inherit from `SPPProcessor`? Delegate to a shared standalone function? Keep two separate parser calls gated by which processor is active?) — not resolved in this phase.
+3. **`-f 2` vs the stock conf's `pos1-frequency=l1+l2+l5`** — `process_ppp()` currently hardcodes `-f 2` to match `SPPProcessor`'s existing convention for output format, not the stock PPP-static conf's triple-frequency processing-option intent; this needs reconciling once the CLI-argument-vs-conf-file question above is settled, since `-f` may need to mean something different in `-p 8` mode than it does in `-p 0` mode.
+4. **30-minute subprocess timeout** — increased from `SPPProcessor`'s 10 minutes given PPP's heavier per-epoch computation and full-dataset reprocessing on every interim update (flagged as a real risk in the original design doc's §8); this number is a reasonable guess, not empirically measured against real Pi hardware timing.
+
 ## 7. Phased implementation plan
 
 Each phase is scoped to be independently `git diff`-reviewable and independently testable, per this project's established discipline (small, verifiable, non-big-bang commits).

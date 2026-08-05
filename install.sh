@@ -182,6 +182,35 @@ echo 'Git remote: ' && git -C rtkbase remote get-url origin
 
 echo ""
 echo "============================================================================"
+echo "Fetching ANTEX (igs20.atx) for PPP-static antenna corrections"
+echo "============================================================================"
+# One-time, install-level download - NOT per-survey, NOT committed to git
+# (~54MB uncompressed). Idempotent: skips if already present, so re-running
+# install.sh (or an OTA update calling this same logic in perform_update.sh)
+# never re-downloads an already-fetched file. Path matches
+# addons/features/auto_survey/ppp_processor.py's DEFAULT_ANTEX_RELATIVE_PATH.
+ANTEX_DIR="$SCRIPT_DIR/geomaxima_ppp"
+ANTEX_PATH="$ANTEX_DIR/igs20.atx"
+if [ -f "$ANTEX_PATH" ]; then
+    echo "ANTEX file already present at $ANTEX_PATH - skipping download."
+else
+    mkdir -p "$ANTEX_DIR"
+    if curl -fsSL "https://files.igs.org/pub/station/general/igs20.atx.gz" -o "$ANTEX_DIR/igs20.atx.gz"; then
+        if gzip -d "$ANTEX_DIR/igs20.atx.gz"; then
+            echo "✓ ANTEX file downloaded and decompressed to $ANTEX_PATH"
+            if [[ -n "${SUDO_USER:-}" ]]; then
+                chown -R "${SUDO_USER}":"${SUDO_USER}" "$ANTEX_DIR" || log "WARNING: chown of $ANTEX_DIR to $SUDO_USER failed"
+            fi
+        else
+            echo "⚠ ANTEX download succeeded but decompression failed - PPP-static will not work until this is resolved manually" >&2
+        fi
+    else
+        echo "⚠ ANTEX download failed (network issue?) - PPP-static will not work until this is resolved. Re-run install.sh, or manually download https://files.igs.org/pub/station/general/igs20.atx.gz to $ANTEX_PATH (decompressed)." >&2
+    fi
+fi
+
+echo ""
+echo "============================================================================"
 echo "STAGE 5/5: INSTALLATION COMPLETE! Please review the status above."
 echo "============================================================================"
 echo "Remember to check the logs and test connectivity."
