@@ -29,23 +29,59 @@ from web_app/rtklib_configs/rtkbase_ppp-static_default.conf (read in full;
 that file's own pos1-sateph=brdc and pos2-armode=continuous are NOT used
 here, since both were identified as needing correction for real PPP use).
 
-RTKLIB CLI ARGUMENT CONVENTION - CONFIRMED FROM RTKLIB DOCUMENTATION, NOT
-INDEPENDENTLY TESTED: this dev environment cannot execute
-tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp (an ARM Linux binary; this is a
-Windows dev host, the same constraint noted throughout this session's
-Phase 2a/2b/2c work). rnx2rtkp takes its precise-product inputs as
-ADDITIONAL TRAILING POSITIONAL ARGUMENTS after the obs/nav files (the same
-pattern SPPProcessor already uses for the optional nav_file argument, just
-extended) - rnx2rtkp auto-detects each extra file's type from its
-extension/content (.sp3/.SP3 -> precise ephemeris, .clk/.CLK -> precise
-clock, .atx/.ATX -> antenna phase center parameters). There is no
-dedicated "-k" CLI flag for these on rnx2rtkp itself (that flag exists on
-RTKLIB tools for loading a .conf OPTIONS file, a different mechanism this
-module does not currently use, favoring explicit CLI flags to stay
-consistent with SPPProcessor's existing style). Pesho should verify this
-argument-ordering assumption against a real `rnx2rtkp --help`/manual page
-on-station before the first live test - see _KNOWN_LIMITATIONS at the
-bottom of this file.
+RTKLIB CLI ARGUMENT CONVENTION - REVISED AFTER A LIVE TEST ON BS-AHELOY
+FOUND THE ORIGINAL ASSUMPTION WRONG. The first live process_ppp() run
+exited 0 and produced a .pos file, but its header showed only 2 "inp file"
+lines (obs + nav) - the sp3/clk/atx trailing positional arguments were
+silently ignored, and every epoch came out Q=5 (single/SPP-equivalent),
+proving PPP-static never actually engaged despite -p 8 being set.
+
+Root-caused via this repo's own rnx2rtkp usage text (captured on BS-Aheloy
+by running rnx2rtkp with zero arguments, which prints full usage
+including the synopsis line the earlier "-? " capture did not show):
+
+    usage: rnx2rtkp [option]... file file [...]
+    ...To use SP3 precise ephemeris, specify the path in the files. The
+    extension of the SP3 file shall be .sp3 or .eph. ...A maximum number
+    of input files is currently set to 16. With -k option, the
+    processing options are input from the configuration file. In this
+    case, command line options precede options in the configuration file.
+
+TWO separate findings from this text:
+
+1. SP3/CLK extension case sensitivity: the usage text says the SP3
+   extension "shall be .sp3 or .eph" - lowercase, stated as a hard
+   requirement, not a suggestion. CDDIS's own product filenames use
+   UPPERCASE extensions (IGS0OPSRAP_..._ORB.SP3.gz, decompressed to
+   ...ORB.SP3) - ppp_downloader.py does not rename them. This is the
+   confirmed root cause of SP3 being silently skipped: rnx2rtkp still
+   parsed it as a "file" argument (hence no crash, exit 0), but did not
+   recognize it as an SP3 input, so it was effectively discarded. SP3/CLK
+   REMAIN trailing positional arguments (the usage text explicitly
+   instructs this - "specify the path in the files") - fixed by copying
+   them to a lowercase-extension name before invoking rnx2rtkp, not by
+   switching mechanism.
+
+2. ANTEX has NO positional-argument path at all: the usage text's list of
+   recognized input file types - "RINEX OBS/NAV/GNAV/HNAV/CLK, SP3, SBAS
+   message log files" - never mentions ATX/antenna files. Passing
+   igs20.atx as a 6th positional argument (as the original implementation
+   did) was never going to work, regardless of extension case; there is
+   no rnx2rtkp file-type-sniffing rule for antenna models, only the
+   -k <optsfile> conf-key route can supply one
+   (file-satantfile/file-rcvantfile - confirmed present as real keys in
+   web_app/rtklib_configs/rtkbase_ppp-static_default.conf, read in full).
+
+RESULT: a HYBRID design, not a full migration to -k. SP3/CLK stay
+positional (extension-normalized to lowercase). ANTEX moves to a
+per-call, auto-generated temporary -k conf file, which ALSO carries
+pos1-sateph=precise and pos2-armode=off (both real, confirmed keys in the
+same template) - since a conf file has to be generated for ANTEX anyway,
+consolidating the processing-mode options into it too is more reliable
+than mixing a -v 0.0 CLI flag with a separately-loaded conf file whose
+precedence rules ("command line options precede options in the
+configuration file") would otherwise need to be reasoned about per-option.
+See _generate_ppp_conf() and _KNOWN_LIMITATIONS.
 
 NO SEPARATE CLK FILE FOR ULTRA-RAPID: ppp_downloader.py's
 fetch_products("ultra-rapid", ...) returns {"sp3": Path} only - no "clk"
@@ -72,7 +108,9 @@ telling the operator which install step fetches it.
 """
 
 import logging
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -87,6 +125,30 @@ logger = logging.getLogger(__name__)
 # established precedent this mirrors).
 DEFAULT_ANTEX_RELATIVE_PATH = "geomaxima_ppp/igs20.atx"
 
+# Minimal -k options-file template. Only the keys this module actually
+# needs to set are included - rnx2rtkp fills in RTKLIB's own defaults for
+# any key not present in a -k file (confirmed by the usage text's own
+# framing: "-k option, the processing options are input from the
+# configuration file" - it does not require a complete key set, unlike the
+# full RTKNAVI dump in rtkbase_ppp-static_default.conf, which was NOT used
+# as this template directly since most of its keys - inpstr1/2/3 streaming
+# config, ant1/ant2 antenna position/type, misc-* - are for rtkrcv's
+# real-time engine and are irrelevant/meaningless to rnx2rtkp's batch
+# processing). Key names (pos1-sateph, pos2-armode, file-satantfile,
+# file-rcvantfile) are copied verbatim from that same real template file,
+# not guessed.
+_PPP_CONF_TEMPLATE = """\
+pos1-posmode       =ppp-static
+pos1-frequency     =l1+l2
+pos1-elmask        =15
+pos1-ionoopt       =dual-freq
+pos1-tropopt       =saas
+pos1-sateph        =precise
+pos2-armode        =off
+file-satantfile    ={satantfile}
+file-rcvantfile    ={rcvantfile}
+"""
+
 
 class PPPProcessorError(Exception):
     """Base class for all ppp_processor errors."""
@@ -98,6 +160,35 @@ class AntexNotFoundError(PPPProcessorError):
     Raised instead of letting rnx2rtkp fail cryptically on a bad/missing
     trailing argument - this points the operator at the actual fix.
     """
+
+
+def _normalize_precise_product_extension(source_path: Path, expected_suffix: str,
+                                          work_dir: Path) -> Path:
+    """
+    rnx2rtkp's own usage text states the SP3 extension "shall be .sp3 or
+    .eph" (lowercase) - a hard requirement, not a suggestion. CDDIS's own
+    product filenames use uppercase extensions (e.g. ...ORB.SP3), which
+    ppp_downloader.py does not rename (it has no reason to - the extension
+    only matters to rnx2rtkp's own file-type detection, not to the
+    download/decompression logic). If source_path's suffix doesn't already
+    match expected_suffix case-sensitively, copy it into work_dir under a
+    correctly-cased name and return that new path; otherwise return
+    source_path unchanged (no unnecessary copy).
+
+    A copy (not a rename/move) is used deliberately - source_path lives in
+    ppp_downloader.py's products_dir and may be reused across multiple
+    process_ppp() calls (e.g. an interim update reprocessing the same
+    fetched products); renaming it in place would leave that directory in
+    a case that future PPPDownloader lookups don't expect.
+    """
+    if source_path.suffix == expected_suffix:
+        return source_path
+
+    normalized_path = work_dir / (source_path.stem + expected_suffix)
+    shutil.copyfile(source_path, normalized_path)
+    logger.debug(f"Normalized {source_path.name} -> {normalized_path.name} "
+                 f"(rnx2rtkp requires lowercase '{expected_suffix}')")
+    return normalized_path
 
 
 class PPPProcessor:
@@ -170,6 +261,27 @@ class PPPProcessor:
                 f"igs20.atx automatically. It is NOT downloaded per-survey."
             )
         return path
+
+    def _generate_ppp_conf(self, antex_path: Path, work_dir: Path) -> Path:
+        """
+        Write a minimal -k options file (see _PPP_CONF_TEMPLATE) into
+        work_dir, with the real ANTEX path filled into file-satantfile/
+        file-rcvantfile - both used for the same file here, since this
+        module tracks one ANTEX file covering both satellite and receiver
+        antenna models (the bundled igs20.atx), not separate files per
+        RTKLIB's more general two-file option.
+
+        Returns the path to the generated conf file. NOT automatically
+        deleted by this method - see process_ppp()'s cleanup handling for
+        the lifecycle/retention decision.
+        """
+        conf_path = work_dir / "ppp_static.conf"
+        conf_content = _PPP_CONF_TEMPLATE.format(
+            satantfile=str(antex_path),
+            rcvantfile=str(antex_path),
+        )
+        conf_path.write_text(conf_content)
+        return conf_path
 
     def process_ppp(self,
                      obs_file: Path,
@@ -254,44 +366,54 @@ class PPPProcessor:
         else:
             output_file = Path(output_file)
 
+        # Working directory for this run's extension-normalized SP3/CLK
+        # copies (see _normalize_precise_product_extension()) and the
+        # generated -k conf file. A fresh tempdir per call, cleaned up in
+        # the finally block below - these are small, single-run artifacts,
+        # not something worth retaining across calls the way
+        # ppp_downloader.py's fetched products are.
+        work_dir = Path(tempfile.mkdtemp(prefix="ppp_static_"))
         try:
+            sp3_file = _normalize_precise_product_extension(sp3_file, ".sp3", work_dir)
+            if clk_file:
+                clk_file = _normalize_precise_product_extension(clk_file, ".clk", work_dir)
+
+            conf_path = self._generate_ppp_conf(antex_path, work_dir)
+
             # Build rnx2rtkp command for PPP-static.
+            #
             # -p 8: ppp-static mode
             # -m 15: elevation mask 15 degrees (matches SPP and the stock
             #        rtkbase_ppp-static_default.conf's pos1-elmask)
-            # -f 2: number of frequencies for relative mode = L1+L2
-            #       (per this binary's own captured "-f freq" help text:
-            #       "number of frequencies for relative mode
-            #       (1:L1,2:L1+L2,3:L1+L2+L5)" - NOT an output-format
-            #       selector, unlike an earlier version of this comment
-            #       claimed. 2 (L1+L2) is the correct value given Phase 2a's
-            #       confirmed dual-frequency RINEX data from the ZED-F9P;
-            #       SPPProcessor's pre-existing -f 2 usage happens to be the
-            #       same numeric value but for the SAME reason (this flag's
-            #       meaning does not change between -p 0 and -p 8), not a
-            #       coincidental overlap with a separate "output format"
-            #       meaning that does not exist on this binary.
-            # -v 0.0: validation threshold for integer ambiguity, 0.0
-            #       meaning "no AR" (float-only). Confirmed directly against
-            #       this repo's own installed rnx2rtkp's real "-? " help
-            #       output captured on BS-Aheloy during Phase 2a Check 1:
-            #       "-v thres  validation threshold for integer ambiguity
-            #       (0.0:no AR) [3.0]". This replaces an earlier "-ar off"
-            #       flag that does not exist anywhere in that captured help
-            #       text and would have been silently rejected/ignored by
-            #       this binary's actual argument parser. PPP-static's real
-            #       fixed-ambiguity mode (PPP-AR) requires uncalibrated
-            #       phase bias (UPD) products that ppp_downloader.py does
-            #       not fetch - per Pesho's explicit instruction, defaulting
-            #       to float (-v 0.0) rather than taking on that larger
-            #       scope.
+            # -k <conf>: loads pos1-sateph=precise, pos2-armode=off, and
+            #        the ANTEX file paths (file-satantfile/file-rcvantfile)
+            #        from the per-call generated conf - see
+            #        _generate_ppp_conf() and the module docstring's
+            #        HYBRID DESIGN explanation for why ANTEX moved here
+            #        (rnx2rtkp's own usage text lists no positional-arg
+            #        path for antenna files at all) while SP3/CLK stayed
+            #        as positional arguments below (the usage text
+            #        explicitly instructs "specify the path in the files"
+            #        for SP3). Per that same usage text - "command line
+            #        options precede options in the configuration file" -
+            #        any CLI flag given here (e.g. -p 8, -m 15) overrides
+            #        the conf file's own pos1-posmode/pos1-elmask if they
+            #        differ; they don't here (kept as CLI flags primarily
+            #        for consistency with SPPProcessor's existing style,
+            #        not because the conf file disagrees with them).
+            # -f 2: number of frequencies for relative mode = L1+L2 (per
+            #        this binary's own captured "-f freq" help text:
+            #        "number of frequencies for relative mode
+            #        (1:L1,2:L1+L2,3:L1+L2+L5)"). 2 (L1+L2) is correct
+            #        given Phase 2a's confirmed dual-frequency RINEX data
+            #        from the ZED-F9P.
             # -o: output file
             cmd = [
                 str(self.rnx2rtkp),
                 "-p", "8",  # PPP-static mode
                 "-m", "15",  # Elevation mask
                 "-f", "2",  # L1+L2 frequencies
-                "-v", "0.0",  # Float-only ambiguity resolution (no AR)
+                "-k", str(conf_path),
                 "-o", str(output_file),
                 str(obs_file),
             ]
@@ -299,15 +421,21 @@ class PPPProcessor:
             if nav_file:
                 cmd.append(str(nav_file))
 
+            # SP3/CLK remain trailing positional arguments (NOT moved into
+            # the -k conf) - rnx2rtkp's own usage text explicitly instructs
+            # this for SP3 ("To use SP3 precise ephemeris, specify the path
+            # in the files"), and the stock conf template has no SP3/CLK
+            # file-path key at all to move them into even if that were
+            # desired. ANTEX (antex_path) is intentionally NOT appended
+            # here - it goes through -k's conf file instead (see above),
+            # since it has no positional-arg path on this rnx2rtkp build.
             cmd.append(str(sp3_file))
 
             if clk_file:
                 cmd.append(str(clk_file))
 
-            cmd.append(str(antex_path))
-
             logger.info(f"Processing PPP-static: {obs_file.name}")
-            logger.info(f"  sp3={sp3_file.name}, clk={clk_file.name if clk_file else '(none - using SP3-embedded clocks)'}, atx={antex_path.name}")
+            logger.info(f"  sp3={sp3_file.name}, clk={clk_file.name if clk_file else '(none - using SP3-embedded clocks)'}, atx={antex_path.name} (via -k conf)")
             logger.debug(f"Command: {' '.join(cmd)}")
 
             result = subprocess.run(
@@ -343,35 +471,52 @@ class PPPProcessor:
         except Exception as e:
             logger.error(f"PPP-static processing failed: {e}", exc_info=True)
             return None
+        finally:
+            # work_dir holds only this run's disposable extension-normalized
+            # copies and generated conf, never the caller's original
+            # sp3_file/clk_file/antex_file - safe to always remove.
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
 # _KNOWN_LIMITATIONS
 # ---------------------------------------------------------------------------
-# 1. NOT LIVE-TESTED in this session, by explicit instruction. This dev
-#    environment cannot execute tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp
-#    (Windows host, ARM Linux binary - the same constraint noted throughout
-#    Phase 2a/2b/2c). Pesho should run a real process_ppp() call on
-#    BS-Aheloy against a real .obs file plus the sp3/clk/atx files already
-#    fetched during this session's live ppp_downloader.py testing, and
-#    report the raw rnx2rtkp output, before Phase 2d wires this into
-#    survey_controller.py.
-# 2. Trailing-positional-argument convention for sp3/clk/atx files (no
-#    dedicated CLI flags) is based on documented RTKLIB behavior, not
-#    independently confirmed via `rnx2rtkp --help` on this repo's actual
-#    installed binary. Verify this first during the live test above - if
-#    wrong, the fix is localized to process_ppp()'s cmd list construction.
-# 3. RESOLVED (was previously an open question, not just fixed): the
-#    original "-ar off" flag does not exist anywhere in this repo's own
-#    installed rnx2rtkp's real "-? " help output, captured verbatim on
-#    BS-Aheloy during Phase 2a Check 1 - it would have been silently
-#    rejected or ignored by this binary's actual argument parser, not
-#    merely unverified. Float-only ambiguity resolution is now correctly
-#    expressed as "-v 0.0" (validation threshold 0.0 = "no AR"), per that
-#    same captured help text: "-v thres  validation threshold for integer
-#    ambiguity (0.0:no AR) [3.0]". This is grounded in this repo's own
-#    binary's documented CLI, not external/general RTKLIB documentation -
-#    no further live verification of this specific flag is needed.
+# 1. STILL NOT LIVE-TESTED. This dev environment cannot execute
+#    tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp (Windows host, ARM Linux
+#    binary - the same constraint noted throughout Phase 2a/2b/2c/this
+#    fix). A first live test WAS run on BS-Aheloy and found the original
+#    trailing-positional-args-only design broken (see module docstring's
+#    HYBRID DESIGN section for the full root-cause writeup: uppercase SP3
+#    extension silently ignored, ANTEX never had a positional-arg path at
+#    all). This fix (extension normalization + -k conf for ANTEX/
+#    processing options) is grounded in this repo's own captured rnx2rtkp
+#    usage text, but has NOT itself been live-tested yet - Pesho must run
+#    a second live process_ppp() test on BS-Aheloy, checking specifically
+#    that the .pos header now shows sp3 (and clk, if present) as
+#    recognized inputs, and that output Q values/position stability
+#    reflect real PPP convergence rather than SPP-equivalent behavior,
+#    before Phase 2d proceeds.
+# 2. The -k conf file's precedence interaction with the CLI's -p 8/-m 15
+#    flags ("command line options precede options in the configuration
+#    file", per the captured usage text) is understood from that text but
+#    not independently exercised - specifically, whether -k conf VALUES
+#    (pos1-sateph=precise, pos2-armode=off) actually apply when NOT
+#    contradicted by a CLI flag has not been confirmed to work as
+#    expected in practice on this binary, only assumed from the documented
+#    precedence rule.
+# 3. SUPERSEDED TWICE: the original "-ar off" flag (a nonexistent CLI
+#    flag) was first replaced with "-v 0.0" (a real CLI flag, validation
+#    threshold 0.0 = "no AR") after Phase 2a Check 1's help-text capture.
+#    That -v 0.0 flag has since been REMOVED and replaced again by this
+#    fix's -k conf file's pos2-armode=off key - not because -v 0.0 was
+#    wrong, but because consolidating all ANTEX/processing-option settings
+#    into one -k conf (required anyway for ANTEX, per finding #2 in the
+#    module docstring) was judged more reliable than mixing a CLI flag
+#    with a separately-loaded conf file's precedence rules. pos2-armode=off
+#    is a real, confirmed key (present verbatim in
+#    web_app/rtklib_configs/rtkbase_ppp-static_default.conf), but - like
+#    the rest of this fix - has not itself been live-tested; see item 1
+#    and item 2 above.
 # 4. RTKLIB's behavior of falling back to SP3-embedded clock values when no
 #    separate CLK file is supplied is standard, documented RTKLIB behavior
 #    (readsp3() always parses the embedded clock column) but has not been
