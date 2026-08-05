@@ -139,6 +139,26 @@ sudo raspi-config nonint do_spi 0 2>&1 | tee -a /tmp/ota_update.log || log_statu
 log_status "info" "Ensuring fonts-dejavu-core is installed (idempotent, needed for optional LCD display feature)..."
 sudo apt-get install -y -qq fonts-dejavu-core 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ fonts-dejavu-core install failed - continuing anyway"
 
+log_status "info" "Ensuring ANTEX (igs20.atx) is present (idempotent, needed for optional PPP-static feature)..."
+ANTEX_DIR="$DEV_REPO_PATH/geomaxima_ppp"
+ANTEX_PATH="$ANTEX_DIR/igs20.atx"
+if [ -f "$ANTEX_PATH" ]; then
+    log_status "info" "✓ ANTEX file already present, skipping download"
+else
+    mkdir -p "$ANTEX_DIR" 2>&1 | tee -a /tmp/ota_update.log
+    if curl -fsSL "https://files.igs.org/pub/station/general/igs20.atx.gz" -o "$ANTEX_DIR/igs20.atx.gz" 2>&1 | tee -a /tmp/ota_update.log; then
+        if gzip -d "$ANTEX_DIR/igs20.atx.gz" 2>&1 | tee -a /tmp/ota_update.log; then
+            log_status "info" "✓ ANTEX file downloaded and decompressed"
+            REPO_OWNER_FOR_ANTEX=$(stat -c '%U' "$DEV_REPO_PATH")
+            chown -R "$REPO_OWNER_FOR_ANTEX":"$REPO_OWNER_FOR_ANTEX" "$ANTEX_DIR" 2>&1 | tee -a /tmp/ota_update.log || true
+        else
+            log_status "info" "⚠ ANTEX decompression failed - PPP-static will not work until resolved manually"
+        fi
+    else
+        log_status "info" "⚠ ANTEX download failed (network issue?) - PPP-static will not work until resolved - will retry on next update"
+    fi
+fi
+
 log_status "info" "Redeploying systemd units (unit/ and addons/unit/)..."
 
 REPO_OWNER=$(stat -c '%U' "$DEV_REPO_PATH")
