@@ -105,6 +105,55 @@ this file). PPPProcessor looks for it at a fixed path
 (DEFAULT_ANTEX_PATH below) and raises a clear, actionable
 AntexNotFoundError - not a cryptic rnx2rtkp failure - if it's missing,
 telling the operator which install step fetches it.
+
+NO RECEIVER ANTENNA PCV: A LIVE, REAL ACCURACY CEILING ON THIS HARDWARE -
+NOT A BUG. A trace-level (-x 3) live test on BS-Aheloy, after the SP3/CLK
+recognition fix above, found "no prec ephem" had dropped to 0 (precise
+products now correctly used) but a "no receiver antenna pcv:" trace line
+appeared and the .pos output had ZERO position epochs - this single
+warning HARD-BLOCKS all solution output in PPP mode on this rnx2rtkp
+build, it does not merely degrade accuracy the way a missing antenna
+calibration typically would in relative-positioning modes.
+
+Root cause: the physical antenna on BS-Aheloy is a generic/unbranded
+"K700" AliExpress model with no individual calibration entry anywhere in
+igs20.atx, AND RTKBase's own RINEX conversion does not populate the
+RINEX header's "ANT # / TYPE" field at all (confirmed empty on a real
+BS-Aheloy .obs file) - so rnx2rtkp has no antenna type string to even
+attempt an ANTEX lookup against, from either the receiver hardware or the
+RINEX file it's processing.
+
+FIX: ant1-anttype is explicitly set to "NONE" in _PPP_CONF_TEMPLATE below
+- the standard IGS ANTEX generic pseudo-antenna entry, representing an
+explicitly uncalibrated/unknown antenna with zero PCO/PCV correction
+applied (rather than rnx2rtkp trying and failing to look up a blank/
+unknown type string, which is what produced the hard-blocking warning).
+ant1 (not ant2) is used because this is single-receiver PPP processing,
+not a rover/base relative pair - RTKLIB's single-receiver modes address
+the sole receiver as "ant1" internally regardless of posmode.
+
+THIS IS A REAL, PERMANENT ACCURACY CEILING FOR THIS HARDWARE CHOICE, NOT
+A BUG BEING PAPERED OVER: with ant1-anttype=NONE, PPP-static's antenna
+phase-center offset/variation correction is NOT applied for this
+station's antenna - it never can be, since no per-model calibration
+exists for this antenna in any IGS ANTEX file. Position accuracy
+improvement from this migration will come entirely from precise
+orbits/clocks (the whole point of PPP-static over SPP), NOT from
+antenna-specific PCO/PCV correction, which typically contributes a few mm
+to cm in professional-grade static surveying but is simply unavailable
+here. This does not block PPP-static from working or from being a real
+accuracy improvement over SPP - it caps how much further improvement is
+achievable without a change in antenna hardware. See _KNOWN_LIMITATIONS.
+
+NOT INDEPENDENTLY VERIFIED IN THIS SESSION: the value "NONE" is the
+standard, documented IGS ANTEX generic-antenna record name present in
+every published igsYY.atx release - but this specific bundled igs20.atx
+file was NOT grepped for that exact string in this session (the file is
+a 54MB install-time asset that exists only on BS-Aheloy, not on this dev
+machine). Pesho should confirm with a direct grep on-station (e.g.
+`grep -A1 "^NONE" geomaxima_ppp/igs20.atx`) that "NONE" is present
+verbatim as a TYPE / SERIAL NO record before or alongside the next live
+test - flagged in _KNOWN_LIMITATIONS.
 """
 
 import logging
@@ -132,11 +181,47 @@ DEFAULT_ANTEX_RELATIVE_PATH = "geomaxima_ppp/igs20.atx"
 # configuration file" - it does not require a complete key set, unlike the
 # full RTKNAVI dump in rtkbase_ppp-static_default.conf, which was NOT used
 # as this template directly since most of its keys - inpstr1/2/3 streaming
-# config, ant1/ant2 antenna position/type, misc-* - are for rtkrcv's
-# real-time engine and are irrelevant/meaningless to rnx2rtkp's batch
-# processing). Key names (pos1-sateph, pos2-armode, file-satantfile,
-# file-rcvantfile) are copied verbatim from that same real template file,
-# not guessed.
+# config, misc-* - are for rtkrcv's real-time engine and are irrelevant to
+# rnx2rtkp's batch processing). Key names (pos1-sateph, pos2-armode,
+# file-satantfile, file-rcvantfile, ant1-anttype) are copied verbatim from
+# that same real template file, not guessed.
+#
+# ant1-anttype=NONE: REQUIRED, not optional/cosmetic - a live trace-level
+# test on BS-Aheloy found that WITHOUT this explicit override, rnx2rtkp
+# emits a "no receiver antenna pcv:" warning that HARD-BLOCKS all solution
+# output (zero epochs in the .pos file), because the physical antenna (a
+# generic/uncalibrated "K700" AliExpress model) has no entry in igs20.atx
+# AND RTKBase's own RINEX conversion leaves the header's "ANT # / TYPE"
+# field blank - rnx2rtkp has nothing to even attempt an ANTEX lookup
+# against. "NONE" is the standard IGS ANTEX generic pseudo-antenna record
+# (zero PCO/PCV correction) - see the module docstring's "NO RECEIVER
+# ANTENNA PCV" section for the full explanation and the real accuracy
+# implication (antenna-specific phase-center correction is permanently
+# unavailable for this hardware, not a bug to fix later).
+#
+# out-solstatic=all: ALSO REQUIRED - copied verbatim from the stock
+# rtkbase_ppp-static_default.conf (0:all,1:single). Without this key, a
+# live test found rnx2rtkp computing valid, converging solutions
+# internally (confirmed via trace: outsol/outsols called every epoch,
+# residuals shrinking cleanly) but never writing a single line to the
+# output .pos file - "all" tells RTKLIB to emit the running per-epoch
+# solution as static-mode convergence proceeds, rather than withholding
+# output entirely (its opposite, "single", would only ever write ONE
+# final line at the very end of the whole session, which is not what was
+# happening either - the omitted key's actual RTKLIB-internal default
+# behavior when absent from a -k file was not itself root-caused, only
+# confirmed that explicitly setting it to "all" fixes the symptom).
+# CONFIRMED WORKING END TO END: a live 8-hour real .obs file test on
+# BS-Aheloy with both ant1-anttype=NONE and out-solstatic=all produced
+# 3276 real data lines, Q=6 (PPP) throughout, with genuine convergence
+# (sdu shrinking from ~5.2m to ~0.098m over the 8-hour session) - this is
+# the first fully working end-to-end PPP-static run this module has
+# produced. Also confirms PPP-static genuinely needs an observation
+# window measured in HOURS, not minutes, to converge to useful accuracy -
+# consistent with PPP's well-known slower convergence relative to
+# RTK/PPK, and relevant to Phase 2d's interim-update scheduling (an
+# interim update early in a short survey will show large, still-converging
+# sdu values by design, not a malfunction).
 _PPP_CONF_TEMPLATE = """\
 pos1-posmode       =ppp-static
 pos1-frequency     =l1+l2
@@ -147,6 +232,8 @@ pos1-sateph        =precise
 pos2-armode        =off
 file-satantfile    ={satantfile}
 file-rcvantfile    ={rcvantfile}
+ant1-anttype       =NONE
+out-solstatic      =all
 """
 
 
@@ -270,6 +357,12 @@ class PPPProcessor:
         module tracks one ANTEX file covering both satellite and receiver
         antenna models (the bundled igs20.atx), not separate files per
         RTKLIB's more general two-file option.
+
+        Also bakes in ant1-anttype=NONE (hardcoded in _PPP_CONF_TEMPLATE,
+        not parameterized here) - required to avoid a hard-blocking "no
+        receiver antenna pcv" failure on this station's uncalibrated
+        antenna hardware; see the module docstring's "NO RECEIVER ANTENNA
+        PCV" section.
 
         Returns the path to the generated conf file. NOT automatically
         deleted by this method - see process_ppp()'s cleanup handling for
@@ -481,21 +574,31 @@ class PPPProcessor:
 # ---------------------------------------------------------------------------
 # _KNOWN_LIMITATIONS
 # ---------------------------------------------------------------------------
-# 1. STILL NOT LIVE-TESTED. This dev environment cannot execute
-#    tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp (Windows host, ARM Linux
-#    binary - the same constraint noted throughout Phase 2a/2b/2c/this
-#    fix). A first live test WAS run on BS-Aheloy and found the original
-#    trailing-positional-args-only design broken (see module docstring's
-#    HYBRID DESIGN section for the full root-cause writeup: uppercase SP3
-#    extension silently ignored, ANTEX never had a positional-arg path at
-#    all). This fix (extension normalization + -k conf for ANTEX/
-#    processing options) is grounded in this repo's own captured rnx2rtkp
-#    usage text, but has NOT itself been live-tested yet - Pesho must run
-#    a second live process_ppp() test on BS-Aheloy, checking specifically
-#    that the .pos header now shows sp3 (and clk, if present) as
-#    recognized inputs, and that output Q values/position stability
-#    reflect real PPP convergence rather than SPP-equivalent behavior,
-#    before Phase 2d proceeds.
+# 1. RESOLVED - CONFIRMED WORKING END-TO-END. This dev environment cannot
+#    execute tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp (Windows host, ARM
+#    Linux binary - the same constraint noted throughout Phase 2a/2b/2c/
+#    these fixes), so all verification below happened on BS-Aheloy, not
+#    here. Three live tests ran in sequence: (1) the original trailing-
+#    positional-args-only design was broken (uppercase SP3 extension
+#    silently ignored, ANTEX never had a positional-arg path at all - see
+#    the HYBRID DESIGN section above); (2) after that fix, a trace-level
+#    (-x 3) test confirmed SP3/CLK recognition actually worked ("no prec
+#    ephem" dropped to 0) but surfaced a hard-blocking "no receiver
+#    antenna pcv" issue producing zero output epochs despite the trace
+#    showing clean internal convergence; (3) after adding
+#    ant1-anttype=NONE AND out-solstatic=all together, a live 8-hour real
+#    .obs file test produced 3276 real data lines, Q=6 (PPP) throughout,
+#    with genuine convergence (sdu shrinking from ~5.2m to ~0.098m over
+#    the session) - the first fully working end-to-end PPP-static run
+#    this module has produced. Root cause of the zero-epoch symptom was
+#    TWO combined factors, both now fixed: the missing out-solstatic=all
+#    key (RTKLIB was computing valid per-epoch solutions internally but
+#    never writing them without this key explicitly set), and - separate
+#    from any bug - PPP-static genuinely needing an observation window
+#    measured in HOURS, not minutes, to converge to useful accuracy
+#    (relevant to Phase 2d's interim-update scheduling: an interim update
+#    early in a short survey will correctly show large, still-converging
+#    sdu values by design, not a malfunction).
 # 2. The -k conf file's precedence interaction with the CLI's -p 8/-m 15
 #    flags ("command line options precede options in the configuration
 #    file", per the captured usage text) is understood from that text but
@@ -530,3 +633,29 @@ class PPPProcessor:
 #    output and PPPProcessor reproduces that same default-flag omission,
 #    there is no compatibility gap here - not a bug, and not something to
 #    add.
+# 6. ant1-anttype=NONE's exact string value ("NONE") is the standard,
+#    documented IGS ANTEX generic pseudo-antenna record name present in
+#    every published igsYY.atx release, but this specific bundled
+#    igs20.atx file was NOT independently grepped for that exact string in
+#    this session - the file is a ~54MB install-time asset that exists
+#    only on BS-Aheloy (fetched by install.sh/perform_update.sh), not on
+#    this dev machine. Pesho should confirm on-station, e.g.
+#    `grep -A1 "^NONE" geomaxima_ppp/igs20.atx`, that "NONE" is present
+#    verbatim as a TYPE / SERIAL NO record - if it isn't (unlikely, but
+#    not independently confirmed here), the correct fallback string would
+#    need to be substituted in _PPP_CONF_TEMPLATE.
+# 7. OPEN QUESTION, NOT FIXED HERE (out of this task's scope): the same
+#    RINEX header inspected during this investigation shows "ANTENNA:
+#    DELTA H/E/N" as 0.0000/0.0000/0.0000 - antenna height above the
+#    survey marker is either genuinely zero (unlikely for a real
+#    installation) or, more likely, simply not populated by RTKBase's
+#    RINEX conversion, the same underlying gap as the missing "ANT # /
+#    TYPE" field this fix works around. This is a DIFFERENT setting -
+#    physical antenna height/offset from the marker, not PCV calibration -
+#    and affects absolute height accuracy independently of the
+#    ant1-anttype=NONE fix above (this fix corrects a hard-block on ANY
+#    solution output; delta H/E/N being wrong would produce a solution
+#    that is offset in height even with the PCV fix applied). Pesho should
+#    determine whether this value should be populated during RINEX
+#    conversion or supplied separately before relying on PPP-static's
+#    absolute height output for anything precision-critical.
