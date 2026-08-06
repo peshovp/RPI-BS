@@ -211,6 +211,22 @@ fi
 
 echo ""
 echo "============================================================================"
+echo "Ensuring /var/log/rtkbase/ exists (needed by geomaxima_watchdog.service)"
+echo "============================================================================"
+# Idempotent: mkdir -p is a no-op if the directory already exists. Owned by
+# root, NOT $SUDO_USER - unlike ANTEX/geoid above, geomaxima_watchdog.service
+# runs as User=root (addons/unit/geomaxima_watchdog.service), not as the
+# installing user, so root ownership is correct here despite looking like a
+# deviation from the ANTEX pattern just above. Without this directory,
+# run_watchdog_check.py's logging.FileHandler('/var/log/rtkbase/watchdog.log')
+# call raises FileNotFoundError on every run (confirmed live on BS-Aheloy:
+# geomaxima_watchdog.service crash-looped every minute via
+# geomaxima_watchdog.timer until this directory was created manually).
+mkdir -p /var/log/rtkbase
+chown root:root /var/log/rtkbase || log "WARNING: chown of /var/log/rtkbase to root failed"
+
+echo ""
+echo "============================================================================"
 echo "STAGE 5/5: INSTALLATION COMPLETE! Please review the status above."
 echo "============================================================================"
 echo "Remember to check the logs and test connectivity."

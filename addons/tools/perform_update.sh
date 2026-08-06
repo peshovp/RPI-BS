@@ -159,6 +159,20 @@ else
     fi
 fi
 
+log_status "info" "Ensuring /var/log/rtkbase/ exists (idempotent, needed by geomaxima_watchdog.service)..."
+# Owned by root, NOT the repo owner - unlike ANTEX above,
+# geomaxima_watchdog.service runs as User=root
+# (addons/unit/geomaxima_watchdog.service), not as the installing user.
+# Without this directory, run_watchdog_check.py's
+# logging.FileHandler('/var/log/rtkbase/watchdog.log') call raises
+# FileNotFoundError on every run - confirmed live on BS-Aheloy:
+# geomaxima_watchdog.service crash-looped every minute via
+# geomaxima_watchdog.timer until this was fixed. This step ensures
+# already-deployed stations (BS-Aheloy, BS-Topolchane) get this fixed
+# automatically on their next OTA update.
+sudo mkdir -p /var/log/rtkbase 2>&1 | tee -a /tmp/ota_update.log
+sudo chown root:root /var/log/rtkbase 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ chown of /var/log/rtkbase to root failed - continuing anyway"
+
 log_status "info" "Redeploying systemd units (unit/ and addons/unit/)..."
 
 REPO_OWNER=$(stat -c '%U' "$DEV_REPO_PATH")
