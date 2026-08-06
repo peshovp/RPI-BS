@@ -206,6 +206,7 @@ class WatchdogController:
             return {'enabled': False, 'message': 'Watchdog is disabled'}
         
         results = {
+            'enabled': True,
             'timestamp': datetime.utcnow().isoformat(),
             'checks': {},
             'incidents': []
