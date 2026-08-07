@@ -889,6 +889,9 @@ $(document).ready(function () {
                 if (status.target_hours && document.activeElement !== document.getElementById("auto-survey-target-hours")) {
                     $("#auto-survey-target-hours").val(status.target_hours);
                 }
+                if (status.ppp_tier && document.activeElement !== document.getElementById("auto-survey-ppp-tier")) {
+                    $("#auto-survey-ppp-tier").val(status.ppp_tier);
+                }
 
                 if (state === "running") {
                     autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
@@ -952,7 +955,7 @@ $(document).ready(function () {
                 }
 
                 if (state === "completed" && finalPos) {
-                    var detailsText = "Final position: " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
+                    var detailsText = "Final position (BGS2005): " + finalPos.lat + ", " + finalPos.lon + ", " + finalPos.height + "m";
                     if (status.start_time) {
                         var elapsedMs = Date.now() - parseUtcTimestamp(status.start_time).getTime();
                         detailsText += " - Elapsed: " + forHumans(Math.floor(elapsedMs / 1000));
@@ -964,6 +967,17 @@ $(document).ready(function () {
                 } else if (state !== "running") {
                     autoSurveyDetailsElt.textContent = "";
                 }
+
+                // PPP-static convergence notice: still_converging is set by
+                // survey_controller.py's _perform_update() based on the
+                // interim estimate's horizontal std vs
+                // PPP_CONVERGENCE_STD_METERS (an unverified placeholder
+                // threshold, not elapsed time) - large/unstable interim
+                // std values before convergence are expected, not a fault.
+                var stillConverging = state === "running"
+                    && status.quality_metrics
+                    && status.quality_metrics.still_converging === true;
+                $("#auto-survey-converging-notice").toggle(!!stillConverging);
             })
             .catch(function(err) {
                 autoSurveyStatusTextElt.textContent = "Status: Error polling status";
@@ -978,7 +992,10 @@ $(document).ready(function () {
             fetch("/api/auto_survey/start", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ target_hours: parseInt($("#auto-survey-target-hours").val()) })
+                body: JSON.stringify({
+                    target_hours: parseInt($("#auto-survey-target-hours").val()),
+                    ppp_tier: $("#auto-survey-ppp-tier").val()
+                })
             })
                 .then(function(response) {
                     if (response.status === 503) {

@@ -8,10 +8,20 @@ Orchestrates:
 - RTKBase configuration auto-discovery
 - GNSS data logging (enables str2str_file if needed)
 - RINEX conversion from raw logs
-- SPP positioning with outlier rejection
+- PPP-static positioning (rnx2rtkp -p 8) using CDDIS precise orbit/clock
+  products, with outlier rejection
 - Geoid correction
+- ITRF2020 -> BGS2005 transformation (Инструкция № РД-02-20-25, Чл.22,
+  ал.1 - see bgs2005_transformer.py) before RTCM broadcast
 - RTKBase configuration updates
 - State persistence
+
+PHASE 2D: full replacement of SPPProcessor with PPPProcessor - no SPP
+fallback. A failed precise-product fetch or PPP processing run surfaces as
+a failed update (via StateManager.record_update_failure()), exactly like
+any other failure mode already handled here; it does not silently degrade
+to SPP. This matches Pesho's explicit "no fallback, no silent start"
+decision, already established for ppp_downloader.py's own error handling.
 """
 
 import logging
@@ -25,7 +35,9 @@ import os
 
 from .rtkbase_config import RTKBaseConfig
 from .rinex_converter import RINEXConverter
-from .spp_processor import SPPProcessor
+from .ppp_processor import PPPProcessor
+from .ppp_downloader import PPPDownloader, PPPDownloaderError
+from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
 from .config_manager import ConfigManager
@@ -47,7 +59,10 @@ class SurveyController:
     - Auto-discovers RTKBase configuration
     - Enables file logging automatically
     - Converts raw logs to RINEX
-    - Processes with SPP positioning
+    - Processes with PPP-static positioning (rnx2rtkp -p 8, CDDIS precise
+      orbit/clock products)
+    - Transforms ITRF2020 -> BGS2005 before broadcast (Инструкция №
+      РД-02-20-25, Чл.22, ал.1)
     - Updates RTKBase config hourly
     """
     
@@ -78,11 +93,19 @@ class SurveyController:
         
         # Initialize components
         self.rinex = RINEXConverter()
-        self.spp = SPPProcessor()
+        self.spp = PPPProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
         self.estimator = PositionEstimator(outlier_threshold=3.5, min_epochs=50)
         self.geoid = GeoidCorrector()
         self.config = ConfigManager(settings_file)
         self.state = StateManager(state_file)
+
+        # Precise-product downloader (CDDIS SP3/CLK, Phase 2b) - one
+        # instance reused across the whole survey so the authenticated
+        # session (Earthdata Login cookies) persists across interim
+        # updates instead of re-authenticating every 15 minutes/hour.
+        self.ppp_products_dir = self.rtkbase.rtkbase_root / "geomaxima_ppp" / "products"
+        self.ppp_products_dir.mkdir(parents=True, exist_ok=True)
+        self.ppp_downloader = PPPDownloader(products_dir=self.ppp_products_dir)
 
         # Geoid config (upload directory + persisted config)
         self.geoid_dir = self.rtkbase.rtkbase_root / "geomaxima_geoid"
@@ -92,6 +115,7 @@ class SurveyController:
         
         # Survey parameters
         self.target_hours = 24
+        self.ppp_tier = 'rapid'
 
         # Hard timeout: fail survey if no successful coordinate update happens for X minutes.
         # Configurable via env var AUTOSURVEY_UPDATE_TIMEOUT_MINUTES.
@@ -214,29 +238,39 @@ class SurveyController:
             logger.error(f"Failed to stop file logging: {e}")
             return False
     
-    def start_survey(self, target_hours: int = 24) -> bool:
+    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid') -> bool:
         """
         Start new survey session
-        
+
         Args:
             target_hours: Survey duration in hours (default: 24)
-            
+            ppp_tier: CDDIS precise-product tier for PPP-static processing
+                ("ultra-rapid" | "rapid" | "final"). "rapid" is the default:
+                usually available within the survey's own timeframe (up to
+                ~41h latency) without the accuracy tradeoffs of
+                ultra-rapid's predicted-orbit half.
+
         Returns:
             True if started successfully
         """
+        if ppp_tier not in ('ultra-rapid', 'rapid', 'final'):
+            logger.error(f"Invalid ppp_tier: {ppp_tier!r}")
+            return False
+
         if self._running:
             logger.warning("Survey already running")
             return False
-        
+
         # Ensure file logging is enabled
         if self.auto_mode:
             if not self._ensure_file_logging():
                 logger.error("File logging could not be started")
                 return False
-        
+
         # Initialize state
         self.target_hours = target_hours
-        if not self.state.start_survey(target_hours):
+        self.ppp_tier = ppp_tier
+        if not self.state.start_survey(target_hours, ppp_tier=ppp_tier):
             logger.error("Failed to initialize survey state")
             return False
         
@@ -393,7 +427,7 @@ class SurveyController:
         
         logger.info(f"Survey loop started, target: {self.target_hours} hours")
         logger.info("Progressive updates: 15min (0-6h) → 1h (6-24h) → final (24h)")
-        logger.info("Using RINEX conversion workflow (RTKBase raw logs → RINEX → SPP)")
+        logger.info(f"Using RINEX conversion workflow (RTKBase raw logs → RINEX → PPP-static, tier={self.ppp_tier})")
         
         try:
             while self._running:
@@ -475,86 +509,143 @@ class SurveyController:
         logger.info(f"=== Interim Update ({elapsed_hours:.2f}h) ===")
         return self._perform_update(is_final=False)
     
+    # PPP-static's convergence behavior differs fundamentally from SPP's:
+    # a live 8-hour real test (Phase 2c) showed horizontal std shrinking
+    # from ~5.2m to ~0.098m over the session - i.e. early interim updates
+    # in a short-elapsed survey are EXPECTED to show large, unstable
+    # values, not a malfunction. still_converging (computed below, Step 7)
+    # is driven by estimate.horizontal_std_meters against this threshold,
+    # NOT by elapsed time - an earlier version of this code used a fixed
+    # elapsed-hours cutoff, but that number had no real source and was
+    # removed.
+    #
+    # PPP_CONVERGENCE_STD_METERS: UNVERIFIED PLACEHOLDER, not derived from
+    # the Phase 2c 8-hour test (that test's intermediate std values over
+    # time were not logged/available - only the start (~5.2m) and end
+    # (~0.098m) points are known) and not derived from any cited PPP
+    # convergence literature. The one related, real, in-repo precedent is
+    # gnss_parser.py's GNSSDataParser.max_std_3d default (0.05m = 5cm,
+    # gnss_parser.py line ~90) - but that threshold governs per-EPOCH
+    # quality filtering in a different, currently-unused code path (that
+    # class is not wired into SurveyController - SPPProcessor/PPPProcessor
+    # bypass it entirely), not a whole-ESTIMATE "PPP has converged"
+    # judgment, so it is not a genuine match, only the closest existing
+    # number in this codebase. 0.10m (10cm) is used here as a rough
+    # "meaningfully better than SPP's meter-level noise floor, not yet at
+    # final PPP-static cm-level accuracy" cutoff - THIS HAS NOT BEEN
+    # VALIDATED AGAINST REAL CONVERGENCE DATA. Revisit once real
+    # interim-update std progression is logged from an actual multi-hour
+    # live survey.
+    PPP_CONVERGENCE_STD_METERS = 0.10
+
     def _perform_update(self, is_final: bool = False) -> bool:
         """
-        Perform position update using RINEX workflow:
+        Perform position update using RINEX + PPP-static workflow:
         1. Find latest raw GNSS log file
         2. Convert to RINEX (obs + nav)
-        3. Process with rnx2rtkp for SPP
+        3. Fetch CDDIS precise orbit/clock products, process with
+           rnx2rtkp -p 8 (PPP-static)
         4. Parse position solutions
         5. Estimate mean position with outlier rejection
-        6. Apply geoid correction
-        7. Update RTKBase configuration
-        8. Save state
+        6. Apply geoid correction (display/record only)
+        7. Transform ITRF2020 -> BGS2005 (Инструкция № РД-02-20-25, Чл.22,
+           ал.1 - see bgs2005_transformer.py) - THIS is the coordinate
+           broadcast via RTCM, not the raw ITRF2020 PPP estimate
+        8. Update RTKBase configuration
+        9. Save state
         """
         try:
             # Step 1: Find latest raw data file
             raw_file = self.rtkbase.get_data_file()
-            
+
             if not raw_file or not raw_file.exists():
                 logger.warning("No raw data file found - waiting for data...")
                 self.state.record_update_failure("No raw data file found")
                 return False
-            
+
             logger.info(f"Processing raw file: {raw_file.name} ({raw_file.stat().st_size / 1024:.1f} KB)")
-            
+
             # Step 2: Convert to RINEX
             rinex_dir = self.work_dir / "rinex"
             rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
-            
+
             if not rinex_result:
                 logger.error("RINEX conversion failed")
                 self.state.record_update_failure("RINEX conversion failed")
                 return False
-            
+
             obs_file, nav_file = rinex_result
             logger.info(f"✓ RINEX files created: {obs_file.name}, {nav_file.name if nav_file else 'N/A'}")
-            
-            # Step 3: Process SPP
-            pos_file = self.spp.process_spp(obs_file, nav_file)
-            
+
+            # Step 3: Fetch CDDIS precise products for the configured tier,
+            # then process with rnx2rtkp -p 8 (PPP-static). No SPP fallback
+            # on any failure here - per Pesho's explicit "no fallback, no
+            # silent start" decision (already established for
+            # ppp_downloader.py's own error handling), a failed fetch or a
+            # failed PPP run surfaces as a failed update like any other
+            # failure mode in this method, not a silent degrade to SPP.
+            survey_status = self.state.get_status()
+            survey_start_raw = survey_status.get('start_time')
+            survey_start_time = datetime.fromisoformat(survey_start_raw) if survey_start_raw else datetime.utcnow()
+
+            try:
+                products = self.ppp_downloader.fetch_products(self.ppp_tier, survey_start_time)
+            except PPPDownloaderError as e:
+                logger.error(f"Precise product fetch failed ({self.ppp_tier}): {e}")
+                self.state.record_update_failure(f"Precise product fetch failed ({self.ppp_tier}): {e}")
+                return False
+
+            sp3_file = products.get('sp3')
+            clk_file = products.get('clk')  # None for ultra-rapid - process_ppp() handles this
+            logger.info(f"✓ Precise products ready: sp3={sp3_file.name if sp3_file else 'N/A'}, "
+                        f"clk={clk_file.name if clk_file else '(none - ultra-rapid, SP3-embedded clocks)'}")
+
+            pos_file = self.spp.process_ppp(obs_file, sp3_file, nav_file=nav_file, clk_file=clk_file)
+
             if not pos_file:
-                logger.error("SPP processing failed")
-                self.state.record_update_failure("SPP processing failed (rnx2rtkp)")
+                logger.error("PPP-static processing failed")
+                self.state.record_update_failure("PPP-static processing failed (rnx2rtkp -p 8)")
                 return False
-            
-            logger.info(f"✓ SPP position file: {pos_file.name}")
-            
-            # Step 4: Parse positions
+
+            logger.info(f"✓ PPP-static position file: {pos_file.name}")
+
+            # Step 4: Parse positions - parse_position_file() is unchanged
+            # from SPPProcessor (RTKLIB's -f 2 output format is
+            # mode-independent, confirmed Phase 2c) and reused as-is here.
             positions = self.spp.parse_position_file(pos_file)
-            
+
             if not positions:
-                logger.warning("No positions in SPP output")
-                self.state.record_update_failure("No positions in SPP output")
+                logger.warning("No positions in PPP-static output")
+                self.state.record_update_failure("No positions in PPP-static output")
                 return False
-            
+
             # Accept common RTKLIB quality flags.
-            # Depending on configuration/data, rnx2rtkp may output different Q values.
-            # 1=FIX, 2=FLOAT, 4=DGPS, 5=SINGLE
-            quality_positions = [p for p in positions if p.get('Q') in (1, 2, 4, 5)]
-            
+            # 1=FIX, 2=FLOAT, 4=DGPS, 5=SINGLE, 6=PPP (confirmed live,
+            # Phase 2c: rnx2rtkp -p 8 reports Q=6 for PPP solutions)
+            quality_positions = [p for p in positions if p.get('Q') in (1, 2, 4, 5, 6)]
+
             if not quality_positions:
-                logger.warning(f"No SPP solutions found (total positions: {len(positions)})")
-                self.state.record_update_failure("No usable solutions in SPP output (quality filter)")
+                logger.warning(f"No PPP-static solutions found (total positions: {len(positions)})")
+                self.state.record_update_failure("No usable solutions in PPP-static output (quality filter)")
                 return False
-            
-            logger.info(f"Found {len(quality_positions)} SPP solutions")
-            
+
+            logger.info(f"Found {len(quality_positions)} PPP-static solutions")
+
             # Step 5: Estimate mean position
             estimate = self.estimator.estimate_position(quality_positions)
-            
+
             if not estimate:
                 logger.error("Failed to estimate position")
                 self.state.record_update_failure("Failed to estimate position (insufficient/unstable data)")
                 return False
-            
-            logger.info(f"Position estimate: {estimate.lat:.8f}°, {estimate.lon:.8f}°, {estimate.height:.3f}m")
+
+            logger.info(f"Position estimate (ITRF2020): {estimate.lat:.8f}°, {estimate.lon:.8f}°, {estimate.height:.3f}m")
             logger.info(f"Std: H={estimate.horizontal_std_meters*1000:.1f}mm, V={estimate.std_height*1000:.1f}mm")
-            
+
             # Step 6: Compute orthometric (MSL) height via geoid model, for
             # DISPLAY/RECORD purposes only. RTCM 1005/1006 (broadcast to
-            # rovers via str2str -p) requires the WGS84 ELLIPSOIDAL height,
-            # so h_ortho must NEVER be passed to update_position() below.
+            # rovers via str2str -p) requires ELLIPSOIDAL height, so
+            # h_ortho must NEVER be passed to update_position() below.
             h_ortho = self.geoid.ellipsoidal_to_orthometric(
                 estimate.lat,
                 estimate.lon,
@@ -567,16 +658,45 @@ class SurveyController:
                 geoid_sep = estimate.height - h_ortho
                 logger.info(f"Geoid correction: {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m")
 
-            # Step 7: Update RTKBase configuration
-            # CRITICAL: always pass the ELLIPSOIDAL height (estimate.height)
-            # here, never h_ortho. This is the value str2str -p embeds into
-            # RTCM 1005/1006 for rover baseline calculations.
-            if is_final:
-                logger.info("🎯 FINAL UPDATE - Applying permanent coordinates...")
-            else:
-                logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates...")
+            # Step 7: ITRF2020 -> BGS2005 transformation. Per Инструкция №
+            # РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1: relative GNSS
+            # methods (RTK, classified as such in Чл.11) require base
+            # station reference coordinates in BGS2005, not raw ITRF/WGS84.
+            # The transformed position below - NOT estimate.lat/lon/height -
+            # is what gets broadcast via RTCM in Step 8.
+            t_obs = extract_observation_epoch(obs_file)
+            if t_obs is None:
+                logger.error("Could not extract observation epoch from RINEX header - "
+                             "cannot perform ITRF2020->BGS2005 transformation")
+                self.state.record_update_failure("Missing RINEX observation epoch for BGS2005 transform")
+                return False
 
-            if self.rtkbase.update_position(estimate.lat, estimate.lon, estimate.height):
+            try:
+                bgs2005 = itrf2020_to_bgs2005(
+                    GeodeticPoint(lat=estimate.lat, lon=estimate.lon, height=estimate.height),
+                    t_obs
+                )
+            except Exception as e:
+                logger.error(f"ITRF2020->BGS2005 transformation failed: {e}", exc_info=True)
+                self.state.record_update_failure(f"BGS2005 transformation failed: {e}")
+                return False
+
+            logger.info(f"Position estimate (BGS2005, t_obs={t_obs:.4f}): "
+                        f"{bgs2005['lat_dd']:.8f}°, {bgs2005['lon_dd']:.8f}°, {bgs2005['height_m']:.3f}m")
+            logger.info(f"BGS2005 broadcast coordinate per {bgs2005['regulation_reference']}")
+
+            # Step 8: Update RTKBase configuration
+            # CRITICAL: broadcast the BGS2005-transformed, ELLIPSOIDAL
+            # height position (bgs2005['height_m']), never estimate.height
+            # (raw ITRF2020) and never h_ortho (orthometric/MSL). This is
+            # the value str2str -p embeds into RTCM 1005/1006 for rover
+            # baseline calculations, and per Чл.22 ал.1 it must be BGS2005.
+            if is_final:
+                logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
+            else:
+                logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates (BGS2005)...")
+
+            if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], bgs2005['height_m']):
                 if is_final:
                     logger.info("✓ Final configuration applied successfully")
                 else:
@@ -593,16 +713,25 @@ class SurveyController:
                 logger.error("Failed to update configuration")
                 self.state.record_update_failure("Failed to update RTKBase settings.conf")
                 return False
-            
-            # Step 8: Update state
+
+            # Step 9: Update state
             # Explicit float()/int() casts: estimate.* fields come from numpy
             # aggregations (np.sum/np.sqrt/np.mean) and would otherwise leak
             # numpy.float64/numpy.int64 into the JSON-serialized state.
+            #
+            # position holds the BGS2005 (broadcast) coordinate - the value
+            # actually written to settings.conf/RTCM above. The raw
+            # ITRF2020 PPP estimate and MSL height are kept alongside it
+            # for display/diagnostics only, never re-broadcast.
             position = {
-                'lat': float(estimate.lat),
-                'lon': float(estimate.lon),
-                'height': float(estimate.height),  # WGS84 ellipsoidal - matches settings.conf / RTCM
-                'height_msl': float(h_ortho) if h_ortho is not None else None  # orthometric (MSL), display only
+                'lat': float(bgs2005['lat_dd']),
+                'lon': float(bgs2005['lon_dd']),
+                'height': float(bgs2005['height_m']),  # BGS2005 ellipsoidal - matches settings.conf / RTCM
+                'height_msl': float(h_ortho) if h_ortho is not None else None,  # orthometric (MSL) of the ITRF2020 estimate, display only
+                'coordinate_system': 'BGS2005',
+                'itrf2020_lat': float(estimate.lat),
+                'itrf2020_lon': float(estimate.lon),
+                'itrf2020_height': float(estimate.height),
             }
 
             position_std = {
@@ -612,26 +741,51 @@ class SurveyController:
                 'std_h_meters': float(estimate.horizontal_std_meters)
             }
 
+            # PPP-static convergence is slow relative to SPP (see
+            # PPP_CONVERGENCE_STD_METERS above) - interim updates whose
+            # horizontal std is still above that (unverified placeholder)
+            # threshold are flagged so the UI can show "still converging"
+            # instead of implying the shown accuracy is final. Driven by
+            # the actual estimate quality (estimate.horizontal_std_meters,
+            # already computed in Step 5 above), not elapsed time.
+            still_converging = (not is_final) and (estimate.horizontal_std_meters > self.PPP_CONVERGENCE_STD_METERS)
+
+            # Grep-able std-vs-time data point, logged on every update
+            # (interim and final) - PPP_CONVERGENCE_STD_METERS is an
+            # unverified placeholder (see its definition above); this line
+            # exists specifically to accumulate real elapsed/std pairs
+            # from live surveys so that placeholder can be replaced with a
+            # calibrated value once enough real progressions are recorded.
+            elapsed_hours_for_log = (datetime.utcnow() - survey_start_time).total_seconds() / 3600
+            logger.info(
+                f"PPP convergence: elapsed={elapsed_hours_for_log:.2f}h "
+                f"std={estimate.horizontal_std_meters:.3f}m "
+                f"still_converging={still_converging}"
+            )
+
             quality_metrics = {
                 'mean_sats': float(estimate.mean_sats) if hasattr(estimate, 'mean_sats') else 0,
                 'rejected_epochs': int(estimate.rejected_epochs) if hasattr(estimate, 'rejected_epochs') else 0,
-                'is_final': is_final  # Mark if this is final or interim
+                'is_final': is_final,  # Mark if this is final or interim
+                'ppp_tier': self.ppp_tier,
+                'still_converging': still_converging,
             }
-            
+
             self.state.update_progress(
                 position=position,
                 position_std=position_std,
                 num_epochs=estimate.num_epochs,
                 quality_metrics=quality_metrics
             )
-            
+
             if is_final:
                 logger.info(f"✓ FINAL UPDATE complete - Epochs: {estimate.num_epochs}, H_std: {estimate.horizontal_std_meters*1000:.1f}mm")
             else:
-                logger.info(f"✓ Interim update complete - Epochs: {estimate.num_epochs}, H_std: {estimate.horizontal_std_meters*1000:.1f}mm")
+                logger.info(f"✓ Interim update complete - Epochs: {estimate.num_epochs}, H_std: {estimate.horizontal_std_meters*1000:.1f}mm"
+                            + (" (still converging)" if quality_metrics['still_converging'] else ""))
 
             return True
-            
+
         except Exception as e:
             logger.error(f"Update failed: {e}", exc_info=True)
             try:
@@ -668,20 +822,25 @@ class SurveyController:
 
             if pos:
                 std = status.get('position_std', {})
-                
+
                 self.state.complete_survey(pos)
-                
+
                 logger.info("=" * 60)
                 logger.info("✓ SURVEY COMPLETED SUCCESSFULLY")
-                logger.info(f"Final Position: {pos['lat']:.8f}°, {pos['lon']:.8f}°, {pos['height']:.3f}m")
+                # pos['lat']/lon/height are already the BGS2005-transformed
+                # broadcast coordinate (see _perform_update() Step 7/9) -
+                # not the raw ITRF2020 PPP estimate.
+                logger.info(f"Final Position (BGS2005): {pos['lat']:.8f}°, {pos['lon']:.8f}°, {pos['height']:.3f}m")
                 logger.info(f"Horizontal Accuracy: {std.get('std_h_meters', 0)*1000:.1f}mm")
                 logger.info(f"Vertical Accuracy: {std.get('std_height', 0)*1000:.1f}mm")
                 logger.info(f"Total Epochs: {status.get('num_epochs', 0)}")
                 logger.info("=" * 60)
-                
+
                 # CRITICAL: Apply coordinates to RTKBase configuration FIRST
+                # (pos already holds BGS2005 coordinates, not raw ITRF2020 -
+                # see comment above)
                 try:
-                    logger.info(f"✓ Applying coordinates to RTKBase: {pos['lat']:.8f} {pos['lon']:.8f} {pos['height']:.3f}")
+                    logger.info(f"✓ Applying coordinates to RTKBase (BGS2005): {pos['lat']:.8f} {pos['lon']:.8f} {pos['height']:.3f}")
                     if self.rtkbase.update_position(pos['lat'], pos['lon'], pos['height']):
                         logger.info("✓ RTKBase configuration updated successfully")
                         # Persist that coordinates were applied
@@ -689,7 +848,8 @@ class SurveyController:
                             'lat': pos['lat'],
                             'lon': pos['lon'],
                             'height': pos['height'],
-                            'height_msl': pos.get('height_msl')
+                            'height_msl': pos.get('height_msl'),
+                            'coordinate_system': pos.get('coordinate_system', 'BGS2005'),
                         })
                         
                         # CRITICAL: Wait for filesystem to stabilize (settings.conf is flushed)
@@ -735,7 +895,10 @@ class SurveyController:
         """
         status = self.state.get_status()
 
-        # Auto-apply coordinates if survey is completed but not yet applied
+        # Auto-apply coordinates if survey is completed but not yet applied.
+        # pos['lat']/lon/height already hold the BGS2005-transformed
+        # broadcast coordinate (see _perform_update()'s Step 7/9), not raw
+        # ITRF2020 - no re-transformation needed here.
         try:
             if status.get('survey_state') == SurveyState.COMPLETED.value and not status.get('applied'):
                 pos = status.get('final_position') or status.get('current_position')
@@ -852,14 +1015,19 @@ class SurveyController:
 
         logger.info("Recovering previous survey session...")
 
-        # Ensure controller uses persisted target_hours (so loop completion matches UI)
+        # Ensure controller uses persisted target_hours/ppp_tier (so loop
+        # completion and precise-product fetching match what was actually
+        # started, not this instance's just-initialized defaults)
         try:
             status = self.state.get_status()
             target_hours = status.get('target_hours')
             if isinstance(target_hours, (int, float)) and target_hours > 0:
                 self.target_hours = int(target_hours)
+            ppp_tier = status.get('ppp_tier')
+            if ppp_tier in ('ultra-rapid', 'rapid', 'final'):
+                self.ppp_tier = ppp_tier
         except Exception as e:
-            logger.warning(f"Failed to read target_hours from state: {e}")
+            logger.warning(f"Failed to read target_hours/ppp_tier from state: {e}")
         
         # Resume from saved state
         if self.state.survey_state == SurveyState.PAUSED:

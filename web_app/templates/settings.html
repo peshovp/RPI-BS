@@ -631,6 +631,17 @@
       </div>
     </div>
     <div class="form-group row">
+      <label for="auto-survey-ppp-tier" class="col-sm-3 col-form-label">Precise Product Tier:</label>
+      <div class="col-sm-9">
+        <select id="auto-survey-ppp-tier" class="form-control">
+          <option value="rapid" selected>Rapid (recommended - usually available within ~41h)</option>
+          <option value="ultra-rapid">Ultra-rapid (available immediately, predicted-orbit accuracy)</option>
+          <option value="final">Final (best accuracy, up to ~18 day latency)</option>
+        </select>
+        <small class="form-text text-muted">CDDIS precise orbit/clock product tier used for PPP-static processing. Applied on next Start.</small>
+      </div>
+    </div>
+    <div class="form-group row">
       <label class="col-sm-3 col-form-label">Geoid Model:</label>
       <div class="col-sm-9">
         <div id="auto-survey-geoid-current" class="text-muted small mb-2">Loading...</div>
@@ -656,6 +667,9 @@
             <div id="auto-survey-progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
           </div>
           <div id="auto-survey-details" class="text-muted mt-2 small"></div>
+          <div id="auto-survey-converging-notice" class="alert alert-info mt-2 mb-0 py-1 px-2 small" style="display:none;">
+            ⏳ Still converging - PPP-static needs several hours of observation to reach its final accuracy. Early interim values are expected to be large and unstable.
+          </div>
         </div>
       </div>
     </div>

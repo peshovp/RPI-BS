@@ -82,6 +82,8 @@ class StateManager:
                 state['consecutive_failures'] = 0
             if 'file_service_owned' not in state:
                 state['file_service_owned'] = False
+            if 'ppp_tier' not in state:
+                state['ppp_tier'] = 'rapid'
 
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
@@ -118,6 +120,12 @@ class StateManager:
             # (vs. it already being active before start_survey() was called),
             # so _stop_file_logging() only stops a service it actually owns.
             'file_service_owned': False,
+            # Which CDDIS precise-product tier this PPP-static survey is
+            # using ("ultra-rapid" | "rapid" | "final") - persisted so the
+            # Settings UI can display it and recovery (recover_survey())
+            # continues fetching the same tier rather than defaulting back
+            # to "rapid" mid-survey.
+            'ppp_tier': 'rapid',
         }
     
     def _convert_numpy(self, obj):
@@ -185,13 +193,15 @@ class StateManager:
         """Whether this survey session started str2str_file.service"""
         return bool(self._state.get('file_service_owned', False))
 
-    def start_survey(self, target_hours: int = 24) -> bool:
+    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid') -> bool:
         """
         Start new survey session
-        
+
         Args:
             target_hours: Survey duration in hours (default: 24)
-            
+            ppp_tier: CDDIS precise-product tier to use for PPP-static
+                processing ("ultra-rapid" | "rapid" | "final")
+
         Returns:
             True if started successfully
         """
@@ -223,9 +233,10 @@ class StateManager:
             'consecutive_failures': 0,
             'last_failure_reason': None,
             'last_failure_time': None,
+            'ppp_tier': ppp_tier,
         })
-        
-        logger.info(f"Started {target_hours}-hour survey")
+
+        logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier})")
         return self.save_state()
     
     def update_progress(self, 
