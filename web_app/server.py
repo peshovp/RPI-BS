@@ -558,8 +558,11 @@ def auto_survey_start():
                 return jsonify({"error": "target_hours must be between 1 and 168"}), 400
         except (ValueError, TypeError):
             return jsonify({"error": "target_hours must be a valid integer"}), 400
+        ppp_tier = data.get('ppp_tier', 'rapid')
+        if ppp_tier not in ('ultra-rapid', 'rapid', 'final'):
+            return jsonify({"error": "ppp_tier must be one of: ultra-rapid, rapid, final"}), 400
         controller = get_survey_controller()
-        started = controller.start_survey(target_hours=target_hours)
+        started = controller.start_survey(target_hours=target_hours, ppp_tier=ppp_tier)
         if started:
             return jsonify({"status": "started"})
         else:
