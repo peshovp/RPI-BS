@@ -1,0 +1,23 @@
+[Unit]
+Description=GeoMaxima Periodic NTRIP Caster Connection Restart Timer
+Requires=geomaxima_ntrip_restart.service
+
+[Timer]
+# Every 6 hours. Stopgap interval, not a measured value - the caster's
+# exact idle/session-timeout threshold that triggers the "disappears after
+# several hours with no rover" symptom is unknown (caster-side, outside
+# this repo's visibility). 6h bounds the worst-case stale-session downtime
+# to a bounded window without restarting so often that actively-connected
+# rovers see frequent unnecessary short interruptions. Revisit this
+# interval if the real caster-side timeout is ever confirmed.
+OnCalendar=*-*-* 00/6:00:00
+# Run once shortly after boot too, in case the station was rebooted
+# mid-interval and would otherwise wait up to 6h for the first restart.
+OnBootSec=10min
+# Allow some drift for system load
+AccuracySec=5min
+# Persistent across reboots
+Persistent=true
+
+[Install]
+WantedBy=timers.target
