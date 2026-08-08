@@ -64,7 +64,6 @@ class WatchdogController:
                     'auto_restart': True,
                     'services': [
                         'str2str_tcp.service',
-                        'str2str_file.service',
                         'rtkbase_web.service'
                     ],
                     'max_restart_attempts': 3,
