@@ -53,6 +53,117 @@ def find_rtklib_tool(tool_name: str) -> Optional[Path]:
     return None
 
 
+def parse_rtklib_position_file(pos_file: Path) -> List[Dict]:
+    """
+    Parse RTKLIB position file (.pos)
+
+    Module-level (not a method) because this logic has no dependency on
+    any processor instance state - it only reads pos_file from disk.
+    Shared by both SPPProcessor.parse_position_file() and
+    PPPProcessor.parse_position_file() as the single source of truth for
+    RTKLIB's -f 2 .pos output format, which is mode-independent (same
+    column layout regardless of -p 0 SPP vs -p 8 PPP-static, confirmed
+    Phase 2c).
+
+    Args:
+        pos_file: Path to .pos file
+
+    Returns:
+        List of position records with keys:
+            - datetime: datetime object
+            - lat, lon, height: position (degrees, meters)
+            - Q: quality flag (1=FIX, 2=FLOAT, 5=SINGLE)
+            - ns: number of satellites
+            - sdn, sde, sdu: position stddev (m)
+            - sdne, sdeu, sdun: position correlation
+            - age: differential age (s)
+            - ratio: ambiguity ratio
+    """
+    if not pos_file.exists():
+        logger.error(f"Position file not found: {pos_file}")
+        return []
+
+    positions = []
+
+    try:
+        with open(pos_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+
+                # Skip comments and empty lines
+                if not line or line.startswith('%'):
+                    continue
+
+                # Parse position line
+                # Format can be:
+                #   1) YYYY/MM/DD HH:MM:SS.SSS lat lon height Q ns ...
+                #   2) week seconds lat lon height Q ns ... (GPS time)
+                parts = line.split()
+
+                if len(parts) < 7:  # Minimum: week/date time lat lon height Q ns
+                    continue
+
+                try:
+                    # Detect format by checking first field
+                    if '/' in parts[0]:
+                        # Format 1: Date/time format
+                        record = {
+                            'date': parts[0],
+                            'time': parts[1],
+                            'lat': float(parts[2]),
+                            'lon': float(parts[3]),
+                            'height': float(parts[4]),
+                            'Q': int(parts[5]),
+                            'ns': int(parts[6]),
+                            'sdn': float(parts[7]) if len(parts) > 7 else 0.0,
+                            'sde': float(parts[8]) if len(parts) > 8 else 0.0,
+                            'sdu': float(parts[9]) if len(parts) > 9 else 0.0,
+                        }
+                        idx_offset = 0
+                    else:
+                        # Format 2: GPS week/second format
+                        record = {
+                            'week': int(parts[0]),
+                            'seconds': float(parts[1]),
+                            'lat': float(parts[2]),
+                            'lon': float(parts[3]),
+                            'height': float(parts[4]),
+                            'Q': int(parts[5]),
+                            'ns': int(parts[6]),
+                            'sdn': float(parts[7]) if len(parts) > 7 else 0.0,
+                            'sde': float(parts[8]) if len(parts) > 8 else 0.0,
+                            'sdu': float(parts[9]) if len(parts) > 9 else 0.0,
+                        }
+                        idx_offset = 0
+
+                    # Optional fields (same indices for both formats)
+                    if len(parts) > 10:
+                        record['sdne'] = float(parts[10])
+                    if len(parts) > 11:
+                        record['sdeu'] = float(parts[11])
+                    if len(parts) > 12:
+                        record['sdun'] = float(parts[12])
+                    if len(parts) > 13:
+                        record['age'] = float(parts[13])
+                    if len(parts) > 14:
+                        record['ratio'] = float(parts[14])
+
+                    if record.get('ns', 0) > 60 or record.get('ns', 0) < 0:
+                        logger.warning(f"DEBUG implausible ns={record.get('ns')} - raw line: {line!r} - parsed parts: {parts!r}")
+                    positions.append(record)
+
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Failed to parse line: {line[:50]}... ({e})")
+                    continue
+
+        logger.info(f"Parsed {len(positions)} positions from {pos_file.name}")
+        return positions
+
+    except Exception as e:
+        logger.error(f"Failed to parse position file: {e}", exc_info=True)
+        return []
+
+
 class SPPProcessor:
     """Process RINEX for Single Point Positioning using rnx2rtkp"""
     
@@ -167,101 +278,22 @@ class SPPProcessor:
     def parse_position_file(self, pos_file: Path) -> List[Dict]:
         """
         Parse RTKLIB position file (.pos)
-        
+
+        Thin wrapper around the module-level parse_rtklib_position_file()
+        (see its docstring for the full field reference) - this method
+        exists only so existing callers of SPPProcessor().parse_position_file()
+        keep working unchanged. The actual parsing logic has no dependency
+        on any SPPProcessor instance state (confirmed: it never reads
+        self.* anywhere), so it lives as a standalone function that both
+        SPPProcessor and PPPProcessor delegate to - a single source of
+        truth for RTKLIB's -f 2 .pos format, which is mode-independent
+        (same column layout for -p 0 SPP and -p 8 PPP-static, confirmed
+        Phase 2c).
+
         Args:
             pos_file: Path to .pos file
-            
+
         Returns:
-            List of position records with keys:
-                - datetime: datetime object
-                - lat, lon, height: position (degrees, meters)
-                - Q: quality flag (1=FIX, 2=FLOAT, 5=SINGLE)
-                - ns: number of satellites
-                - sdn, sde, sdu: position stddev (m)
-                - sdne, sdeu, sdun: position correlation
-                - age: differential age (s)
-                - ratio: ambiguity ratio
+            List of position records - see parse_rtklib_position_file()
         """
-        if not pos_file.exists():
-            logger.error(f"Position file not found: {pos_file}")
-            return []
-        
-        positions = []
-        
-        try:
-            with open(pos_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    
-                    # Skip comments and empty lines
-                    if not line or line.startswith('%'):
-                        continue
-                    
-                    # Parse position line
-                    # Format can be:
-                    #   1) YYYY/MM/DD HH:MM:SS.SSS lat lon height Q ns ...
-                    #   2) week seconds lat lon height Q ns ... (GPS time)
-                    parts = line.split()
-                    
-                    if len(parts) < 7:  # Minimum: week/date time lat lon height Q ns
-                        continue
-                    
-                    try:
-                        # Detect format by checking first field
-                        if '/' in parts[0]:
-                            # Format 1: Date/time format
-                            record = {
-                                'date': parts[0],
-                                'time': parts[1],
-                                'lat': float(parts[2]),
-                                'lon': float(parts[3]),
-                                'height': float(parts[4]),
-                                'Q': int(parts[5]),
-                                'ns': int(parts[6]),
-                                'sdn': float(parts[7]) if len(parts) > 7 else 0.0,
-                                'sde': float(parts[8]) if len(parts) > 8 else 0.0,
-                                'sdu': float(parts[9]) if len(parts) > 9 else 0.0,
-                            }
-                            idx_offset = 0
-                        else:
-                            # Format 2: GPS week/second format
-                            record = {
-                                'week': int(parts[0]),
-                                'seconds': float(parts[1]),
-                                'lat': float(parts[2]),
-                                'lon': float(parts[3]),
-                                'height': float(parts[4]),
-                                'Q': int(parts[5]),
-                                'ns': int(parts[6]),
-                                'sdn': float(parts[7]) if len(parts) > 7 else 0.0,
-                                'sde': float(parts[8]) if len(parts) > 8 else 0.0,
-                                'sdu': float(parts[9]) if len(parts) > 9 else 0.0,
-                            }
-                            idx_offset = 0
-                        
-                        # Optional fields (same indices for both formats)
-                        if len(parts) > 10:
-                            record['sdne'] = float(parts[10])
-                        if len(parts) > 11:
-                            record['sdeu'] = float(parts[11])
-                        if len(parts) > 12:
-                            record['sdun'] = float(parts[12])
-                        if len(parts) > 13:
-                            record['age'] = float(parts[13])
-                        if len(parts) > 14:
-                            record['ratio'] = float(parts[14])
-                        
-                        if record.get('ns', 0) > 60 or record.get('ns', 0) < 0:
-                            logger.warning(f"DEBUG implausible ns={record.get('ns')} - raw line: {line!r} - parsed parts: {parts!r}")
-                        positions.append(record)
-                        
-                    except (ValueError, IndexError) as e:
-                        logger.debug(f"Failed to parse line: {line[:50]}... ({e})")
-                        continue
-            
-            logger.info(f"Parsed {len(positions)} positions from {pos_file.name}")
-            return positions
-            
-        except Exception as e:
-            logger.error(f"Failed to parse position file: {e}", exc_info=True)
-            return []
+        return parse_rtklib_position_file(pos_file)
