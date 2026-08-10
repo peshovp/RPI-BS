@@ -7,18 +7,28 @@ precise orbit/clock products fetched by ppp_downloader.py, for cm-level
 static base-station positioning.
 
 INTERFACE CONTRACT WITH SPPProcessor (addons/features/auto_survey/spp_processor.py,
-read in full before writing this file): PPPProcessor is designed as a
-drop-in replacement for the position-generation half of SPPProcessor -
-matching constructor pattern (auto-discover rnx2rtkp via find_rtklib_tool(),
-same subprocess/timeout/logging conventions), and producing the exact same
-kind of .pos output file that SPPProcessor.parse_position_file() already
-parses. parse_position_file() is intentionally NOT duplicated here -
-RTKLIB's `-f 2` output format is mode-independent (same column layout
-regardless of -p 0 vs -p 8), confirmed in this session's earlier OLD-vs-
-CURRENT investigation and again in the original design doc - so Phase 2d's
-survey_controller.py integration can keep calling
-self.spp.parse_position_file(pos_file) unchanged after swapping
-self.spp = SPPProcessor() for self.spp = PPPProcessor().
+read in full before writing this file): PPPProcessor is a drop-in
+replacement for the position-generation half of SPPProcessor - matching
+constructor pattern (auto-discover rnx2rtkp via find_rtklib_tool(), same
+subprocess/timeout/logging conventions), and producing the exact same
+kind of .pos output file SPPProcessor's parser already understands.
+
+PPPProcessor.parse_position_file() DOES exist (below) but is a thin
+delegating wrapper, not a reimplementation - the actual parsing logic
+lives once, as the module-level parse_rtklib_position_file() function in
+spp_processor.py, and both SPPProcessor.parse_position_file() and
+PPPProcessor.parse_position_file() delegate to it. This was fixed after a
+live AttributeError during the first real survey run using this module:
+an earlier version of this docstring described the *plan* for
+survey_controller.py to keep calling self.spp.parse_position_file(pos_file)
+unchanged after swapping SPPProcessor for PPPProcessor, but the method
+itself was never actually added to this class - the plan was recorded in
+a comment and never implemented. RTKLIB's `-f 2` output format is
+mode-independent (same column layout regardless of -p 0 vs -p 8,
+confirmed in this session's earlier OLD-vs-CURRENT investigation and
+again in the original design doc), so a plain delegate call is correct
+and sufficient - no PPP-specific parsing behavior was ever needed, only
+the missing method itself.
 
 PROCESSING OPTIONS: pos1-sateph=precise, pos2-armode=off (float-ambiguity
 only - PPP-AR requires UPD/bias products this module does not fetch, per
@@ -161,9 +171,9 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from .spp_processor import find_rtklib_tool
+from .spp_processor import find_rtklib_tool, parse_rtklib_position_file
 
 logger = logging.getLogger(__name__)
 
@@ -569,6 +579,37 @@ class PPPProcessor:
             # copies and generated conf, never the caller's original
             # sp3_file/clk_file/antex_file - safe to always remove.
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    def parse_position_file(self, pos_file: Path) -> List[Dict]:
+        """
+        Parse RTKLIB position file (.pos) produced by process_ppp().
+
+        FIX (Phase 2d validation): this method was originally missing
+        entirely - the module docstring above described a plan for
+        survey_controller.py to keep calling
+        self.spp.parse_position_file(pos_file) unchanged after swapping
+        SPPProcessor for PPPProcessor, but the method itself was never
+        actually added here, causing a live AttributeError
+        ("'PPPProcessor' object has no attribute 'parse_position_file'")
+        the first time a real survey ran this code path.
+
+        Delegates to the module-level parse_rtklib_position_file() in
+        spp_processor.py - the same single source of truth
+        SPPProcessor.parse_position_file() also delegates to - rather than
+        duplicating the parsing logic here. RTKLIB's -f 2 .pos output
+        format is mode-independent (same column layout for -p 0 SPP and
+        -p 8 PPP-static, confirmed Phase 2c), so no PPP-specific parsing
+        behavior is needed; a plain composition/delegation call is
+        correct and sufficient.
+
+        Args:
+            pos_file: Path to .pos file
+
+        Returns:
+            List of position records - see parse_rtklib_position_file()
+            in spp_processor.py for the exact field reference.
+        """
+        return parse_rtklib_position_file(pos_file)
 
 
 # ---------------------------------------------------------------------------
