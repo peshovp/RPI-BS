@@ -748,7 +748,15 @@ class SurveyController:
             # instead of implying the shown accuracy is final. Driven by
             # the actual estimate quality (estimate.horizontal_std_meters,
             # already computed in Step 5 above), not elapsed time.
-            still_converging = (not is_final) and (estimate.horizontal_std_meters > self.PPP_CONVERGENCE_STD_METERS)
+            # bool(...) cast: estimate.horizontal_std_meters is
+            # numpy.float64 (position_estimator.py's np.sqrt()-derived
+            # property), so the ">" comparison produces numpy.bool_, not a
+            # native bool - confirmed live on BS-Aheloy as the cause of
+            # "Object of type bool is not JSON serializable" at save_state()
+            # time. Explicit cast here, consistent with the float()/int()
+            # casts already applied to the other numpy-derived
+            # quality_metrics fields below.
+            still_converging = bool((not is_final) and (estimate.horizontal_std_meters > self.PPP_CONVERGENCE_STD_METERS))
 
             # Grep-able std-vs-time data point, logged on every update
             # (interim and final) - PPP_CONVERGENCE_STD_METERS is an

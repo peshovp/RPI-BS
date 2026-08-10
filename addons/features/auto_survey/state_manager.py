@@ -134,6 +134,16 @@ class StateManager:
             return {k: self._convert_numpy(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [self._convert_numpy(item) for item in obj]
+        elif isinstance(obj, np.bool_):
+            # Checked before np.integer/np.floating - np.bool_ is a
+            # distinct numpy type (not a subclass of np.integer), so it
+            # falls through both of those checks and reaches the else
+            # branch unconverted otherwise, causing "Object of type bool
+            # is not JSON serializable" (confirmed live on BS-Aheloy: a
+            # numpy.float64 comparison, e.g. estimate.horizontal_std_meters
+            # > threshold, produces numpy.bool_, not a native bool, even
+            # though it looks and prints like one).
+            return bool(obj)
         elif isinstance(obj, np.integer):
             return int(obj)
         elif isinstance(obj, np.floating):
