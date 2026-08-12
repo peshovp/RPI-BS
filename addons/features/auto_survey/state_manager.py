@@ -84,6 +84,8 @@ class StateManager:
                 state['file_service_owned'] = False
             if 'ppp_tier' not in state:
                 state['ppp_tier'] = 'rapid'
+            if 'broadcast_height_type' not in state:
+                state['broadcast_height_type'] = 'orthometric'
 
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
@@ -126,6 +128,15 @@ class StateManager:
             # continues fetching the same tier rather than defaulting back
             # to "rapid" mid-survey.
             'ppp_tier': 'rapid',
+            # Height type actually broadcast via RTCM ("orthometric" |
+            # "ellipsoidal" fallback) - per АГКК's official requirement,
+            # base station RTCM broadcast positions carry orthometric
+            # (MSL/geoid) height, not ellipsoidal. No longer user-
+            # selectable; this is a survey-level default label only - see
+            # survey_controller.py's Step 8 for the actual per-update
+            # value/fallback logic (current_position/applied_position's
+            # own 'broadcast_height_type' field is the real audit trail).
+            'broadcast_height_type': 'orthometric',
         }
     
     def _convert_numpy(self, obj):
@@ -244,6 +255,14 @@ class StateManager:
             'last_failure_reason': None,
             'last_failure_time': None,
             'ppp_tier': ppp_tier,
+            # No longer user-selectable (АГКК official requirement: RTCM
+            # broadcast always carries orthometric height) - kept here only
+            # as the survey-level default label; the per-update audit trail
+            # in current_position/applied_position's 'broadcast_height_type'
+            # reflects what was ACTUALLY broadcast for that update,
+            # including the ellipsoidal fallback when no geoid model is
+            # loaded (see survey_controller.py's Step 8).
+            'broadcast_height_type': 'orthometric',
         })
 
         logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier})")

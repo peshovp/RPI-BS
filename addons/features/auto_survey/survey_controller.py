@@ -642,10 +642,11 @@ class SurveyController:
             logger.info(f"Position estimate (ITRF2020): {estimate.lat:.8f}°, {estimate.lon:.8f}°, {estimate.height:.3f}m")
             logger.info(f"Std: H={estimate.horizontal_std_meters*1000:.1f}mm, V={estimate.std_height*1000:.1f}mm")
 
-            # Step 6: Compute orthometric (MSL) height via geoid model, for
-            # DISPLAY/RECORD purposes only. RTCM 1005/1006 (broadcast to
-            # rovers via str2str -p) requires ELLIPSOIDAL height, so
-            # h_ortho must NEVER be passed to update_position() below.
+            # Step 6: Compute orthometric (MSL) height via geoid model.
+            # Per АГКК's official requirement, this IS the height broadcast
+            # via RTCM 1005/1006 in Step 8 below (not ellipsoidal) - see
+            # Step 8's comment for the fallback behavior when no geoid
+            # model is loaded / the position is outside grid bounds.
             h_ortho = self.geoid.ellipsoidal_to_orthometric(
                 estimate.lat,
                 estimate.lon,
@@ -686,17 +687,43 @@ class SurveyController:
             logger.info(f"BGS2005 broadcast coordinate per {bgs2005['regulation_reference']}")
 
             # Step 8: Update RTKBase configuration
-            # CRITICAL: broadcast the BGS2005-transformed, ELLIPSOIDAL
-            # height position (bgs2005['height_m']), never estimate.height
-            # (raw ITRF2020) and never h_ortho (orthometric/MSL). This is
-            # the value str2str -p embeds into RTCM 1005/1006 for rover
-            # baseline calculations, and per Чл.22 ал.1 it must be BGS2005.
+            # CRITICAL: broadcast the BGS2005-transformed, ORTHOMETRIC
+            # (MSL/geoid) height (h_ortho from Step 6), never
+            # bgs2005['height_m'] (ellipsoidal) or estimate.height (raw
+            # ITRF2020). This is the value str2str -p embeds into RTCM
+            # 1005/1006 for rover baseline calculations. Per АГКК's
+            # official requirement, base station RTCM broadcast positions
+            # must carry orthometric height computed from the .ggf geoid
+            # model, not ellipsoidal/WGS84 height.
+            #
+            # Fallback: if no geoid model is loaded / the position is
+            # outside the loaded grid's bounds (h_ortho is None), fall back
+            # to ellipsoidal height for this update with an explicit
+            # warning - not a hard failure, since a temporarily-unavailable
+            # geoid correction should not stop the survey from broadcasting
+            # a usable (if height-type-inconsistent) position.
+            broadcast_height_type = 'orthometric'
+            if h_ortho is not None:
+                broadcast_height = h_ortho
+            else:
+                broadcast_height = bgs2005['height_m']
+                broadcast_height_type = 'ellipsoidal'
+                logger.warning(
+                    "No geoid model loaded / position is outside grid "
+                    "bounds - falling back to ellipsoidal height for this "
+                    "update (cannot broadcast orthometric height without a "
+                    "geoid correction to compute it from)."
+                )
+
+            logger.info(f"RTCM broadcast height type this session: {broadcast_height_type} "
+                        f"({broadcast_height:.3f}m)")
+
             if is_final:
                 logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
             else:
                 logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates (BGS2005)...")
 
-            if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], bgs2005['height_m']):
+            if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height):
                 if is_final:
                     logger.info("✓ Final configuration applied successfully")
                 else:
@@ -719,15 +746,24 @@ class SurveyController:
             # aggregations (np.sum/np.sqrt/np.mean) and would otherwise leak
             # numpy.float64/numpy.int64 into the JSON-serialized state.
             #
-            # position holds the BGS2005 (broadcast) coordinate - the value
-            # actually written to settings.conf/RTCM above. The raw
-            # ITRF2020 PPP estimate and MSL height are kept alongside it
-            # for display/diagnostics only, never re-broadcast.
+            # position['height'] holds the height TYPE ACTUALLY BROADCAST
+            # this update (broadcast_height, computed in Step 8 above -
+            # ellipsoidal by default, or orthometric if
+            # self.broadcast_height_type == 'orthometric') - the value
+            # actually written to settings.conf/RTCM. 'height_ellipsoidal'
+            # and 'height_msl' are both always recorded alongside it
+            # (regardless of which was broadcast) for audit purposes, so
+            # it is always possible to tell after the fact which height
+            # type a given update actually sent, and what the other one
+            # would have been. The raw ITRF2020 PPP estimate is likewise
+            # kept for display/diagnostics only, never re-broadcast.
             position = {
                 'lat': float(bgs2005['lat_dd']),
                 'lon': float(bgs2005['lon_dd']),
-                'height': float(bgs2005['height_m']),  # BGS2005 ellipsoidal - matches settings.conf / RTCM
-                'height_msl': float(h_ortho) if h_ortho is not None else None,  # orthometric (MSL) of the ITRF2020 estimate, display only
+                'height': float(broadcast_height),  # ACTUALLY BROADCAST this update - orthometric (MSL), or ellipsoidal fallback if no geoid model - see broadcast_height_type
+                'broadcast_height_type': broadcast_height_type,  # 'orthometric' (standard) | 'ellipsoidal' (fallback when no geoid model loaded) - audit trail
+                'height_ellipsoidal': float(bgs2005['height_m']),  # BGS2005 ellipsoidal, always recorded regardless of what was broadcast
+                'height_msl': float(h_ortho) if h_ortho is not None else None,  # orthometric (MSL) of the ITRF2020 estimate, always recorded regardless of what was broadcast
                 'coordinate_system': 'BGS2005',
                 'itrf2020_lat': float(estimate.lat),
                 'itrf2020_lon': float(estimate.lon),
@@ -835,20 +871,27 @@ class SurveyController:
 
                 logger.info("=" * 60)
                 logger.info("✓ SURVEY COMPLETED SUCCESSFULLY")
-                # pos['lat']/lon/height are already the BGS2005-transformed
-                # broadcast coordinate (see _perform_update() Step 7/9) -
-                # not the raw ITRF2020 PPP estimate.
-                logger.info(f"Final Position (BGS2005): {pos['lat']:.8f}°, {pos['lon']:.8f}°, {pos['height']:.3f}m")
+                # pos['lat']/lon are the BGS2005-transformed broadcast
+                # coordinate (see _perform_update() Step 7/9), and
+                # pos['height'] is whichever height type was actually
+                # broadcast (pos['broadcast_height_type']) per the АГКК
+                # requirement - orthometric by default, ellipsoidal only as
+                # fallback when no geoid model is available - not the raw
+                # ITRF2020 PPP estimate either way.
+                logger.info(f"Final Position (BGS2005, {pos.get('broadcast_height_type', 'ellipsoidal')} height): "
+                            f"{pos['lat']:.8f}°, {pos['lon']:.8f}°, {pos['height']:.3f}m")
                 logger.info(f"Horizontal Accuracy: {std.get('std_h_meters', 0)*1000:.1f}mm")
                 logger.info(f"Vertical Accuracy: {std.get('std_height', 0)*1000:.1f}mm")
                 logger.info(f"Total Epochs: {status.get('num_epochs', 0)}")
                 logger.info("=" * 60)
 
                 # CRITICAL: Apply coordinates to RTKBase configuration FIRST
-                # (pos already holds BGS2005 coordinates, not raw ITRF2020 -
-                # see comment above)
+                # (pos already holds the correct broadcast coordinate/height
+                # type for this survey - see comment above)
                 try:
-                    logger.info(f"✓ Applying coordinates to RTKBase (BGS2005): {pos['lat']:.8f} {pos['lon']:.8f} {pos['height']:.3f}")
+                    logger.info(f"✓ Applying coordinates to RTKBase (BGS2005, "
+                                f"{pos.get('broadcast_height_type', 'ellipsoidal')} height): "
+                                f"{pos['lat']:.8f} {pos['lon']:.8f} {pos['height']:.3f}")
                     if self.rtkbase.update_position(pos['lat'], pos['lon'], pos['height']):
                         logger.info("✓ RTKBase configuration updated successfully")
                         # Persist that coordinates were applied
@@ -856,6 +899,8 @@ class SurveyController:
                             'lat': pos['lat'],
                             'lon': pos['lon'],
                             'height': pos['height'],
+                            'broadcast_height_type': pos.get('broadcast_height_type', 'ellipsoidal'),
+                            'height_ellipsoidal': pos.get('height_ellipsoidal'),
                             'height_msl': pos.get('height_msl'),
                             'coordinate_system': pos.get('coordinate_system', 'BGS2005'),
                         })
@@ -904,9 +949,11 @@ class SurveyController:
         status = self.state.get_status()
 
         # Auto-apply coordinates if survey is completed but not yet applied.
-        # pos['lat']/lon/height already hold the BGS2005-transformed
-        # broadcast coordinate (see _perform_update()'s Step 7/9), not raw
-        # ITRF2020 - no re-transformation needed here.
+        # pos['lat']/lon are the BGS2005-transformed broadcast coordinate,
+        # and pos['height'] is whichever height type was actually
+        # broadcast for this survey (pos['broadcast_height_type']) - see
+        # _perform_update()'s Step 7/8/9 - not raw ITRF2020 either way, no
+        # re-transformation needed here.
         try:
             if status.get('survey_state') == SurveyState.COMPLETED.value and not status.get('applied'):
                 pos = status.get('final_position') or status.get('current_position')
