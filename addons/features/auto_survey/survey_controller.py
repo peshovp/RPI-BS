@@ -28,10 +28,11 @@ import logging
 import time
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from datetime import datetime, timedelta
 import threading
 import os
+import requests
 
 from .rtkbase_config import RTKBaseConfig
 from .rinex_converter import RINEXConverter
@@ -50,6 +51,88 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Caster endpoint that pre-tags an upcoming service restart's resulting
+# disconnect as planned (e.g. an auto-survey coordinate update), instead
+# of the caster logging it as an unexplained failure. Confirmed live via
+# curl against BaseStation (2026-08-14): HTTP/2 200,
+# {"success": true, "ttl_seconds": 120.0}. The {mount} path segment is
+# filled in per-call from this station's own mnt_name_a - not hardcoded.
+_CASTER_ANNOUNCE_URL_TEMPLATE = "https://caster.geomaxima.bg/api/v1/bases/{mount}/announce-planned-disconnect"
+
+
+def _get_announce_credentials(rtkbase: RTKBaseConfig) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Read this station's NTRIP A mount name and caster announce token from
+    settings.conf, using the exact same access pattern already used
+    elsewhere in this file (self.rtkbase.config.get(section, key,
+    fallback=...).strip("'") - see recover_survey()'s receiver_format
+    read) rather than ConfigManager (only used here for antenna
+    position) or a new parser instance.
+
+    NOTE: rtkbase.config is loaded once at RTKBaseConfig.__init__ and
+    never re-read from disk afterwards (confirmed - no reload/read()
+    call anywhere else in that class). If the operator saves a new
+    announce token via the Settings UI while a survey is already
+    running, this survey process will keep using whatever value (or
+    absence of one) it read at recover_survey()/__init__ time until the
+    next restart - not a live-reloaded setting.
+
+    :param rtkbase: this controller's RTKBaseConfig instance
+    :return: (mount_name, announce_token) - either may be None/empty if
+        not configured; callers must treat that as "skip silently", not
+        as an error.
+    """
+    mount_name = rtkbase.config.get('ntrip_A', 'mnt_name_a', fallback='').strip("'")
+    announce_token = rtkbase.config.get('ntrip_A', 'caster_announce_token', fallback='').strip("'")
+    return (mount_name or None, announce_token or None)
+
+
+def _announce_planned_disconnect(rtkbase: RTKBaseConfig, reason: str = "auto_survey") -> None:
+    """
+    Tell the caster an upcoming service restart is expected (e.g. to
+    apply refined auto-survey coordinates), so it doesn't log the
+    resulting disconnect as an unexplained failure. Uses the dedicated,
+    lower-privilege announce token configured in NTRIP Service settings
+    (caster_announce_token) - NEVER svr_pwd_a, this station's actual
+    NTRIP login password.
+
+    Best-effort only: must never block, delay, or fail the actual
+    coordinate update/restart that's about to happen. The 5s timeout and
+    the try/except below mean a slow/unreachable/erroring caster costs
+    at most ~5s here and then falls through to the restart exactly as if
+    this function had not been called at all.
+
+    :param rtkbase: this controller's RTKBaseConfig instance
+    :param reason: short machine-readable reason tag sent to the caster
+    """
+    try:
+        mount_name, announce_token = _get_announce_credentials(rtkbase)
+        if not mount_name or not announce_token:
+            logger.debug(
+                "Caster announce token not configured - skipping "
+                "planned-disconnect announcement (restarts still work "
+                "normally, just won't be pre-tagged). Configure it in "
+                "NTRIP Service settings if you want this."
+            )
+            return
+
+        url = _CASTER_ANNOUNCE_URL_TEMPLATE.format(mount=mount_name)
+        resp = requests.post(
+            url,
+            json={"token": announce_token, "reason": reason},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            logger.debug(f"Caster planned-disconnect announcement accepted for mount={mount_name!r}: {resp.text}")
+        else:
+            # Non-fatal: e.g. 401 for a stale/revoked token. Restarts
+            # still proceed normally; this is audit-log quality only.
+            logger.warning(
+                f"Caster planned-disconnect announcement rejected "
+                f"(HTTP {resp.status_code}) for mount={mount_name!r}: {resp.text[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to announce planned disconnect to caster: {e}")
 
 class SurveyController:
     """
@@ -731,6 +814,7 @@ class SurveyController:
 
                 # Restart services on every update so new coords take effect immediately
                 try:
+                    _announce_planned_disconnect(self.rtkbase, "auto_survey")
                     restart_result = self.restart_rtkbase_services()
                     if not restart_result.get('success', False):
                         logger.warning("Service restart reported failure during update")
@@ -912,6 +996,7 @@ class SurveyController:
                         
                         # NOW restart services - settings.conf is guaranteed to be on disk
                         try:
+                            _announce_planned_disconnect(self.rtkbase, "auto_survey")
                             restart_result = self.restart_rtkbase_services()
                             if not restart_result['success']:
                                 logger.warning("⚠ Service restart failed - coordinates may not be applied until manual restart")
@@ -964,6 +1049,7 @@ class SurveyController:
                         self.state.mark_applied(pos)
                         # Optionally restart services to ensure live config reload
                         try:
+                            _announce_planned_disconnect(self.rtkbase, "auto_survey")
                             self.restart_rtkbase_services()
                         except Exception as restart_err:
                             logger.warning(f"Service restart after auto-apply failed: {restart_err}")

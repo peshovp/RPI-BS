@@ -132,6 +132,13 @@ class RTKBaseConfigManager:
         ordered_ntrip = [{"source_section" : "ntrip_A"}]
         for key in ("svr_addr_A", "svr_port_A", "svr_pwd_A", "mnt_name_A", "rtcm_msg_A", "ntrip_A_receiver_options"):
             ordered_ntrip.append({key : self.config.get('ntrip_A', key).strip("'")})
+        # Optional, lower-privilege credential for the caster's
+        # announce-planned-disconnect endpoint (see auto_survey's
+        # survey_controller.py) - separate from svr_pwd_A above, which
+        # authenticates the actual NTRIP stream. fallback='' so stations
+        # whose settings.conf predates this field (not yet merged from
+        # settings.conf.default) don't raise on read.
+        ordered_ntrip.append({"caster_announce_token" : self.config.get('ntrip_A', 'caster_announce_token', fallback='').strip("'")})
         return ordered_ntrip
     
     def get_ntrip_B_settings(self):
