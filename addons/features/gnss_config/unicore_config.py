@@ -222,7 +222,25 @@ class UnicoreConfigurator:
     def set_gnss_systems(self, systems: List[str]) -> bool:
         """
         Configure GNSS systems
-        
+
+        CAUTION - CONVENTION MISMATCH WITH set_signal_group_preset() BELOW:
+        this method sends "CONFIG SIGNALGROUP {n}" treating n as a per-
+        system OR-ed bitmask (system_bits below) - that bitmask semantics
+        was NOT independently verified against Unicore's own command
+        reference when this method was originally written. Per-turn
+        investigation (this session) found CONFIG SIGNALGROUP is actually
+        documented as a per-model PRESET INDEX, not a bitmask (UM982
+        examples use two-argument forms like "CONFIG SIGNALGROUP 7 0",
+        which a single OR-ed bitmask cannot express at all) - see
+        set_signal_group_preset()'s docstring. Do not call both methods
+        against the same receiver expecting them to compose; whichever is
+        called last wins, and this method's bitmask values do not
+        correspond to any documented preset. Left unchanged here rather
+        than silently reinterpreted, since this method's own callers
+        (config_manager.py profile format, gnss_config_feature.py's
+        'gnss_systems' config key if used) may already depend on its
+        existing (if unverified) argument shape.
+
         Args:
             systems: List of systems ('GPS', 'GLONASS', 'GALILEO', 'BEIDOU', 'QZSS')
         """
@@ -235,31 +253,218 @@ class UnicoreConfigurator:
             'BEIDOU': 4,
             'QZSS': 16
         }
-        
+
         for system in systems:
             if system.upper() in system_bits:
                 config_value |= system_bits[system.upper()]
-        
+
         cmd = f'CONFIG SIGNALGROUP {config_value}'
         response = self.send_command(cmd)
-        
+
         if response and 'OK' in response:
             logger.info(f"✓ GNSS systems: {', '.join(systems)}")
             return True
         else:
             logger.error(f"Failed to set GNSS systems: {response}")
             return False
-    
+
+    def set_signal_group_preset(self, preset: int = 2) -> bool:
+        """
+        Select a UM980/UM982 signal-group PRESET by index - NOT a bitmask
+        (see the CAUTION note in set_gnss_systems() above; the two methods
+        send the same underlying "CONFIG SIGNALGROUP" command with
+        incompatible argument conventions - use one or the other for a
+        given receiver, not both).
+
+        Default preset=2 is asserted (Pesho, citing an official Unicore
+        command reference plus ArduSimple documentation - not
+        independently re-verified against either source directly in this
+        session) to enable all available GNSS bands including Galileo E6,
+        versus the receiver's factory-default preset 1 which excludes
+        some bands. This is independently corroborated by two facts this
+        session DID verify directly: (1) GNSSOEM/ELT_RTKBase's
+        Install/UM980_RTCM3_OUT.txt - a field config for UM980 base
+        stations - uses "CONFIG SIGNALGROUP 2"; (2) this project's own
+        pre-existing receiver_cfg/Unicore_UM980_rtcm3.cfg (predates any
+        ELT_RTKBase involvement) already uses the identical value. Two
+        independent sources landing on the same non-default preset is
+        reasonable grounds to adopt it, even without this session
+        directly inspecting the underlying manual.
+
+        NOTE: per UM982_RTCM3_OUT.txt/UM982_HAS.txt in the same
+        ELT_RTKBase source, UM982 uses a two-argument form ("CONFIG
+        SIGNALGROUP 7 0" / "3 6") not covered by this single-int method -
+        this method is scoped to the UM980's confirmed single-argument
+        form only. Do not assume preset=2 carries the same meaning on a
+        UM982 without separately confirming its own preset table.
+
+        Sends "CONFIG SIGNALGROUP {n}" as a single-argument command
+        (matching UM980_RTCM3_OUT.txt's syntax exactly) - reconnect/reset
+        may be required afterward, since this project's own
+        receiver_cfg/Unicore_UM980_rtcm3.cfg carries the comment
+        "SIGNALGROUP will reset the device".
+
+        :param preset: signal-group preset index (UM980 single-argument
+            form only)
+        """
+        cmd = f'CONFIG SIGNALGROUP {preset}'
+        response = self.send_command(cmd)
+
+        if response and 'OK' in response:
+            logger.info(f"✓ Signal group preset: {preset}")
+            return True
+        else:
+            logger.error(f"Failed to set signal group preset: {response}")
+            return False
+
     def set_elevation_mask(self, angle: int = 10) -> bool:
         """Set elevation mask angle (degrees)"""
         cmd = f'ECUTOFF {angle}'
         response = self.send_command(cmd)
-        
+
         if response and 'OK' in response:
             logger.info(f"✓ Elevation mask: {angle}°")
             return True
         return False
-    
+
+    def set_undulation(self, undulation_m: float = 0) -> bool:
+        """
+        Set the geoid undulation value (meters) the receiver applies
+        internally to its own height output.
+
+        Cherry-picked from GNSSOEM/ELT_RTKBase's Install/UM980_RTCM3_OUT.txt
+        ("CONFIG UNDULATION 0") - a field-tested UM980 base-station RTCM3
+        config, not this project's own prior work. Default 0 disables the
+        receiver's own undulation correction, leaving height handling
+        entirely to this pipeline's own geoid_corrector.py /
+        bgs2005_transformer.py (see survey_controller.py's Step 6/8) -
+        avoids the receiver silently double-correcting height underneath
+        this project's own height pipeline.
+        """
+        cmd = f'CONFIG UNDULATION {undulation_m}'
+        response = self.send_command(cmd)
+
+        if response and 'OK' in response:
+            logger.info(f"✓ Undulation: {undulation_m}m")
+            return True
+        return False
+
+    def set_base_antenna_model(self, model: str = "ELT0123", radome: str = "",
+                                height_offset: float = 0, height_type: str = "USER") -> bool:
+        """
+        Set the base station antenna model info the receiver embeds in its
+        own RTCM output (independent of this pipeline's own ANTEX handling
+        in ppp_processor.py, which already uses ant1-anttype=NONE for
+        PPP-static processing - see that file's module docstring).
+
+        Cherry-picked from GNSSOEM/ELT_RTKBase's Install/UM980_RTCM3_OUT.txt
+        ("CONFIG BASEANTENNAMODEL \"ELT0123\" \"\" 0 USER"). "ELT0123" is
+        THEIR antenna model identifier, not verified as meaningful for this
+        station's actual (uncalibrated K700) antenna - kept as the
+        cherry-picked default's own value since the exact string does not
+        need to match a real IGS ANTEX entry for this command to apply
+        (same reasoning as ant1-anttype=NONE elsewhere in this project:
+        the antenna is uncalibrated, so no calibrated model name is
+        "more correct" than any other placeholder here). Confirm/override
+        via config if this default proves wrong for a specific station.
+
+        :param model: antenna model identifier string
+        :param radome: radome identifier string (empty = none)
+        :param height_offset: antenna height offset (meters)
+        :param height_type: height reference type, per UM980 command set
+        """
+        cmd = f'CONFIG BASEANTENNAMODEL "{model}" "{radome}" {height_offset} {height_type}'
+        response = self.send_command(cmd)
+
+        if response and 'OK' in response:
+            logger.info(f"✓ Base antenna model: {model!r}")
+            return True
+        return False
+
+    def set_rtcm_snr_mask(self, gps_min_cn0: int = 32, glonass_min_cn0: int = 36) -> bool:
+        """
+        Configure the SNR-based (C/N0) mask applied to satellites before
+        they're included in RTCM output - a coarser, signal-quality-driven
+        filter distinct from set_elevation_mask()'s pure geometric cutoff.
+
+        Cherry-picked from GNSSOEM/ELT_RTKBase's Install/UM980_RTCM3_OUT.txt
+        ("MASK RTCMCN0 32" / "MASK RTCMCN0 36 GLO") - exact syntax
+        confirmed against that file, not guessed: a bare "MASK RTCMCN0 <n>"
+        sets the default/GPS threshold, and a second call with a
+        constellation suffix (here "GLO") overrides it per-constellation.
+        This project's own receiver_cfg/Unicore_UM980_rtcm3.cfg predates
+        this and has no equivalent mask - this is a new addition, not a
+        replacement of an existing project convention.
+
+        :param gps_min_cn0: minimum C/N0 (dBHz) for GPS/default satellites
+        :param glonass_min_cn0: minimum C/N0 (dBHz) for GLONASS satellites
+        """
+        success = True
+
+        response = self.send_command(f'MASK RTCMCN0 {gps_min_cn0}')
+        if response and 'OK' in response:
+            logger.info(f"✓ RTCM SNR mask (default/GPS): {gps_min_cn0} dBHz")
+        else:
+            logger.error(f"Failed to set default RTCM SNR mask: {response}")
+            success = False
+
+        response = self.send_command(f'MASK RTCMCN0 {glonass_min_cn0} GLO')
+        if response and 'OK' in response:
+            logger.info(f"✓ RTCM SNR mask (GLONASS): {glonass_min_cn0} dBHz")
+        else:
+            logger.error(f"Failed to set GLONASS RTCM SNR mask: {response}")
+            success = False
+
+        return success
+
+    def set_sbas_enabled(self, enabled: bool = False) -> bool:
+        """
+        Enable or disable SBAS tracking/use.
+
+        Cherry-picked from GNSSOEM/ELT_RTKBase's Install/UM980_RTCM3_OUT.txt
+        ("CONFIG SBAS DISABLE"). NOTE: this project's own, pre-existing
+        receiver_cfg/Unicore_UM980_rtcm3.cfg instead uses
+        "CONFIG SBAS ENABLE AUTO" - the opposite default. This method does
+        not silently override that file; it's a new, explicit knob a
+        caller opts into (default parameter value matches ELT_RTKBase's
+        DISABLE choice since SBAS corrections are irrelevant for a static
+        base station transmitting its own precisely-surveyed position, but
+        the pre-existing .cfg's ENABLE AUTO default is left untouched
+        elsewhere in this codebase).
+
+        :param enabled: True to enable SBAS, False to disable
+        """
+        cmd = 'CONFIG SBAS ENABLE AUTO' if enabled else 'CONFIG SBAS DISABLE'
+        response = self.send_command(cmd)
+
+        if response and 'OK' in response:
+            logger.info(f"✓ SBAS: {'enabled (auto)' if enabled else 'disabled'}")
+            return True
+        return False
+
+    def set_rtcm_clock_offset(self, enabled: bool = False) -> bool:
+        """
+        Enable or disable inclusion of the receiver clock offset in RTCM
+        output.
+
+        Cherry-picked from GNSSOEM/ELT_RTKBase's Install/UM980_RTCM3_OUT.txt
+        ("CONFIG RTCMCLOCKOFFSET DISABLE"). Default False (disabled)
+        matches that cherry-picked default - not independently verified
+        against this project's own PPP-static pipeline behavior; if a live
+        station shows unexpected RTCM clock-related artifacts after
+        enabling this, that's the first setting to reconsider.
+
+        :param enabled: True to enable clock offset in RTCM output, False
+            to disable
+        """
+        cmd = 'CONFIG RTCMCLOCKOFFSET ENABLE' if enabled else 'CONFIG RTCMCLOCKOFFSET DISABLE'
+        response = self.send_command(cmd)
+
+        if response and 'OK' in response:
+            logger.info(f"✓ RTCM clock offset: {'enabled' if enabled else 'disabled'}")
+            return True
+        return False
+
     def save_config(self) -> bool:
         """Save configuration to flash"""
         response = self.send_command('SAVECONFIG')

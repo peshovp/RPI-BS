@@ -6,6 +6,7 @@ Web interface for configuring ZED-F9P, Mosaic-X5, UM980/UM982
 import json
 import logging
 import subprocess
+import time
 from flask import Blueprint, render_template, request, jsonify, send_file
 from pathlib import Path
 
@@ -251,7 +252,93 @@ def configure_receiver():
         
         try:
             results = []
-            
+            is_unicore = isinstance(configurator, UnicoreConfigurator)
+
+            # --- Unicore (UM980/UM982)-only steps, run FIRST ---
+            # set_signal_group_preset() sends "CONFIG SIGNALGROUP {n}",
+            # which this project's own receiver_cfg/Unicore_UM980_rtcm3.cfg
+            # documents as resetting the device - so it must run before any
+            # other config step, or a reset afterward would silently
+            # discard everything sent before it. All other config steps
+            # below (existing and new) come after this block.
+            #
+            # Opt-in via 'signal_group_preset' config key, not applied
+            # unconditionally to every UM980 configure call - this changes
+            # which GNSS bands are tracked (see unicore_config.py's
+            # docstring) and resets the receiver, which is more disruptive
+            # than the pre-existing steps below.
+            if is_unicore and 'signal_group_preset' in config:
+                preset = config['signal_group_preset']
+
+                if configurator.set_signal_group_preset(preset):
+                    results.append(f'✓ Signal group preset: {preset}')
+
+                    # Reset behavior after "CONFIG SIGNALGROUP" is NOT
+                    # documented anywhere in this codebase (confirmed -
+                    # reset_receiver() below has no reconnect logic
+                    # either, so there's no existing precedent to follow)
+                    # and was NOT live-tested this session against a real
+                    # UM980. Defensive reconnect: whether the reset drops
+                    # the serial port (closing it) or just reboots the
+                    # receiver logically while keeping the UART link up,
+                    # this handles both without assuming either - a brief
+                    # settle delay, then reconnect if the port dropped,
+                    # with a couple of retries since a receiver reboot can
+                    # take longer than a single reconnect attempt to
+                    # complete.
+                    time.sleep(2.0)
+                    if not configurator.serial or not configurator.serial.is_open:
+                        reconnected = False
+                        for attempt in range(3):
+                            if configurator.connect():
+                                reconnected = True
+                                break
+                            time.sleep(1.0)
+                        if reconnected:
+                            results.append('✓ Reconnected after signal group reset')
+                        else:
+                            results.append('✗ Failed to reconnect after signal group reset - remaining steps skipped')
+                            configurator.disconnect()
+                            return jsonify({
+                                'success': False,
+                                'message': 'Receiver did not come back after signal group preset reset',
+                                'results': results
+                            }), 500
+                else:
+                    results.append('✗ Signal group preset failed')
+
+            if is_unicore and 'sbas_enabled' in config:
+                if configurator.set_sbas_enabled(config['sbas_enabled']):
+                    results.append(f"✓ SBAS: {'enabled' if config['sbas_enabled'] else 'disabled'}")
+                else:
+                    results.append('✗ SBAS configuration failed')
+
+            if is_unicore and 'rtcm_clock_offset_enabled' in config:
+                if configurator.set_rtcm_clock_offset(config['rtcm_clock_offset_enabled']):
+                    results.append(f"✓ RTCM clock offset: {'enabled' if config['rtcm_clock_offset_enabled'] else 'disabled'}")
+                else:
+                    results.append('✗ RTCM clock offset configuration failed')
+
+            if is_unicore and 'undulation_m' in config:
+                if configurator.set_undulation(config['undulation_m']):
+                    results.append(f"✓ Undulation: {config['undulation_m']}m")
+                else:
+                    results.append('✗ Undulation configuration failed')
+
+            if is_unicore and 'base_antenna_model' in config:
+                antenna_params = config['base_antenna_model'] if isinstance(config['base_antenna_model'], dict) else {}
+                if configurator.set_base_antenna_model(**antenna_params):
+                    results.append('✓ Base antenna model configured')
+                else:
+                    results.append('✗ Base antenna model configuration failed')
+
+            if is_unicore and 'rtcm_snr_mask' in config:
+                mask_params = config['rtcm_snr_mask'] if isinstance(config['rtcm_snr_mask'], dict) else {}
+                if configurator.set_rtcm_snr_mask(**mask_params):
+                    results.append('✓ RTCM SNR mask configured')
+                else:
+                    results.append('✗ RTCM SNR mask configuration failed')
+
             # Configure RTCM messages
             if 'rtcm_messages' in config:
                 messages = config['rtcm_messages']
