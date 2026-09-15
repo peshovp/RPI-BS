@@ -36,7 +36,14 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get upgrade -y -qq
 apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv fonts-dejavu-core
-raspi-config nonint do_spi 0
+if command -v raspi-config &>/dev/null; then
+    raspi-config nonint do_spi 0
+elif command -v armbian-config &>/dev/null; then
+    echo "WARNING: raspi-config not found (non-Raspberry-Pi-OS board detected)." >&2
+    echo "Armbian detected - SPI must be enabled manually via 'armbian-config' (System -> Hardware) if this station's GNSS receiver uses SPI, not UART/USB." >&2
+else
+    echo "WARNING: neither raspi-config nor armbian-config found - skipping SPI enable step. If this station's GNSS receiver requires SPI, enable it manually for your platform." >&2
+fi
 echo "System packages updated. curl, git, and ca-certificates confirmed installed."
 
 # Checks whether BASH_SOURCE[0] points at a real file on disk that is part of
