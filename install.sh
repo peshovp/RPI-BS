@@ -35,6 +35,60 @@ echo "==========================================================================
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get upgrade -y -qq
+
+# --- Defensive check: PREEMPT_RT kernel / boot-symlink consistency ---
+# Warning-only, never modifies anything. On Armbian (and other non-Raspberry-Pi-OS
+# boards using Debian's generic kernel package mechanism), installing a
+# linux-image-*-rt-arm64 package alongside the board's vendor kernel is a known
+# hazard: the RT kernel's postinst updates the /boot/uInitrd symlink to point at
+# itself, but does NOT update /boot/Image or /boot/dtb, which keep pointing at the
+# vendor kernel (the one with the correct SoC drivers/device-tree). The result is
+# U-Boot loading a vendor kernel with an RT initrd - an incompatible combination
+# that causes a full boot failure. Confirmed live on an Orange Pi 4 Pro station
+# (Allwinner A733, Armbian vendor kernel 6.6.98-vendor-sun60iw2) after
+# linux-image-6.12.107+deb13-rt-arm64 ended up installed alongside it.
+# RTKBase does not require PREEMPT_RT for GNSS processing - this check does not
+# assert why an RT kernel is present, only that if one is, /boot/Image, /boot/dtb,
+# and /boot/uInitrd must all resolve to the SAME kernel version before rebooting.
+if dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
+    echo "WARNING: a PREEMPT_RT (rt-arm64) kernel package is installed on this system." >&2
+    echo "On Armbian/non-Raspberry-Pi-OS boards this can desync the /boot/Image, /boot/dtb," >&2
+    echo "and /boot/uInitrd symlinks (each may end up pointing at a DIFFERENT kernel after" >&2
+    echo "the RT kernel's postinst runs), which causes a hard boot failure at next reboot." >&2
+    echo "RTKBase does not require PREEMPT_RT for GNSS processing." >&2
+    echo "Before rebooting, verify all three point at the SAME kernel version:" >&2
+    echo "  ls -la /boot/Image /boot/dtb /boot/uInitrd" >&2
+    echo "This script will NOT modify these symlinks automatically - fix manually if inconsistent." >&2
+fi
+
+# --- Defensive check: root filesystem not resized to full disk capacity ---
+# Warning-only, never modifies anything. Armbian images can leave the root
+# partition/filesystem at its pre-resize (first-boot) size if the standard
+# first-boot resize service never ran or was interrupted - the disk reports its
+# full physical capacity but df shows only the original small image size.
+# This check compares df's view of the root filesystem against the physical size
+# of the underlying disk; it never calls resize2fs/growpart/parted itself.
+ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+if [[ -n "$ROOT_SOURCE" ]]; then
+    ROOT_DISK="$(lsblk -no PKNAME "$ROOT_SOURCE" 2>/dev/null || true)"
+    if [[ -n "$ROOT_DISK" ]]; then
+        DISK_BYTES="$(blockdev --getsize64 "/dev/$ROOT_DISK" 2>/dev/null || echo 0)"
+        ROOT_BYTES="$(df -B1 --output=size / 2>/dev/null | tail -1 | tr -d ' ' || echo 0)"
+        if [[ "$DISK_BYTES" -gt 0 && "$ROOT_BYTES" -gt 0 ]]; then
+            # Integer percentage: (ROOT_BYTES * 100) / DISK_BYTES
+            ROOT_PCT=$(( ROOT_BYTES * 100 / DISK_BYTES ))
+            if [[ "$ROOT_PCT" -lt 50 ]]; then
+                echo "WARNING: root filesystem (/) is only ${ROOT_PCT}% of the physical disk size" >&2
+                echo "(/dev/$ROOT_DISK, $((DISK_BYTES / 1024 / 1024 / 1024))GB total)." >&2
+                echo "This looks like the Armbian first-boot filesystem resize never ran." >&2
+                echo "This script will NOT resize the filesystem automatically." >&2
+                echo "On Armbian boards, run 'sudo armbian-config' -> System -> Resize, then reboot," >&2
+                echo "before continuing, to reclaim the full disk capacity." >&2
+            fi
+        fi
+    fi
+fi
+
 apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv fonts-dejavu-core
 if command -v raspi-config &>/dev/null; then
     raspi-config nonint do_spi 0
