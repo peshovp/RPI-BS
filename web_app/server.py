@@ -561,8 +561,12 @@ def auto_survey_start():
         ppp_tier = data.get('ppp_tier', 'rapid')
         if ppp_tier not in ('ultra-rapid', 'rapid', 'final'):
             return jsonify({"error": "ppp_tier must be one of: ultra-rapid, rapid, final"}), 400
+        ppp_ar_enabled = data.get('ppp_ar_enabled', False)
+        if not isinstance(ppp_ar_enabled, bool):
+            return jsonify({"error": "ppp_ar_enabled must be a boolean"}), 400
         controller = get_survey_controller()
-        started = controller.start_survey(target_hours=target_hours, ppp_tier=ppp_tier)
+        started = controller.start_survey(target_hours=target_hours, ppp_tier=ppp_tier,
+                                           ppp_ar_enabled=ppp_ar_enabled)
         if started:
             return jsonify({"status": "started"})
         else:

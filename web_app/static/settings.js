@@ -892,6 +892,9 @@ $(document).ready(function () {
                 if (status.ppp_tier && document.activeElement !== document.getElementById("auto-survey-ppp-tier")) {
                     $("#auto-survey-ppp-tier").val(status.ppp_tier);
                 }
+                if (typeof status.ppp_ar_enabled === "boolean") {
+                    $("#auto-survey-ppp-ar-switch").bootstrapToggle(status.ppp_ar_enabled ? "on" : "off", true);
+                }
 
                 if (state === "running") {
                     autoSurveyStatusTextElt.textContent = "Status: Running - " + numEpochs.toLocaleString() + " / " + targetEpochs.toLocaleString() + " epochs";
@@ -994,7 +997,8 @@ $(document).ready(function () {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     target_hours: parseInt($("#auto-survey-target-hours").val()),
-                    ppp_tier: $("#auto-survey-ppp-tier").val()
+                    ppp_tier: $("#auto-survey-ppp-tier").val(),
+                    ppp_ar_enabled: $("#auto-survey-ppp-ar-switch").prop("checked")
                 })
             })
                 .then(function(response) {

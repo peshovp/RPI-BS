@@ -660,6 +660,13 @@
       </div>
     </div>
     <div class="form-group row">
+      <label for="auto-survey-ppp-ar-switch" class="col-sm-3 col-form-label">PRIDE-PPPAR Ambiguity Resolution (experimental):</label>
+      <div class="col-sm-9">
+        <input id="auto-survey-ppp-ar-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="warning" data-offstyle="outline-secondary">
+        <small class="form-text text-muted">Optional, opt-in final ambiguity-resolution step using PRIDE-PPPAR (pdp3), run ONCE at survey completion only - never on interim updates. If its wide-lane/narrow-lane fix rate is high enough, its position replaces the standard rnx2rtkp result for the final broadcast; otherwise the rnx2rtkp result is used unchanged. Requires PRIDE-PPPAR installed on this station. Applied on next Start.</small>
+      </div>
+    </div>
+    <div class="form-group row">
       <label class="col-sm-3 col-form-label">Geoid Model:</label>
       <div class="col-sm-9">
         <div id="auto-survey-geoid-current" class="text-muted small mb-2">Loading...</div>
