@@ -38,6 +38,7 @@ from .rtkbase_config import RTKBaseConfig
 from .rinex_converter import RINEXConverter
 from .ppp_processor import PPPProcessor
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
+from .pride_pppar_processor import PridePpparProcessor, Pdp3NotFoundError
 from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
@@ -199,6 +200,7 @@ class SurveyController:
         # Survey parameters
         self.target_hours = 24
         self.ppp_tier = 'rapid'
+        self.ppp_ar_enabled = False
 
         # Hard timeout: fail survey if no successful coordinate update happens for X minutes.
         # Configurable via env var AUTOSURVEY_UPDATE_TIMEOUT_MINUTES.
@@ -321,7 +323,8 @@ class SurveyController:
             logger.error(f"Failed to stop file logging: {e}")
             return False
     
-    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid') -> bool:
+    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid',
+                      ppp_ar_enabled: bool = False) -> bool:
         """
         Start new survey session
 
@@ -332,12 +335,24 @@ class SurveyController:
                 usually available within the survey's own timeframe (up to
                 ~41h latency) without the accuracy tradeoffs of
                 ultra-rapid's predicted-orbit half.
+            ppp_ar_enabled: Opt-in PRIDE-PPPAR final ambiguity-resolution
+                step (default False - not default-on). If True, runs
+                pdp3 ONCE at survey finalization only (never per interim
+                update, to stay within this station's RAM budget) via
+                _run_ppp_ar(); its result replaces the rnx2rtkp broadcast
+                position only if its wide-lane/narrow-lane fix rates clear
+                PPP_AR_MIN_FIX_RATE_PERCENT, otherwise the existing
+                rnx2rtkp result is used unchanged (never a hard failure).
 
         Returns:
             True if started successfully
         """
         if ppp_tier not in ('ultra-rapid', 'rapid', 'final'):
             logger.error(f"Invalid ppp_tier: {ppp_tier!r}")
+            return False
+
+        if not isinstance(ppp_ar_enabled, bool):
+            logger.error(f"Invalid ppp_ar_enabled (must be bool): {ppp_ar_enabled!r}")
             return False
 
         if self._running:
@@ -353,7 +368,9 @@ class SurveyController:
         # Initialize state
         self.target_hours = target_hours
         self.ppp_tier = ppp_tier
-        if not self.state.start_survey(target_hours, ppp_tier=ppp_tier):
+        self.ppp_ar_enabled = ppp_ar_enabled
+        if not self.state.start_survey(target_hours, ppp_tier=ppp_tier,
+                                        ppp_ar_enabled=ppp_ar_enabled):
             logger.error("Failed to initialize survey state")
             return False
         
@@ -621,6 +638,19 @@ class SurveyController:
     # live survey.
     PPP_CONVERGENCE_STD_METERS = 0.10
 
+    # UNVERIFIED PLACEHOLDER, not derived from any live PRIDE-PPPAR
+    # fixed-vs-degraded comparison on this station (no station access
+    # during development - see pride_pppar_processor.py's module
+    # docstring for the same caveat on its own AR-related parsing). 90%
+    # is a round, conservative-sounding threshold for "AR fix rate good
+    # enough to trust this run's position over rnx2rtkp's", chosen only
+    # because it is clearly above a marginal/mostly-float run and clearly
+    # below a clean, fully-fixed one - NOT calibrated against real
+    # wl_fix_rate/nl_fix_rate distributions from actual BaseStation PPP-AR
+    # runs. Revisit once real fix-rate data has been logged from live
+    # finalize-time PPP-AR runs (see _run_ppp_ar()'s logging below).
+    PPP_AR_MIN_FIX_RATE_PERCENT = 90.0
+
     def _perform_update(self, is_final: bool = False) -> bool:
         """
         Perform position update using RINEX + PPP-static workflow:
@@ -852,6 +882,14 @@ class SurveyController:
                 'itrf2020_lat': float(estimate.lat),
                 'itrf2020_lon': float(estimate.lon),
                 'itrf2020_height': float(estimate.height),
+                # Which PPP backend produced the broadcast lat/lon/height
+                # above - 'rnx2rtkp' here always; _finalize_survey()
+                # overwrites this to 'pride-pppar' (plus ar_wl_fix_rate/
+                # ar_nl_fix_rate) if the opt-in PPP-AR step ran and its
+                # fix rate cleared PPP_AR_MIN_FIX_RATE_PERCENT - see
+                # _run_ppp_ar()/_finalize_survey(). Always present so this
+                # field's absence is never ambiguous with "unknown".
+                'ppp_backend': 'rnx2rtkp',
             }
 
             position_std = {
@@ -922,6 +960,69 @@ class SurveyController:
                 pass
             return False
     
+    def _run_ppp_ar(self) -> Optional[Dict]:
+        """
+        Run PRIDE-PPPAR (pdp3) as an opt-in FINAL ambiguity-resolution
+        step, ONCE, at survey finalization only - never per interim
+        update, per Pesho's explicit RAM-budget instruction for this
+        station.
+
+        Independently re-locates/re-converts the latest raw GNSS log to
+        RINEX (same Step 1/2 lookup _perform_update() already performed
+        for its own rnx2rtkp run) rather than threading obs_file state
+        through _perform_update() - both self.rtkbase.get_data_file() and
+        self.rinex.convert_raw_to_rinex_obs() are idempotent lookups
+        against the same latest raw file / rinex_dir, so redoing them
+        here is cheap and keeps this method fully self-contained.
+
+        Returns:
+            Dict from PridePpparProcessor.parse_ppp_ar_result() (lat/lon/
+            height/sig0/nobs/wl_fix_rate/nl_fix_rate/...) on success, or
+            None if PRIDE-PPPAR is not installed, the run failed, or no
+            usable result could be parsed - NEVER raises; a failure here
+            must fall back to the existing rnx2rtkp result, not fail the
+            survey.
+        """
+        try:
+            pride = PridePpparProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
+        except Pdp3NotFoundError as e:
+            logger.warning(f"PPP-AR enabled but pdp3 not available - skipping, "
+                            f"falling back to rnx2rtkp result: {e}")
+            return None
+
+        raw_file = self.rtkbase.get_data_file()
+        if not raw_file or not raw_file.exists():
+            logger.warning("PPP-AR: no raw data file found - skipping")
+            return None
+
+        rinex_dir = self.work_dir / "rinex"
+        rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
+        if not rinex_result:
+            logger.warning("PPP-AR: RINEX conversion failed - skipping")
+            return None
+
+        obs_file, _nav_file = rinex_result
+
+        ppp_ar_dir = self.work_dir / "pride_pppar"
+        pos_file = pride.process_ppp_ar(obs_file, work_dir=ppp_ar_dir)
+        if not pos_file:
+            logger.warning("PPP-AR: pdp3 run failed or produced no result - "
+                            "falling back to rnx2rtkp result")
+            return None
+
+        result = pride.parse_ppp_ar_result(pos_file)
+        if not result:
+            logger.warning("PPP-AR: could not parse pdp3 result - "
+                            "falling back to rnx2rtkp result")
+            return None
+
+        logger.info(f"PPP-AR result: {result['lat']:.8f}°, {result['lon']:.8f}°, "
+                    f"{result['height']:.3f}m, "
+                    f"wl_fix_rate={result['wl_fix_rate']}, "
+                    f"nl_fix_rate={result['nl_fix_rate']}, sig0={result['sig0']}")
+
+        return result
+
     def _finalize_survey(self):
         """
         Finalize survey at completion:
@@ -931,18 +1032,94 @@ class SurveyController:
         4. Mark survey as completed
         5. Restart main service to apply new coordinates
         6. Stop file logging to prevent disk space issues
+
+        If self.ppp_ar_enabled: after the normal rnx2rtkp-based final
+        update (step 2), ALSO runs PRIDE-PPPAR once (_run_ppp_ar()) and,
+        if its wide-lane/narrow-lane fix rates both clear
+        PPP_AR_MIN_FIX_RATE_PERCENT, overwrites the just-computed final
+        position (in-memory and in state) with PRIDE-PPPAR's
+        ambiguity-resolved position before it gets broadcast/applied
+        below - never a hard failure either way; any PPP-AR problem
+        (not installed, run failure, parse failure, fix rate below
+        threshold) simply leaves the existing rnx2rtkp position in place.
         """
         try:
             logger.info("=" * 60)
             logger.info("🎯 FINALIZING SURVEY - Processing complete 24h dataset...")
             logger.info("=" * 60)
-            
+
             # Snapshot any previously computed position so we can still complete even if final update fails
             before_status = self.state.get_status()
             before_pos = before_status.get('current_position')
 
             # Perform final update with all accumulated data
             self._perform_update(is_final=True)
+
+            # Opt-in PRIDE-PPPAR final AR step - ONCE, here, never per
+            # interim update. Runs after the normal rnx2rtkp final update
+            # above so there is always an rnx2rtkp result to fall back to
+            # if PPP-AR is unavailable/fails/doesn't clear the fix-rate
+            # threshold.
+            if self.ppp_ar_enabled:
+                try:
+                    ppp_ar_result = self._run_ppp_ar()
+                    if ppp_ar_result is not None:
+                        wl = ppp_ar_result.get('wl_fix_rate')
+                        nl = ppp_ar_result.get('nl_fix_rate')
+                        fix_rate_ok = (
+                            wl is not None and nl is not None and
+                            wl >= self.PPP_AR_MIN_FIX_RATE_PERCENT and
+                            nl >= self.PPP_AR_MIN_FIX_RATE_PERCENT
+                        )
+                        if fix_rate_ok:
+                            current_status = self.state.get_status()
+                            current_pos = current_status.get('current_position')
+                            if current_pos:
+                                logger.info(
+                                    f"✓ PPP-AR fix rate cleared threshold "
+                                    f"(WL={wl}%, NL={nl}% >= "
+                                    f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - "
+                                    f"using PRIDE-PPPAR position for final broadcast"
+                                )
+                                # PRIDE-PPPAR's ECEF->geodetic result is on
+                                # the same ITRF/WGS84-family geodetic
+                                # datum rnx2rtkp's estimate.lat/lon/height
+                                # already was before BGS2005 transform -
+                                # overwrite just the broadcast lat/lon/
+                                # height fields, keep every other
+                                # already-computed audit field
+                                # (broadcast_height_type, itrf2020_*, etc)
+                                # as-is since those describe the transform
+                                # pipeline, not which backend fed it.
+                                current_pos['lat'] = ppp_ar_result['lat']
+                                current_pos['lon'] = ppp_ar_result['lon']
+                                current_pos['height'] = ppp_ar_result['height']
+                                current_pos['ppp_backend'] = 'pride-pppar'
+                                current_pos['ar_wl_fix_rate'] = wl
+                                current_pos['ar_nl_fix_rate'] = nl
+                                self.state.update_progress(
+                                    position=current_pos,
+                                    position_std=current_status.get('position_std') or {},
+                                    num_epochs=current_status.get('num_epochs', 0),
+                                    quality_metrics=current_status.get('quality_metrics', {}),
+                                )
+                            else:
+                                logger.warning(
+                                    "PPP-AR fix rate cleared threshold but no "
+                                    "current_position to overwrite - keeping rnx2rtkp result"
+                                )
+                        else:
+                            logger.info(
+                                f"PPP-AR fix rate below threshold "
+                                f"(WL={wl}%, NL={nl}%, need >= "
+                                f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - "
+                                f"keeping rnx2rtkp result for final broadcast"
+                            )
+                except Exception as ppp_ar_err:
+                    # Never let a PPP-AR problem fail the survey - the
+                    # rnx2rtkp final update above already succeeded (or
+                    # didn't, independently of this).
+                    logger.error(f"PPP-AR step failed (falling back to rnx2rtkp result): {ppp_ar_err}", exc_info=True)
 
             # Get current state
             status = self.state.get_status()
@@ -1167,8 +1344,11 @@ class SurveyController:
             ppp_tier = status.get('ppp_tier')
             if ppp_tier in ('ultra-rapid', 'rapid', 'final'):
                 self.ppp_tier = ppp_tier
+            ppp_ar_enabled = status.get('ppp_ar_enabled')
+            if isinstance(ppp_ar_enabled, bool):
+                self.ppp_ar_enabled = ppp_ar_enabled
         except Exception as e:
-            logger.warning(f"Failed to read target_hours/ppp_tier from state: {e}")
+            logger.warning(f"Failed to read target_hours/ppp_tier/ppp_ar_enabled from state: {e}")
         
         # Resume from saved state
         if self.state.survey_state == SurveyState.PAUSED:

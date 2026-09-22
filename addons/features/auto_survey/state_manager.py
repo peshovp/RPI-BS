@@ -86,6 +86,8 @@ class StateManager:
                 state['ppp_tier'] = 'rapid'
             if 'broadcast_height_type' not in state:
                 state['broadcast_height_type'] = 'orthometric'
+            if 'ppp_ar_enabled' not in state:
+                state['ppp_ar_enabled'] = False
 
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
@@ -137,6 +139,12 @@ class StateManager:
             # value/fallback logic (current_position/applied_position's
             # own 'broadcast_height_type' field is the real audit trail).
             'broadcast_height_type': 'orthometric',
+            # Opt-in PRIDE-PPPAR final ambiguity-resolution step
+            # (SurveyController._run_ppp_ar()) - default False, matching
+            # Pesho's explicit "opt-in, not default-on" instruction. Only
+            # ever run once, at survey finalization, never per interim
+            # update (RAM budget on this station).
+            'ppp_ar_enabled': False,
         }
     
     def _convert_numpy(self, obj):
@@ -214,7 +222,8 @@ class StateManager:
         """Whether this survey session started str2str_file.service"""
         return bool(self._state.get('file_service_owned', False))
 
-    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid') -> bool:
+    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid',
+                      ppp_ar_enabled: bool = False) -> bool:
         """
         Start new survey session
 
@@ -222,6 +231,10 @@ class StateManager:
             target_hours: Survey duration in hours (default: 24)
             ppp_tier: CDDIS precise-product tier to use for PPP-static
                 processing ("ultra-rapid" | "rapid" | "final")
+            ppp_ar_enabled: Opt-in PRIDE-PPPAR final ambiguity-resolution
+                step (default False) - run once at survey finalization
+                only, never per interim update. See
+                SurveyController._run_ppp_ar().
 
         Returns:
             True if started successfully
@@ -263,9 +276,11 @@ class StateManager:
             # including the ellipsoidal fallback when no geoid model is
             # loaded (see survey_controller.py's Step 8).
             'broadcast_height_type': 'orthometric',
+            'ppp_ar_enabled': bool(ppp_ar_enabled),
         })
 
-        logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier})")
+        logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier}, "
+                    f"PPP-AR: {'enabled' if ppp_ar_enabled else 'disabled'})")
         return self.save_state()
     
     def update_progress(self, 
