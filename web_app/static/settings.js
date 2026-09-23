@@ -793,6 +793,24 @@ $(document).ready(function () {
     var autoSurveyTargetHours = 24;
     var autoSurveyLatestPositionStd = null;
 
+    // Visual-only UX cue: when PRIDE-PPPAR is enabled, rnx2rtkp/CDDIS is
+    // never used at all (see commit b013c3a) - so the "Precise Product
+    // Tier" select and the Earthdata Login credentials fields are simply
+    // ignored by the backend in that mode. Grey them out to make that
+    // obvious, without changing what's actually submitted in the
+    // start-survey POST body (ppp_tier is still sent regardless, matching
+    // existing backend behavior unchanged by this cue).
+    function updatePppArDependentFieldsState() {
+        var pppArEnabled = $("#auto-survey-ppp-ar-switch").prop("checked");
+        $("#auto-survey-ppp-tier").prop("disabled", pppArEnabled);
+        $("#ppp-earthdata-username").prop("disabled", pppArEnabled);
+        $("#ppp-earthdata-password").prop("disabled", pppArEnabled);
+    }
+
+    $("#auto-survey-ppp-ar-switch").on("change", updatePppArDependentFieldsState);
+    // Reflect whichever state ppp_ar_enabled loads as, not just live toggle clicks.
+    updatePppArDependentFieldsState();
+
     function parseUtcTimestamp(timestampStr) {
         // Backend timestamps (datetime.utcnow().isoformat()) have no timezone
         // suffix, so the browser would otherwise parse them as local time.
@@ -894,6 +912,7 @@ $(document).ready(function () {
                 }
                 if (typeof status.ppp_ar_enabled === "boolean") {
                     $("#auto-survey-ppp-ar-switch").bootstrapToggle(status.ppp_ar_enabled ? "on" : "off", true);
+                    updatePppArDependentFieldsState();
                 }
 
                 if (state === "running") {
