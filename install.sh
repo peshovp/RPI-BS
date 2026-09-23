@@ -303,8 +303,15 @@ else
     # CRITICAL: clone into the install user's home directory, NOT /tmp -
     # /tmp is tmpfs with only ~453MB on these Pi boards, far too small for
     # the ~1.65GiB PRIDE-PPPAR repo (confirmed on BaseStation, Pi 3B).
-    echo "Cloning PrideLab/PRIDE-PPPAR (v3.2.11) into $PRIDE_PPPAR_REPO_DIR..."
-    if sudo -u "$PRIDE_PPPAR_USER" git clone --branch v3.2.11 --depth 1 \
+    # NOTE: PrideLab/PRIDE-PPPAR has no semver-style release tags (confirmed
+    # via `git ls-remote --tags` - only three date-stamped tags exist:
+    # 2022-04-07/2023-03-31/2023-09-28, none matching "v3.2.x"). Cloning the
+    # default branch (master, confirmed via `git ls-remote --symref ... HEAD`)
+    # instead of a specific tag - this is what the original manual install on
+    # BaseStation actually did too (no tag was pinned there either), just made
+    # explicit here rather than assumed.
+    echo "Cloning PrideLab/PRIDE-PPPAR (default branch) into $PRIDE_PPPAR_REPO_DIR..."
+    if sudo -u "$PRIDE_PPPAR_USER" git clone --depth 1 \
         https://github.com/PrideLab/PRIDE-PPPAR.git "$PRIDE_PPPAR_REPO_DIR"; then
 
         # CRITICAL BUILD FIX: gfortran 14.2.0 (Debian 14.2.0-19, aarch64) has
@@ -331,6 +338,20 @@ else
         if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
             if [ -x "$PRIDE_PPPAR_BIN" ]; then
                 echo "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
+                # No git tag was pinned (see clone step's comment - upstream
+                # has none), so the actually-installed version can only be
+                # confirmed by reading the repo's own self-reported version
+                # string, per its README.md header line (confirmed live,
+                # e.g. "## PRIDE-PPPAR ver. 3.2.11 (last updated on
+                # 2026-09-20)") - logged explicitly so every install/update
+                # log unambiguously records which version actually got
+                # installed.
+                detected_version=$(grep -oE 'PRIDE-PPPAR ver\.? [0-9]+\.[0-9]+(\.[0-9]+)?' "$PRIDE_PPPAR_REPO_DIR/README.md" 2>/dev/null | head -1)
+                if [ -n "$detected_version" ]; then
+                    echo "PRIDE-PPPAR version installed: $detected_version"
+                else
+                    echo "WARNING: PRIDE-PPPAR built successfully but version string could not be detected from README.md" >&2
+                fi
             else
                 echo "WARNING: PRIDE-PPPAR install.sh completed but $PRIDE_PPPAR_BIN was not found afterward." >&2
                 echo "PRIDE-PPPAR ambiguity resolution (opt-in) will not be available until this is resolved manually." >&2

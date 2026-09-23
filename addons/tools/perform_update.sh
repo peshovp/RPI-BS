@@ -177,8 +177,11 @@ if [ -x "$PRIDE_PPPAR_BIN" ]; then
     log_status "info" "✓ PRIDE-PPPAR already installed at $PRIDE_PPPAR_BIN - skipping build"
 else
     PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
-    log_status "info" "Cloning PrideLab/PRIDE-PPPAR (v3.2.11) into $PRIDE_PPPAR_REPO_DIR..."
-    if sudo -u "$PRIDE_PPPAR_USER" git clone --branch v3.2.11 --depth 1 \
+    # NOTE: no semver-style release tags exist upstream - see install.sh's
+    # matching comment for the confirmed `git ls-remote --tags` evidence.
+    # Cloning the default branch (master), matching install.sh.
+    log_status "info" "Cloning PrideLab/PRIDE-PPPAR (default branch) into $PRIDE_PPPAR_REPO_DIR..."
+    if sudo -u "$PRIDE_PPPAR_USER" git clone --depth 1 \
         https://github.com/PrideLab/PRIDE-PPPAR.git "$PRIDE_PPPAR_REPO_DIR" 2>&1 | tee -a /tmp/ota_update.log; then
 
         log_status "info" "Applying -O0 workaround for gfortran aarch64 ICE..."
@@ -190,6 +193,15 @@ else
         if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh') 2>&1 | tee -a /tmp/ota_update.log; then
             if [ -x "$PRIDE_PPPAR_BIN" ]; then
                 log_status "info" "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
+                # No git tag pinned upstream - see install.sh's matching
+                # comment. Detect and log the actually-installed version
+                # from the repo's own README.md self-report.
+                detected_version=$(grep -oE 'PRIDE-PPPAR ver\.? [0-9]+\.[0-9]+(\.[0-9]+)?' "$PRIDE_PPPAR_REPO_DIR/README.md" 2>/dev/null | head -1)
+                if [ -n "$detected_version" ]; then
+                    log_status "info" "PRIDE-PPPAR version installed: $detected_version"
+                else
+                    log_status "info" "⚠ PRIDE-PPPAR built successfully but version string could not be detected from README.md"
+                fi
             else
                 log_status "info" "⚠ PRIDE-PPPAR install.sh completed but $PRIDE_PPPAR_BIN was not found - PRIDE-PPPAR ambiguity resolution will not be available until resolved manually (rnx2rtkp unaffected)"
             fi
