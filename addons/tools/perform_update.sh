@@ -159,6 +159,48 @@ else
     fi
 fi
 
+log_status "info" "Ensuring PRIDE-PPPAR (pdp3) is installed (idempotent, needed by optional PPP-AR feature)..."
+# Same install-user/home resolution already used for REPO_OWNER below
+# (stat -c '%U' "$DEV_REPO_PATH") - resolved here too since this check runs
+# before that variable is otherwise needed. Never hardcoded to any specific
+# username. Mirrors install.sh's own PRIDE-PPPAR step exactly (idempotency
+# check, -O0 gfortran-aarch64-ICE workaround, non-interactive build,
+# warning-only failure) so pre-existing stations (e.g. BaseStation) that
+# ran an older install.sh without this step get pdp3 installed automatically
+# on their next OTA update, with no manual per-station step required.
+PRIDE_PPPAR_USER=$(stat -c '%U' "$DEV_REPO_PATH")
+PRIDE_PPPAR_USER_HOME="$(getent passwd "$PRIDE_PPPAR_USER" | cut -d: -f6)"
+PRIDE_PPPAR_USER_HOME="${PRIDE_PPPAR_USER_HOME:-/root}"
+PRIDE_PPPAR_BIN="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN/pdp3"
+
+if [ -x "$PRIDE_PPPAR_BIN" ]; then
+    log_status "info" "✓ PRIDE-PPPAR already installed at $PRIDE_PPPAR_BIN - skipping build"
+else
+    PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
+    log_status "info" "Cloning PrideLab/PRIDE-PPPAR (v3.2.11) into $PRIDE_PPPAR_REPO_DIR..."
+    if sudo -u "$PRIDE_PPPAR_USER" git clone --branch v3.2.11 --depth 1 \
+        https://github.com/PrideLab/PRIDE-PPPAR.git "$PRIDE_PPPAR_REPO_DIR" 2>&1 | tee -a /tmp/ota_update.log; then
+
+        log_status "info" "Applying -O0 workaround for gfortran aarch64 ICE..."
+        find "$PRIDE_PPPAR_REPO_DIR" -name Makefile -exec sed -i 's/-O3/-O0/g; s/-O2/-O0/g; s/-O1/-O0/g' {} \;
+
+        sudo -u "$PRIDE_PPPAR_USER" chmod +x "$PRIDE_PPPAR_REPO_DIR/install.sh" 2>/dev/null || true
+
+        log_status "info" "Building PRIDE-PPPAR (non-interactive)..."
+        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh') 2>&1 | tee -a /tmp/ota_update.log; then
+            if [ -x "$PRIDE_PPPAR_BIN" ]; then
+                log_status "info" "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
+            else
+                log_status "info" "⚠ PRIDE-PPPAR install.sh completed but $PRIDE_PPPAR_BIN was not found - PRIDE-PPPAR ambiguity resolution will not be available until resolved manually (rnx2rtkp unaffected)"
+            fi
+        else
+            log_status "info" "⚠ PRIDE-PPPAR build failed - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
+        fi
+    else
+        log_status "info" "⚠ PRIDE-PPPAR clone failed (network issue?) - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
+    fi
+fi
+
 log_status "info" "Ensuring /var/log/rtkbase/ exists (idempotent, needed by geomaxima_watchdog.service)..."
 # Owned by root, NOT the repo owner - unlike ANTEX above,
 # geomaxima_watchdog.service runs as User=root

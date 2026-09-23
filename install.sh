@@ -272,6 +272,83 @@ fi
 
 echo ""
 echo "============================================================================"
+echo "Installing PRIDE-PPPAR (pdp3) for optional PPP-AR ambiguity resolution"
+echo "============================================================================"
+# Opt-in feature (addons/features/auto_survey/pride_pppar_processor.py) -
+# rnx2rtkp remains the default PPP-static backend regardless of whether this
+# succeeds. Warning-only on any failure (matches this script's existing
+# PREEMPT_RT/root-resize defensive-check pattern above) - a build failure on
+# some future board/toolchain combination must never hard-fail the whole
+# install.
+#
+# Idempotent: skipped entirely if ~/.PRIDE_PPPAR_BIN/pdp3 already exists and
+# is executable (this is PRIDE-PPPAR's OWN install convention, not something
+# this project chose - see pride_pppar_processor.py's find_pdp3()), so
+# re-running install.sh never re-clones/rebuilds the ~1.65GiB repo, which is
+# slow on a Pi 3B.
+#
+# Install-user/home resolution matches the SAME "${SUDO_USER:-$USER}"
+# convention already used for tools/copy_unit.sh's --user argument at
+# STAGE 3 above (install.sh:207) - not a new convention, and never
+# hardcoded to any specific username (e.g. "peshovp").
+PRIDE_PPPAR_USER="${SUDO_USER:-$USER}"
+PRIDE_PPPAR_USER_HOME="$(getent passwd "$PRIDE_PPPAR_USER" | cut -d: -f6)"
+PRIDE_PPPAR_USER_HOME="${PRIDE_PPPAR_USER_HOME:-/root}"
+PRIDE_PPPAR_BIN="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN/pdp3"
+
+if [ -x "$PRIDE_PPPAR_BIN" ]; then
+    echo "✓ PRIDE-PPPAR already installed at $PRIDE_PPPAR_BIN - skipping build."
+else
+    PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
+    # CRITICAL: clone into the install user's home directory, NOT /tmp -
+    # /tmp is tmpfs with only ~453MB on these Pi boards, far too small for
+    # the ~1.65GiB PRIDE-PPPAR repo (confirmed on BaseStation, Pi 3B).
+    echo "Cloning PrideLab/PRIDE-PPPAR (v3.2.11) into $PRIDE_PPPAR_REPO_DIR..."
+    if sudo -u "$PRIDE_PPPAR_USER" git clone --branch v3.2.11 --depth 1 \
+        https://github.com/PrideLab/PRIDE-PPPAR.git "$PRIDE_PPPAR_REPO_DIR"; then
+
+        # CRITICAL BUILD FIX: gfortran 14.2.0 (Debian 14.2.0-19, aarch64) has
+        # a genuine internal compiler error (segfault during the "fre"
+        # GIMPLE optimization pass) at -O1/-O2/-O3, confirmed reproducible
+        # on multiple PRIDE-PPPAR source files (ambpenalty.f90, ambslv.f90,
+        # asknewet.f90, bdeci.f90), independent of parallelism. Forcing all
+        # Makefiles to -O0 fully fixes this - confirmed all 10 modules
+        # (lib, spp, orbit, tedit, lsq, redig, arsig, utils, otl, mhm) build
+        # cleanly, including the critical arsig (ambiguity-resolution)
+        # module, with only cosmetic Fortran-2018-deleted-feature warnings
+        # (legacy GOTO/DO-label syntax) remaining. MUST run before
+        # install.sh's build step.
+        echo "Applying -O0 workaround for gfortran aarch64 ICE (ambpenalty.f90/ambslv.f90/asknewet.f90/bdeci.f90 segfault at -O1+)..."
+        find "$PRIDE_PPPAR_REPO_DIR" -name Makefile -exec sed -i 's/-O3/-O0/g; s/-O2/-O0/g; s/-O1/-O0/g' {} \;
+
+        sudo -u "$PRIDE_PPPAR_USER" chmod +x "$PRIDE_PPPAR_REPO_DIR/install.sh" 2>/dev/null || true
+
+        echo "Building PRIDE-PPPAR (non-interactive)..."
+        # PRIDE-PPPAR's own install.sh prompts interactively (e.g. "run
+        # tests?") - piping empty answers via `yes ""` answers every prompt
+        # with its default, matching this project's general
+        # "install.sh must never block waiting for input" requirement.
+        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
+            if [ -x "$PRIDE_PPPAR_BIN" ]; then
+                echo "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
+            else
+                echo "WARNING: PRIDE-PPPAR install.sh completed but $PRIDE_PPPAR_BIN was not found afterward." >&2
+                echo "PRIDE-PPPAR ambiguity resolution (opt-in) will not be available until this is resolved manually." >&2
+                echo "rnx2rtkp PPP-static remains fully functional regardless." >&2
+            fi
+        else
+            echo "WARNING: PRIDE-PPPAR build failed - continuing install (this is an opt-in feature)." >&2
+            echo "rnx2rtkp PPP-static remains fully functional regardless." >&2
+            echo "Investigate manually at $PRIDE_PPPAR_REPO_DIR if PRIDE-PPPAR ambiguity resolution is needed on this station." >&2
+        fi
+    else
+        echo "WARNING: PRIDE-PPPAR clone failed (network issue?) - continuing install (this is an opt-in feature)." >&2
+        echo "rnx2rtkp PPP-static remains fully functional regardless." >&2
+    fi
+fi
+
+echo ""
+echo "============================================================================"
 echo "Ensuring /var/log/rtkbase/ exists (needed by geomaxima_watchdog.service)"
 echo "============================================================================"
 # Idempotent: mkdir -p is a no-op if the directory already exists. Owned by
