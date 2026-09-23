@@ -39,7 +39,7 @@ from .rinex_converter import RINEXConverter
 from .ppp_processor import PPPProcessor
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
 from .pride_pppar_processor import PridePpparProcessor, Pdp3NotFoundError
-from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch
+from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
 from .config_manager import ConfigManager
@@ -201,6 +201,13 @@ class SurveyController:
         self.target_hours = 24
         self.ppp_tier = 'rapid'
         self.ppp_ar_enabled = False
+        # Last "PPP-AR ATTEMPT ..." summary line logged by
+        # _log_ppp_ar_attempt() (interim or finalize) - used by
+        # _finalize_survey()'s "No final position computed" error path to
+        # surface the actual last PPP-AR failure reason instead of a
+        # generic, context-free message. None until the first PPP-AR
+        # attempt of this instance's lifetime.
+        self._last_ppp_ar_attempt_summary = None
 
         # Hard timeout: fail survey if no successful coordinate update happens for X minutes.
         # Configurable via env var AUTOSURVEY_UPDATE_TIMEOUT_MINUTES.
@@ -649,6 +656,18 @@ class SurveyController:
                         s for s in ppp_ar_slots
                         if s not in attempted_slots and elapsed_hours >= s
                     ]
+                    # Full slot-decision trace on every tick, even when
+                    # nothing is due yet - debug level so a complete
+                    # PPP-AR scheduling history is reconstructable from
+                    # logs alone if ever needed, without flooding info-
+                    # level logs on every 10s poll tick.
+                    logger.debug(
+                        f"_survey_loop PPP-AR slot check: elapsed={elapsed_hours:.3f}h, "
+                        f"all_slots={ppp_ar_slots}, attempted={sorted(attempted_slots)}, "
+                        f"due_unattempted={due_unattempted}, "
+                        f"selected={due_unattempted[-1] if due_unattempted else None}, "
+                        f"stale_skipped={due_unattempted[:-1] if len(due_unattempted) > 1 else []}"
+                    )
                     if due_unattempted:
                         latest_due = due_unattempted[-1]
                         # Skip any earlier due-but-unattempted slots WITHOUT
@@ -829,6 +848,12 @@ class SurveyController:
             failure (geoid/BGS2005/broadcast problem - caller should treat
             this the same as any other failed update).
         """
+        logger.debug(
+            f"_apply_geodetic_position: input point lat={lat}, lon={lon}, "
+            f"height={height}, ppp_backend={ppp_backend}, is_final={is_final}, "
+            f"obs_file={obs_file}"
+        )
+
         try:
             # Step 6: Compute orthometric (MSL) height via geoid model.
             # Per АГКК's official requirement, this IS the height broadcast
@@ -838,10 +863,10 @@ class SurveyController:
             h_ortho = self.geoid.ellipsoidal_to_orthometric(lat, lon, height)
 
             if h_ortho is None:
-                logger.info("No geoid model loaded / position outside grid bounds - orthometric height unavailable")
+                logger.info("Geoid lookup result: unavailable (no geoid model loaded / position outside grid bounds) - orthometric height unavailable")
             else:
                 geoid_sep = height - h_ortho
-                logger.info(f"Geoid correction: {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m")
+                logger.info(f"Geoid lookup result: h_ortho={h_ortho:.3f}m (correction {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m)")
 
             # Step 7: ITRF2020 -> BGS2005 transformation. Per Инструкция №
             # РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1: relative GNSS
@@ -869,6 +894,8 @@ class SurveyController:
             logger.info(f"Position estimate (BGS2005, t_obs={t_obs:.4f}): "
                         f"{bgs2005['lat_dd']:.8f}°, {bgs2005['lon_dd']:.8f}°, {bgs2005['height_m']:.3f}m")
             logger.info(f"BGS2005 broadcast coordinate per {bgs2005['regulation_reference']}")
+            logger.debug(f"BGS2005 transform: input={{'lat': {lat}, 'lon': {lon}, 'height': {height}, 't_obs': {t_obs}}}, "
+                         f"output={bgs2005}")
 
             # Step 8: Update RTKBase configuration
             # CRITICAL: broadcast the BGS2005-transformed, ORTHOMETRIC
@@ -909,9 +936,11 @@ class SurveyController:
 
             if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height):
                 if is_final:
-                    logger.info("✓ Final configuration applied successfully")
+                    logger.info(f"✓ RTCM broadcast: final configuration applied successfully "
+                                f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f})")
                 else:
-                    logger.info("✓ Temporary configuration updated")
+                    logger.info(f"✓ RTCM broadcast: temporary configuration updated "
+                                f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f})")
 
                 # Restart services on every update so new coords take effect immediately
                 try:
@@ -922,7 +951,11 @@ class SurveyController:
                 except Exception as restart_err:
                     logger.error(f"Service restart after update failed: {restart_err}")
             else:
-                logger.error("Failed to update configuration")
+                logger.error(
+                    f"✗ RTCM broadcast: rtkbase.update_position() failed "
+                    f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f}) - "
+                    f"settings.conf was not updated"
+                )
                 self.state.record_update_failure("Failed to update RTKBase settings.conf")
                 return False
 
@@ -1181,42 +1214,77 @@ class SurveyController:
             or no usable result could be parsed - NEVER raises; callers
             must treat None as "skip this run", not as a fatal error.
         """
+        logger.info("_run_ppp_ar: starting PRIDE-PPPAR run")
+
         try:
             pride = PridePpparProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
         except Pdp3NotFoundError as e:
-            logger.warning(f"PPP-AR enabled but pdp3 not available - skipping this run: {e}")
+            logger.warning(f"_run_ppp_ar: PPP-AR enabled but pdp3 not available - skipping this run: {e}")
             return None
 
         raw_file = self.rtkbase.get_data_file()
         if not raw_file or not raw_file.exists():
-            logger.warning("PPP-AR: no raw data file found - skipping this run")
+            logger.warning("_run_ppp_ar: no raw data file found - skipping this run")
             return None
+
+        logger.debug(f"_run_ppp_ar: raw_file={raw_file}")
 
         rinex_dir = self.work_dir / "rinex"
         rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
         if not rinex_result:
-            logger.warning("PPP-AR: RINEX conversion failed - skipping this run")
+            logger.warning("_run_ppp_ar: RINEX conversion failed - skipping this run")
             return None
 
         obs_file, _nav_file = rinex_result
 
+        # Observation duration is critical context for interpreting ANY
+        # PPP-AR result (success or failure) - PRIDE-PPPAR convergence
+        # needs 8h+, so logging this on every attempt (not just success)
+        # is what makes a short/failed run diagnosable from logs alone.
+        try:
+            obs_duration_minutes = extract_observation_duration_minutes(obs_file)
+        except Exception as e:
+            logger.warning(f"_run_ppp_ar: failed to compute observation duration from {obs_file}: {e}")
+            obs_duration_minutes = None
+
+        logger.info(
+            f"_run_ppp_ar: obs_file={obs_file}, "
+            f"obs_duration={obs_duration_minutes:.1f}min" if obs_duration_minutes is not None
+            else f"_run_ppp_ar: obs_file={obs_file}, obs_duration=unknown (could not read RINEX header epochs)"
+        )
+
         ppp_ar_dir = self.work_dir / "pride_pppar"
         pos_file = pride.process_ppp_ar(obs_file, work_dir=ppp_ar_dir)
         if not pos_file:
-            logger.warning("PPP-AR: pdp3 run failed or produced no result - skipping this run")
+            logger.warning(
+                f"_run_ppp_ar: pdp3 run failed or produced no result - skipping this run "
+                f"(obs_duration={obs_duration_minutes:.1f}min)" if obs_duration_minutes is not None
+                else "_run_ppp_ar: pdp3 run failed or produced no result - skipping this run (obs_duration=unknown)"
+            )
             return None
 
         result = pride.parse_ppp_ar_result(pos_file)
         if not result:
-            logger.warning("PPP-AR: could not parse pdp3 result - skipping this run")
+            logger.warning(
+                f"_run_ppp_ar: could not parse pdp3 result - skipping this run "
+                f"(obs_duration={obs_duration_minutes:.1f}min)" if obs_duration_minutes is not None
+                else "_run_ppp_ar: could not parse pdp3 result - skipping this run (obs_duration=unknown)"
+            )
             return None
 
-        logger.info(f"PPP-AR result: {result['lat']:.8f}°, {result['lon']:.8f}°, "
+        logger.info(f"_run_ppp_ar: result: {result['lat']:.8f}°, {result['lon']:.8f}°, "
                     f"{result['height']:.3f}m, "
                     f"wl_fix_rate={result['wl_fix_rate']}, "
-                    f"nl_fix_rate={result['nl_fix_rate']}, sig0={result['sig0']}")
+                    f"nl_fix_rate={result['nl_fix_rate']}, sig0={result['sig0']}, "
+                    f"obs_duration={obs_duration_minutes:.1f}min" if obs_duration_minutes is not None
+                    else f"_run_ppp_ar: result: {result['lat']:.8f}°, {result['lon']:.8f}°, "
+                         f"{result['height']:.3f}m, "
+                         f"wl_fix_rate={result['wl_fix_rate']}, "
+                         f"nl_fix_rate={result['nl_fix_rate']}, sig0={result['sig0']}, "
+                         f"obs_duration=unknown")
 
         result['obs_file'] = obs_file
+        result['obs_duration_minutes'] = obs_duration_minutes
         return result
 
     def _ppp_ar_fix_rate_ok(self, ppp_ar_result: Dict) -> bool:
@@ -1232,6 +1300,68 @@ class SurveyController:
             wl >= self.PPP_AR_MIN_FIX_RATE_PERCENT and
             nl >= self.PPP_AR_MIN_FIX_RATE_PERCENT
         )
+
+    def _log_ppp_ar_attempt(self, slot_label: str, result: str, reason: str,
+                             ppp_ar_result: Optional[Dict] = None) -> None:
+        """
+        Log one single-line, grep-able PPP-AR attempt summary, fired from
+        EVERY return path of both _run_ppp_ar_interim() and the
+        finalize-time PPP-AR block in _finalize_survey() - success, skip,
+        or failure alike. Exact shape (per this session's explicit
+        instruction):
+
+            PPP-AR ATTEMPT slot=<Xh|final> result=<SUCCESS|SKIPPED|FAILED> reason=<short reason> obs_duration=<Ymin or 'unknown'> wl_fix=<value or 'n/a'> nl_fix=<value or 'n/a'> sig0=<value or 'n/a'>
+
+        Also stashes the summary on self._last_ppp_ar_attempt_summary so
+        _finalize_survey()'s "No final position computed" error path (see
+        that method) can include the LAST PPP-AR-specific failure reason
+        instead of a generic, disconnected-from-cause message - this is
+        exactly the diagnostic gap that made investigating today's 1h
+        test survey require raw journalctl digging instead of being
+        obvious from the final error alone.
+
+        Args:
+            slot_label: "0h", "4h", ... or "final" - identifies which
+                attempt this is.
+            result: "SUCCESS" | "SKIPPED" | "FAILED".
+            reason: short, human-readable reason (e.g. "pdp3 not found",
+                "fix rate below threshold", "applied successfully").
+            ppp_ar_result: the dict from _run_ppp_ar(), if one was
+                obtained (None if the run never got that far, e.g. pdp3
+                not found) - used to pull obs_duration_minutes/
+                wl_fix_rate/nl_fix_rate/sig0 for the summary line.
+        """
+        if ppp_ar_result is not None:
+            obs_duration = ppp_ar_result.get('obs_duration_minutes')
+            obs_duration_str = f"{obs_duration:.1f}min" if obs_duration is not None else "unknown"
+            wl_fix = ppp_ar_result.get('wl_fix_rate')
+            nl_fix = ppp_ar_result.get('nl_fix_rate')
+            sig0 = ppp_ar_result.get('sig0')
+        else:
+            obs_duration_str = "unknown"
+            wl_fix = None
+            nl_fix = None
+            sig0 = None
+
+        summary = (
+            f"PPP-AR ATTEMPT slot={slot_label} result={result} reason={reason} "
+            f"obs_duration={obs_duration_str} "
+            f"wl_fix={wl_fix if wl_fix is not None else 'n/a'} "
+            f"nl_fix={nl_fix if nl_fix is not None else 'n/a'} "
+            f"sig0={sig0 if sig0 is not None else 'n/a'}"
+        )
+
+        if result == "SUCCESS":
+            logger.info(summary)
+        elif result == "SKIPPED":
+            logger.info(summary)
+        else:
+            logger.warning(summary)
+
+        # Kept for _finalize_survey()'s "No final position computed" path
+        # to surface the actual cause instead of a generic message - see
+        # that method.
+        self._last_ppp_ar_attempt_summary = summary
 
     def _run_ppp_ar_interim(self, elapsed_hours: float, slot_hours: float) -> bool:
         """
@@ -1262,12 +1392,14 @@ class SurveyController:
             False is the expected, non-alarming outcome for "wait for the
             next slot", not a survey-level failure.
         """
+        slot_label = f"{slot_hours}h"
         logger.info(f"=== PPP-AR Interim Update (slot={slot_hours}h, elapsed={elapsed_hours:.2f}h) ===")
 
         ppp_ar_result = self._run_ppp_ar()
         if ppp_ar_result is None:
             logger.warning(f"PPP-AR interim slot={slot_hours}h: no result - "
                             f"skipping this slot, will retry at the next fixed slot")
+            self._log_ppp_ar_attempt(slot_label, "FAILED", "no result from _run_ppp_ar (pdp3 unavailable/no raw file/RINEX conversion failed/run failed/parse failed)")
             return False
 
         if not self._ppp_ar_fix_rate_ok(ppp_ar_result):
@@ -1277,6 +1409,7 @@ class SurveyController:
                 f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
                 f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - skipping this slot"
             )
+            self._log_ppp_ar_attempt(slot_label, "SKIPPED", "fix rate below threshold", ppp_ar_result)
             return False
 
         logger.info(
@@ -1325,8 +1458,10 @@ class SurveyController:
         if not applied:
             logger.warning(f"PPP-AR interim slot={slot_hours}h: broadcast/state update failed - "
                             f"skipping this slot")
+            self._log_ppp_ar_attempt(slot_label, "FAILED", "apply_geodetic_position failed (geoid/BGS2005/broadcast step)", ppp_ar_result)
             return False
 
+        self._log_ppp_ar_attempt(slot_label, "SUCCESS", "applied successfully", ppp_ar_result)
         return True
 
     def _finalize_survey(self):
@@ -1377,6 +1512,7 @@ class SurveyController:
                             "PPP-AR final run produced no result - no final update this run "
                             "(any prior interim PRIDE-PPPAR position, if any, is still used below)"
                         )
+                        self._log_ppp_ar_attempt("final", "FAILED", "no result from _run_ppp_ar (pdp3 unavailable/no raw file/RINEX conversion failed/run failed/parse failed)")
                     elif not self._ppp_ar_fix_rate_ok(ppp_ar_result):
                         logger.warning(
                             f"PPP-AR final run: fix rate below threshold "
@@ -1384,13 +1520,14 @@ class SurveyController:
                             f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
                             f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - no final update this run"
                         )
+                        self._log_ppp_ar_attempt("final", "SKIPPED", "fix rate below threshold", ppp_ar_result)
                     else:
                         logger.info(
                             f"✓ PPP-AR final run: fix rate cleared threshold "
                             f"(WL={ppp_ar_result['wl_fix_rate']}%, "
                             f"NL={ppp_ar_result['nl_fix_rate']}%) - applying final position"
                         )
-                        self._apply_geodetic_position(
+                        final_applied = self._apply_geodetic_position(
                             lat=ppp_ar_result['lat'],
                             lon=ppp_ar_result['lon'],
                             height=ppp_ar_result['height'],
@@ -1420,8 +1557,13 @@ class SurveyController:
                                 'ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
                             },
                         )
+                        if final_applied:
+                            self._log_ppp_ar_attempt("final", "SUCCESS", "applied successfully", ppp_ar_result)
+                        else:
+                            self._log_ppp_ar_attempt("final", "FAILED", "apply_geodetic_position failed (geoid/BGS2005/broadcast step)", ppp_ar_result)
                 except Exception as ppp_ar_err:
                     logger.error(f"PPP-AR final step failed: {ppp_ar_err}", exc_info=True)
+                    self._log_ppp_ar_attempt("final", "FAILED", f"unhandled exception: {ppp_ar_err}")
             else:
                 # Standard rnx2rtkp/CDDIS final update - unchanged.
                 self._perform_update(is_final=True)
@@ -1495,8 +1637,22 @@ class SurveyController:
                     logger.info("Stopping file logging to prevent disk filling...")
                     self._stop_file_logging(reason="survey_completed")
             else:
-                logger.error("No position available for finalization")
-                self._fail("No final position computed")
+                # Include the LAST PPP-AR-specific failure reason (from
+                # _log_ppp_ar_attempt()'s ATTEMPT summary lines) when
+                # available, instead of a generic, context-free message -
+                # this is exactly the diagnostic gap that made
+                # investigating a real failed PPP-AR test survey require
+                # raw journalctl digging instead of being obvious from
+                # the final error alone. Falls back to the old generic
+                # message when self.ppp_ar_enabled is False (rnx2rtkp
+                # path) or no PPP-AR attempt was ever logged this
+                # instance's lifetime.
+                if self.ppp_ar_enabled and self._last_ppp_ar_attempt_summary:
+                    fail_reason = f"No final position computed - last {self._last_ppp_ar_attempt_summary}"
+                else:
+                    fail_reason = "No final position computed"
+                logger.error(f"No position available for finalization ({fail_reason})")
+                self._fail(fail_reason)
 
         except Exception as e:
             logger.error(f"Finalization failed: {e}", exc_info=True)

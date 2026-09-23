@@ -127,6 +127,45 @@ def extract_observation_epoch(obs_file_path) -> Optional[float]:
     return _datetime_to_decimal_year(mean_dt)
 
 
+def extract_observation_duration_minutes(obs_file_path) -> Optional[float]:
+    """
+    Extract the actual observation duration (minutes) covered by a RINEX
+    obs file, from the same "TIME OF FIRST OBS"/"TIME OF LAST OBS" header
+    lines extract_observation_epoch() already parses (see that function's
+    docstring for the confirmed line format) - added specifically so
+    PRIDE-PPPAR attempt logging (survey_controller.py's _run_ppp_ar())
+    can report how much data a given PPP-AR run actually had to work
+    with, since PPP-AR convergence needs 8h+ and a short/failed run is
+    otherwise undiagnosable from logs alone without this context.
+
+    Minimal, standalone helper (not threaded through
+    extract_observation_epoch()'s own return value) since that function
+    already has its own established return contract (decimal-year epoch)
+    used elsewhere (BGS2005 transform) - reusing _parse_rinex_time_line()
+    directly here instead of changing that function's signature.
+
+    :param obs_file_path: path to RINEX .obs file (str or Path)
+    :return: observation duration in minutes, or None if both header
+        lines could not be found before END OF HEADER
+    """
+    first_obs = None
+    last_obs = None
+
+    with open(obs_file_path, 'r') as f:
+        for line in f:
+            if 'END OF HEADER' in line:
+                break
+            if 'TIME OF FIRST OBS' in line:
+                first_obs = _parse_rinex_time_line(line)
+            elif 'TIME OF LAST OBS' in line:
+                last_obs = _parse_rinex_time_line(line)
+
+    if first_obs is None or last_obs is None:
+        return None
+
+    return (last_obs - first_obs).total_seconds() / 60.0
+
+
 def _parse_rinex_time_line(line: str) -> datetime:
     """
     Парсва един "TIME OF FIRST/LAST OBS" ред в datetime. Времевата система

@@ -78,9 +78,11 @@ a guessed marker search.
 """
 
 import logging
+import os
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -128,21 +130,59 @@ class Pdp3NotFoundError(PridePpparProcessorError):
 
 def find_pdp3() -> Optional[Path]:
     """
-    Locate the pdp3 binary via PATH, matching spp_processor.py's
-    find_rtklib_tool() PATH-first discovery convention. PRIDE-PPPAR's own
-    install convention (~/.PRIDE_PPPAR_BIN added to .bashrc) means this
-    only succeeds in a shell that has sourced .bashrc (an interactive/
-    login shell) - a bare non-login subprocess environment may not see
-    it, same PATH-visibility caveat that applies to any .bashrc-appended
-    directory.
+    Locate the pdp3 binary via PATH first, matching spp_processor.py's
+    find_rtklib_tool() PATH-first discovery convention, then falling back
+    to the well-known fixed install location (~/.PRIDE_PPPAR_BIN/pdp3)
+    directly if PATH lookup fails.
+
+    THE FALLBACK EXISTS BECAUSE OF A CONFIRMED LIVE PRODUCTION BUG: an
+    operator's own interactive shell has ~/.PRIDE_PPPAR_BIN in PATH via
+    .bashrc, so a manual `pdp3 -m S ...` test succeeds - but
+    rtkbase_web.service (which actually runs this code in production)
+    runs as a systemd service, which NEVER sources .bashrc, so
+    shutil.which("pdp3") always returned None there even though pdp3 was
+    genuinely installed - confirmed via live journalctl on BaseStation
+    ("PPP-AR enabled but pdp3 not available - skipping this run: pdp3 not
+    found on PATH" on every single PPP-AR attempt, interim and finalize
+    alike, of a real test survey). The primary fix for this is
+    unit/rtkbase_web.service's own Environment=PATH= line (added
+    alongside this fallback, substituted with the install user's real
+    home directory by tools/copy_unit.sh) - this fallback is defensive
+    belt-and-suspenders for any station where that unit file substitution
+    didn't take effect (e.g. a manually edited/stale unit file), NOT the
+    primary mechanism.
+
+    The fixed location checked is os.path.expanduser("~/.PRIDE_PPPAR_BIN/pdp3")
+    - i.e. the HOME of whatever user this code is currently running as
+    (root, when run via rtkbase_web.service), NOT any specific installer
+    username. This matches PRIDE-PPPAR's own documented install
+    convention (~/.PRIDE_PPPAR_BIN) without hardcoding "peshovp" or any
+    other username.
 
     Returns:
-        Path to pdp3, or None if not found on PATH.
+        Path to pdp3, or None if not found by either method.
     """
     tool_path = shutil.which("pdp3")
     if tool_path:
-        logger.info(f"Found pdp3 at {tool_path} (via PATH)")
+        logger.info(f"find_pdp3: found pdp3 at {tool_path} (via PATH)")
         return Path(tool_path)
+
+    logger.debug("find_pdp3: pdp3 not found via PATH - checking fixed fallback location")
+
+    fallback_path = Path(os.path.expanduser("~/.PRIDE_PPPAR_BIN/pdp3"))
+    if fallback_path.exists():
+        logger.info(f"find_pdp3: found pdp3 at {fallback_path} "
+                    f"(via fixed fallback location, NOT PATH - PATH lookup failed first)")
+        return fallback_path
+
+    logger.warning(
+        f"find_pdp3: pdp3 not found - checked PATH (shutil.which) and "
+        f"fixed fallback location ({fallback_path}, which does not exist). "
+        f"Current PATH={os.environ.get('PATH', '(unset)')!r}. "
+        f"If PRIDE-PPPAR is installed, verify unit/rtkbase_web.service's "
+        f"Environment=PATH= line was applied (tools/copy_unit.sh + "
+        f"systemctl daemon-reload + service restart)."
+    )
     return None
 
 
@@ -330,8 +370,10 @@ class PridePpparProcessor:
             Path to the generated pos_* file, or None on failure/timeout.
         """
         if not obs_file.exists():
-            logger.error(f"Observation file not found: {obs_file}")
+            logger.error(f"process_ppp_ar: observation file not found: {obs_file}")
             return None
+
+        logger.info(f"process_ppp_ar: obs_file={obs_file}, work_dir={work_dir}")
 
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -340,8 +382,13 @@ class PridePpparProcessor:
         # live) - copy obs_file into work_dir first if it isn't already
         # there, so the basename-only argument below actually resolves.
         local_obs_file = work_dir / obs_file.name
-        if obs_file.resolve() != local_obs_file.resolve():
+        obs_was_copied = obs_file.resolve() != local_obs_file.resolve()
+        if obs_was_copied:
             shutil.copyfile(obs_file, local_obs_file)
+            logger.debug(f"process_ppp_ar: copied obs_file into work_dir: "
+                         f"{obs_file} -> {local_obs_file}")
+        else:
+            logger.debug(f"process_ppp_ar: obs_file already in work_dir, no copy needed: {local_obs_file}")
 
         # Confirmed live CLI: `pdp3 -m S <obs-file>` (static mode). No
         # config file, no sp3/clk arguments - see module docstring.
@@ -353,9 +400,11 @@ class PridePpparProcessor:
         # direct argv subprocess call and not a Python-side
         # resource.setrlimit() call.
         shell_cmd = f"ulimit -s unlimited; exec {' '.join(pdp3_args)}"
+        full_command_line = f'bash -c "{shell_cmd}"'
 
-        logger.info(f"Processing PPP-AR: {local_obs_file.name} (pdp3 -m S, work_dir={work_dir})")
-        logger.debug(f"Command: bash -c \"{shell_cmd}\"")
+        run_start = datetime.utcnow()
+        logger.info(f"process_ppp_ar: starting pdp3 at {run_start.isoformat()}Z")
+        logger.info(f"process_ppp_ar: full command line: {full_command_line}")
 
         try:
             result = subprocess.run(
@@ -366,14 +415,26 @@ class PridePpparProcessor:
                 text=True,
             )
         except subprocess.TimeoutExpired:
-            logger.error("pdp3 timeout (>40 minutes)")
+            elapsed = (datetime.utcnow() - run_start).total_seconds()
+            logger.error(f"process_ppp_ar: pdp3 timeout (>40 minutes) after {elapsed:.1f}s wall-clock")
             return None
         except Exception as e:
-            logger.error(f"pdp3 processing failed: {e}", exc_info=True)
+            elapsed = (datetime.utcnow() - run_start).total_seconds()
+            logger.error(f"process_ppp_ar: pdp3 processing failed after {elapsed:.1f}s: {e}", exc_info=True)
             return None
 
+        elapsed = (datetime.utcnow() - run_start).total_seconds()
+        logger.info(f"process_ppp_ar: pdp3 finished, exit_code={result.returncode}, "
+                    f"elapsed={elapsed:.1f}s wall-clock")
+        # Full stdout/stderr at debug level (not truncated) - volume
+        # concern noted, but a malformed/failed pdp3 run is otherwise
+        # undiagnosable from logs alone, per this session's explicit
+        # requirement.
+        logger.debug(f"process_ppp_ar: FULL stdout:\n{result.stdout}")
+        logger.debug(f"process_ppp_ar: FULL stderr:\n{result.stderr}")
+
         if result.returncode != 0:
-            logger.error(f"pdp3 failed (exit {result.returncode}): {result.stderr}")
+            logger.error(f"process_ppp_ar: pdp3 failed (exit {result.returncode}): {result.stderr}")
             return None
 
         # Output location was not pinned down to a single confirmed path
@@ -381,24 +442,45 @@ class PridePpparProcessor:
         # work_dir/results/ (one level deep, covering a possible
         # work_dir/results/<doy>/ layout), in that order. First match wins.
         pos_files = list(work_dir.glob(_POS_FILE_GLOB))
+        search_locations = [str(work_dir)]
         if not pos_files:
             results_dir = work_dir / "results"
+            search_locations.append(str(results_dir))
             if results_dir.is_dir():
                 pos_files = list(results_dir.glob(_POS_FILE_GLOB)) + \
                             list(results_dir.glob(f"*/{_POS_FILE_GLOB}"))
 
         if not pos_files:
+            # Log exactly what WAS found in the searched directories, so a
+            # naming-convention mismatch (e.g. pdp3 using a different
+            # prefix than "pos_") is immediately visible instead of just
+            # "nothing found".
+            work_dir_contents = sorted(p.name for p in work_dir.iterdir()) if work_dir.is_dir() else []
+            results_dir = work_dir / "results"
+            results_dir_contents = sorted(p.name for p in results_dir.iterdir()) if results_dir.is_dir() else None
             logger.error(
-                f"No pos_* result file found in {work_dir} or "
-                f"{work_dir}/results/ after pdp3 run"
+                f"process_ppp_ar: no pos_* result file found. "
+                f"Searched: {search_locations}. "
+                f"work_dir contents: {work_dir_contents}. "
+                f"work_dir/results contents: "
+                f"{results_dir_contents if results_dir_contents is not None else '(directory does not exist)'}"
             )
             return None
+
+        if len(pos_files) > 1:
+            logger.info(
+                f"process_ppp_ar: {len(pos_files)} pos_* candidates found: "
+                f"{[str(p) for p in pos_files]}"
+            )
 
         # If multiple pos_* files exist (e.g. a stale file from a prior
         # run reusing the same work_dir), take the most recently modified
         # one - mirrors ppp_processor.py's own nav-file auto-detection
         # tie-break convention (max by mtime).
         pos_file = max(pos_files, key=lambda p: p.stat().st_mtime)
+
+        if len(pos_files) > 1:
+            logger.info(f"process_ppp_ar: picked newest by mtime: {pos_file}")
 
         logger.info(f"✓ PRIDE-PPPAR position file: {pos_file}")
 
@@ -442,11 +524,15 @@ class PridePpparProcessor:
             logger.error(f"pos_* file not found: {pos_file}")
             return None
 
+        logger.info(f"parse_ppp_ar_result: parsing {pos_file}")
+
         try:
-            lines = pos_file.read_text(errors='replace').splitlines()
+            raw_content = pos_file.read_text(errors='replace')
         except Exception as e:
-            logger.error(f"Failed to read pos_* file {pos_file}: {e}")
+            logger.error(f"parse_ppp_ar_result: failed to read pos_* file {pos_file}: {e}")
             return None
+
+        lines = raw_content.splitlines()
 
         header_idx = None
         for i, line in enumerate(lines):
@@ -457,7 +543,10 @@ class PridePpparProcessor:
                 break
 
         if header_idx is None:
-            logger.error(f"'{_END_OF_HEADER_MARKER}' marker not found in {pos_file}")
+            logger.error(
+                f"parse_ppp_ar_result: '{_END_OF_HEADER_MARKER}' marker not "
+                f"found in {pos_file} - FULL raw content:\n{raw_content}"
+            )
             return None
 
         data_line = None
@@ -468,15 +557,19 @@ class PridePpparProcessor:
                 break
 
         if data_line is None:
-            logger.error(f"No data line found after '{_END_OF_HEADER_MARKER}' in {pos_file}")
+            logger.error(
+                f"parse_ppp_ar_result: no data line found after "
+                f"'{_END_OF_HEADER_MARKER}' in {pos_file} - FULL raw content:\n{raw_content}"
+            )
             return None
 
         fields = data_line.split()
         # Name Mjd X Y Z Sx Sy Sz Rxy Rxz Ryz Sig0 Nobs = 13 columns
         if len(fields) < 13:
             logger.error(
-                f"Unexpected column count in pos_* data line "
-                f"(expected 13, got {len(fields)}): {data_line!r}"
+                f"parse_ppp_ar_result: unexpected column count in pos_* "
+                f"data line (expected 13, got {len(fields)}): {data_line!r} - "
+                f"FULL raw content of {pos_file}:\n{raw_content}"
             )
             return None
 
@@ -489,14 +582,18 @@ class PridePpparProcessor:
             sig0 = float(fields[11])
             nobs = int(float(fields[12]))
         except ValueError as e:
-            logger.error(f"Failed to parse pos_* data line columns: {e} ({data_line!r})")
+            logger.error(
+                f"parse_ppp_ar_result: failed to parse pos_* data line "
+                f"columns: {e} ({data_line!r}) - FULL raw content of "
+                f"{pos_file}:\n{raw_content}"
+            )
             return None
 
         geodetic = _ecef_to_geodetic(x, y, z)
 
         fix_rates = _parse_fix_rate_line(getattr(self, '_last_stdout', ''))
 
-        return {
+        result = {
             'lat': geodetic['lat'],
             'lon': geodetic['lon'],
             'height': geodetic['height'],
@@ -512,3 +609,13 @@ class PridePpparProcessor:
             'sx': sx, 'sy': sy, 'sz': sz,
             'rxy': rxy, 'rxz': rxz, 'ryz': ryz,
         }
+
+        logger.info(
+            f"parse_ppp_ar_result: parsed fields: name={name!r} mjd={mjd} "
+            f"x={x} y={y} z={z} sx={sx} sy={sy} sz={sz} "
+            f"rxy={rxy} rxz={rxz} ryz={ryz} sig0={sig0} nobs={nobs} "
+            f"wl_fix_rate={fix_rates['wl_fix_rate']} nl_fix_rate={fix_rates['nl_fix_rate']} "
+            f"-> lat={geodetic['lat']} lon={geodetic['lon']} height={geodetic['height']}"
+        )
+
+        return result

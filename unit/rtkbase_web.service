@@ -7,6 +7,14 @@ Description=RTKBase Web Server
 User=root
 SyslogIdentifier=rtkbase_web
 WorkingDirectory={script_path}
+# PATH includes {home}/.PRIDE_PPPAR_BIN so the opt-in PRIDE-PPPAR feature
+# (addons/features/auto_survey/pride_pppar_processor.py's find_pdp3())
+# can locate pdp3 when running as this systemd service - systemd services
+# never source ~/.bashrc, so an operator's own interactive-shell PATH
+# (where pdp3 IS found when run manually) is invisible here otherwise.
+# {home} is substituted by copy_unit.sh from the install user's actual
+# home directory (getent passwd), not hardcoded to any specific username.
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:{home}/.PRIDE_PPPAR_BIN"
 ExecStart={python_path} {script_path}/web_app/server.py
 Restart=on-failure
 RestartSec=30

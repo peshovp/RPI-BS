@@ -47,6 +47,16 @@ if [ "$VALID_ARGUMENTS" != "0" ]; then
 [ "${ARG_USER}" == 0 ] && ARG_USER=$(logname)
 #echo 'user=' "${ARG_USER}"
 
+# Resolve the install user's home directory for the {home} placeholder
+# (used by rtkbase_web.service's PATH Environment= line to find
+# ~/.PRIDE_PPPAR_BIN/pdp3 - see that unit file's comment). Same
+# getent-based mechanism install.sh already uses for SUDO_USER_HOME, not
+# a new convention. Falls back to /root if the user can't be resolved
+# (e.g. a non-existent/typo'd --user value) rather than leaving the
+# placeholder text un-substituted in the deployed unit file.
+ARG_HOME="$(getent passwd "${ARG_USER}" | cut -d: -f6)"
+[ -z "${ARG_HOME}" ] && ARG_HOME="/root"
+
 if ! [ $(id -u) = 0 ]; then
    echo "This script needs root/sudo"
    exit 1
@@ -56,7 +66,7 @@ for file_path in "${BASEDIR}"/../unit/*.service "${BASEDIR}"/../unit/*.timer "${
     do
         file_name=$(basename "${file_path}")
         echo copying "${file_name}"
-        sed -e 's|{script_path}|'"$(dirname "$(dirname "$(readlink -f "$0")")")"'|' -e 's|{user}|'"${ARG_USER}"'|' -e 's|{python_path}|'"${ARG_PYPATH}"'|' "${file_path}" > /etc/systemd/system/"${file_name}"
+        sed -e 's|{script_path}|'"$(dirname "$(dirname "$(readlink -f "$0")")")"'|' -e 's|{user}|'"${ARG_USER}"'|' -e 's|{home}|'"${ARG_HOME}"'|' -e 's|{python_path}|'"${ARG_PYPATH}"'|' "${file_path}" > /etc/systemd/system/"${file_name}"
     done
 
 systemctl daemon-reload
