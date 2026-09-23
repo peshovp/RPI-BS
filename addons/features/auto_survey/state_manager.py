@@ -88,6 +88,8 @@ class StateManager:
                 state['broadcast_height_type'] = 'orthometric'
             if 'ppp_ar_enabled' not in state:
                 state['ppp_ar_enabled'] = False
+            if 'ppp_ar_completed_slots' not in state:
+                state['ppp_ar_completed_slots'] = []
 
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
@@ -145,6 +147,18 @@ class StateManager:
             # ever run once, at survey finalization, never per interim
             # update (RAM budget on this station).
             'ppp_ar_enabled': False,
+            # Fixed-slot tracking for the PPP-AR-only interim schedule
+            # (SurveyController._run_ppp_ar_interim(), only used when
+            # ppp_ar_enabled=True): list of slot_hours values (0, 4, 8,
+            # ...) that have already been ATTEMPTED - a slot is added
+            # here whether it succeeded or was skipped (pdp3 unavailable/
+            # failed/low fix rate), so a failed slot is never retried
+            # before the next fixed slot, per Pesho's explicit "skip and
+            # wait for next slot, no immediate retry" instruction. This is
+            # deliberately NOT last_update_time-based (that field tracks
+            # the rnx2rtkp path's floating last_success+interval schedule
+            # instead - see _survey_loop()).
+            'ppp_ar_completed_slots': [],
         }
     
     def _convert_numpy(self, obj):
@@ -222,6 +236,34 @@ class StateManager:
         """Whether this survey session started str2str_file.service"""
         return bool(self._state.get('file_service_owned', False))
 
+    def get_ppp_ar_completed_slots(self) -> list:
+        """
+        Fixed PPP-AR interim slot_hours values already ATTEMPTED this
+        survey session (see _default_state()'s comment - includes both
+        successful and skipped/failed slots, since a slot is never
+        retried before the next one). Returns a plain list (JSON-safe
+        floats), not a reference to internal state.
+        """
+        return list(self._state.get('ppp_ar_completed_slots', []))
+
+    def mark_ppp_ar_slot_attempted(self, slot_hours: float) -> bool:
+        """
+        Record that the fixed PPP-AR interim slot at slot_hours has been
+        attempted this survey session (success or failure/skip alike) -
+        called by SurveyController._survey_loop() regardless of
+        _run_ppp_ar_interim()'s return value, so a failed/skipped slot is
+        never retried before the next fixed slot.
+
+        :param slot_hours: the fixed schedule slot (0, 4, 8, ...) just attempted
+        :return: True if persisted successfully
+        """
+        slots = self._state.get('ppp_ar_completed_slots', [])
+        if slot_hours not in slots:
+            slots = slots + [slot_hours]
+            self._state['ppp_ar_completed_slots'] = slots
+            return self.save_state()
+        return True
+
     def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid',
                       ppp_ar_enabled: bool = False) -> bool:
         """
@@ -277,6 +319,10 @@ class StateManager:
             # loaded (see survey_controller.py's Step 8).
             'broadcast_height_type': 'orthometric',
             'ppp_ar_enabled': bool(ppp_ar_enabled),
+            # Reset fixed-slot tracking for a fresh run - see
+            # _default_state()'s comment for why this is separate from
+            # last_update_time.
+            'ppp_ar_completed_slots': [],
         })
 
         logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier}, "

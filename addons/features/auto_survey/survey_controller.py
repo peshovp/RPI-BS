@@ -490,14 +490,60 @@ class SurveyController:
         self._services_restarted = len(restarted) > 0
         return result
     
+    def _compute_ppp_ar_slots(self) -> list:
+        """
+        Fixed PPP-AR interim slot schedule: 0h, 4h, 8h, ... up to but
+        EXCLUDING target_hours (the final slot is always handled
+        separately by _finalize_survey(), never by this interim
+        schedule) - per Pesho's explicit "0h, 4h, 8h... to target_hours =
+        final, excluding the final slot" instruction.
+
+        ORDERING GUARANTEE (enforced by _survey_loop()'s caller logic, not
+        here): a slot is only ever run/applied if no LATER slot is
+        simultaneously due - e.g. after a restart/downtime lets both the
+        4h and 8h slots become due in the same tick, only the 8h slot
+        actually runs; the 4h slot is marked attempted and skipped
+        outright, never run out of order. This is because a later slot
+        always has more accumulated data and is therefore always at least
+        as accurate, so an older due slot must never be allowed to
+        overwrite a newer one's position - neither in the same tick nor
+        on a later one.
+
+        Returns:
+            Sorted list of slot_hours floats.
+        """
+        slots = []
+        slot = 0.0
+        while slot < self.target_hours:
+            slots.append(slot)
+            slot += self.PPP_AR_SLOT_INTERVAL_HOURS
+        return slots
+
     def _survey_loop(self):
         """
         Main survey loop - runs in background thread
-        
-        Progressive update schedule:
-        - 0-6 hours: updates every 15 minutes
-        - 6-24 hours: updates every 1 hour
-        - At 24 hours: final update
+
+        Two entirely separate update schedules, chosen once per loop by
+        self.ppp_ar_enabled (checked once here, not per-tick, since it
+        cannot change while a survey is running - see start_survey()):
+
+        - self.ppp_ar_enabled == False (default): the original rnx2rtkp/
+          CDDIS progressive schedule - 15min (0-6h) -> 1h (6-24h) ->
+          final. Unchanged from before this method was split.
+        - self.ppp_ar_enabled == True: PRIDE-PPPAR-ONLY fixed-slot
+          schedule - 0h, 4h, 8h, ... (PPP_AR_SLOT_INTERVAL_HOURS) up to
+          target_hours, handled by _run_ppp_ar_interim(). rnx2rtkp/CDDIS
+          is never invoked in this mode (see _finalize_survey()). A
+          failed/skipped slot is simply marked attempted and NOT retried
+          before the next fixed slot - no 60s-retry reschedule the way
+          the rnx2rtkp path does. ORDERING GUARANTEE: if multiple
+          unattempted slots are due at once (e.g. after a restart/
+          downtime), only the LATEST (highest) one is actually run and
+          broadcast - any earlier due-but-unattempted slots are marked
+          attempted and skipped without ever running, since a later slot
+          always has more accumulated data and must never be overwritten
+          by an older one's result (see _compute_ppp_ar_slots()'s
+          docstring).
         """
         # IMPORTANT: Use persisted state start_time so recovery/restarts don't reset elapsed time.
         status = self.state.get_status()
@@ -509,26 +555,34 @@ class SurveyController:
             start_time = datetime.utcnow()
             logger.warning("Survey state missing start_time; using current time")
 
-        # Schedule next update using persisted last_update_time (so restarts don't delay updates).
-        last_update_raw = status.get('last_update_time')
-        if last_update_raw:
-            try:
-                last_update_time = datetime.fromisoformat(last_update_raw)
-            except Exception:
-                last_update_time = None
+        if self.ppp_ar_enabled:
+            ppp_ar_slots = self._compute_ppp_ar_slots()
+            logger.info(f"Survey loop started, target: {self.target_hours} hours")
+            logger.info(f"PPP-AR enabled: fixed-slot schedule every "
+                        f"{self.PPP_AR_SLOT_INTERVAL_HOURS}h ({ppp_ar_slots}), "
+                        f"final slot handled separately at {self.target_hours}h. "
+                        f"rnx2rtkp/CDDIS is NOT used in this mode.")
         else:
-            last_update_time = None
+            # Schedule next update using persisted last_update_time (so restarts don't delay updates).
+            last_update_raw = status.get('last_update_time')
+            if last_update_raw:
+                try:
+                    last_update_time = datetime.fromisoformat(last_update_raw)
+                except Exception:
+                    last_update_time = None
+            else:
+                last_update_time = None
 
-        elapsed_hours_now = (datetime.utcnow() - start_time).total_seconds() / 3600
-        initial_interval = self.update_schedule['initial_interval']
-        later_interval = self.update_schedule['later_interval']
-        interval = initial_interval if elapsed_hours_now < self.update_schedule['initial_period'] else later_interval
-        next_update = (last_update_time + timedelta(hours=interval)) if last_update_time else (start_time + timedelta(hours=interval))
-        
-        logger.info(f"Survey loop started, target: {self.target_hours} hours")
-        logger.info("Progressive updates: 15min (0-6h) → 1h (6-24h) → final (24h)")
-        logger.info(f"Using RINEX conversion workflow (RTKBase raw logs → RINEX → PPP-static, tier={self.ppp_tier})")
-        
+            elapsed_hours_now = (datetime.utcnow() - start_time).total_seconds() / 3600
+            initial_interval = self.update_schedule['initial_interval']
+            later_interval = self.update_schedule['later_interval']
+            interval = initial_interval if elapsed_hours_now < self.update_schedule['initial_period'] else later_interval
+            next_update = (last_update_time + timedelta(hours=interval)) if last_update_time else (start_time + timedelta(hours=interval))
+
+            logger.info(f"Survey loop started, target: {self.target_hours} hours")
+            logger.info("Progressive updates: 15min (0-6h) → 1h (6-24h) → final (24h)")
+            logger.info(f"Using RINEX conversion workflow (RTKBase raw logs → RINEX → PPP-static, tier={self.ppp_tier})")
+
         try:
             while self._running:
                 # Stop doing work if state is not RUNNING (e.g., paused/reset from UI)
@@ -539,7 +593,13 @@ class SurveyController:
                 now = datetime.utcnow()
                 elapsed_hours = (now - start_time).total_seconds() / 3600
 
-                # Hard timeout: fail if no successful update for too long
+                # Hard timeout: fail if no successful update for too long.
+                # PPP-AR mode uses PPP_AR_UPDATE_TIMEOUT_MINUTES instead of
+                # update_timeout_minutes - the latter is calibrated for the
+                # rnx2rtkp path's much shorter interval-with-retry
+                # schedule and would spuriously trip roughly an hour after
+                # every successful 4h PPP-AR slot (see
+                # PPP_AR_UPDATE_TIMEOUT_MINUTES's own comment).
                 try:
                     st = self.state.get_status()
                     last_success_raw = st.get('last_success_update_time')
@@ -548,11 +608,15 @@ class SurveyController:
                     else:
                         last_success = start_time
                     minutes_since_success = (now - last_success).total_seconds() / 60.0
-                    if minutes_since_success >= float(self.update_timeout_minutes):
+                    effective_timeout_minutes = (
+                        self.PPP_AR_UPDATE_TIMEOUT_MINUTES if self.ppp_ar_enabled
+                        else self.update_timeout_minutes
+                    )
+                    if minutes_since_success >= float(effective_timeout_minutes):
                         reason = st.get('last_failure_reason') or 'No successful coordinate update'
                         msg = (
                             f"No successful coordinate update for {minutes_since_success:.0f} minutes "
-                            f"(timeout={self.update_timeout_minutes}): {reason}"
+                            f"(timeout={effective_timeout_minutes}): {reason}"
                         )
                         logger.error(msg)
                         self._fail(msg)
@@ -560,37 +624,78 @@ class SurveyController:
                         break
                 except Exception as timeout_err:
                     logger.warning(f"Timeout check failed: {timeout_err}")
-                
+
                 # Check if survey completed (use persisted start_time so completion is reliable after restart)
                 if elapsed_hours >= self.target_hours:
                     logger.info(f"Target duration reached ({self.target_hours}h), performing final update...")
                     self._finalize_survey()
                     break
-                
-                # Check if update due
-                if now >= next_update:
-                    # Determine current interval based on elapsed time
-                    if elapsed_hours < self.update_schedule['initial_period']:
-                        interval = self.update_schedule['initial_interval']
-                        logger.info(f"Interim update at {elapsed_hours:.2f}h (15-min schedule)")
-                    else:
-                        interval = self.update_schedule['later_interval']
-                        logger.info(f"Interim update at {elapsed_hours:.2f}h (1-hour schedule)")
 
-                    ok = self._perform_interim_update(elapsed_hours)
+                if self.ppp_ar_enabled:
+                    # Fixed-slot PPP-AR schedule: find all not-yet-attempted
+                    # slots whose time has come. If a restart/downtime lets
+                    # multiple slots become due at once (e.g. both the 4h
+                    # and 8h slots), only the LATEST (highest) one is
+                    # actually run and broadcast - a later slot always has
+                    # more accumulated data and is therefore always more
+                    # accurate, so an older due slot must never run and
+                    # overwrite a newer one, whether in this same tick or
+                    # on a later one. Earlier due-but-unattempted slots are
+                    # marked attempted WITHOUT ever calling
+                    # _run_ppp_ar_interim() for them - they are skipped
+                    # outright, not deferred.
+                    attempted_slots = set(self.state.get_ppp_ar_completed_slots())
+                    due_unattempted = [
+                        s for s in ppp_ar_slots
+                        if s not in attempted_slots and elapsed_hours >= s
+                    ]
+                    if due_unattempted:
+                        latest_due = due_unattempted[-1]
+                        # Skip any earlier due-but-unattempted slots WITHOUT
+                        # running them - a later slot is always more
+                        # accurate (more accumulated data), so an older
+                        # slot must never be applied after a newer one is
+                        # already due. This prevents the catch-up scenario
+                        # where a stale 4h-slot result would overwrite an
+                        # already-applied, more accurate 8h-slot result on
+                        # a later tick.
+                        for stale_slot in due_unattempted[:-1]:
+                            logger.warning(
+                                f"Skipping stale PPP-AR slot={stale_slot}h without "
+                                f"running it - a later slot ({latest_due}h) is also "
+                                f"due now and is always more accurate; never overwrite "
+                                f"newer positioning data with older"
+                            )
+                            self.state.mark_ppp_ar_slot_attempted(stale_slot)
+                        self._run_ppp_ar_interim(elapsed_hours, latest_due)
+                        # Marked attempted regardless of success/failure -
+                        # see _run_ppp_ar_interim()'s docstring.
+                        self.state.mark_ppp_ar_slot_attempted(latest_due)
+                else:
+                    # Check if update due
+                    if now >= next_update:
+                        # Determine current interval based on elapsed time
+                        if elapsed_hours < self.update_schedule['initial_period']:
+                            interval = self.update_schedule['initial_interval']
+                            logger.info(f"Interim update at {elapsed_hours:.2f}h (15-min schedule)")
+                        else:
+                            interval = self.update_schedule['later_interval']
+                            logger.info(f"Interim update at {elapsed_hours:.2f}h (1-hour schedule)")
 
-                    if ok:
-                        next_update = now + timedelta(hours=interval)
-                        logger.info(f"Next update scheduled in {interval*60:.0f} minutes")
-                    else:
-                        # Retry soon instead of waiting the whole interval.
-                        # This makes the schedule 'real' as long as data becomes available.
-                        next_update = now + timedelta(seconds=60)
-                        logger.warning("Update failed; retry scheduled in 60 seconds")
-                
+                        ok = self._perform_interim_update(elapsed_hours)
+
+                        if ok:
+                            next_update = now + timedelta(hours=interval)
+                            logger.info(f"Next update scheduled in {interval*60:.0f} minutes")
+                        else:
+                            # Retry soon instead of waiting the whole interval.
+                            # This makes the schedule 'real' as long as data becomes available.
+                            next_update = now + timedelta(seconds=60)
+                            logger.warning("Update failed; retry scheduled in 60 seconds")
+
                 # Sleep briefly before next check
                 time.sleep(10)  # Check every 10 seconds for faster completion
-                
+
         except Exception as e:
             logger.error(f"Survey loop error: {e}", exc_info=True)
             self._fail(str(e))
@@ -651,6 +756,235 @@ class SurveyController:
     # finalize-time PPP-AR runs (see _run_ppp_ar()'s logging below).
     PPP_AR_MIN_FIX_RATE_PERCENT = 90.0
 
+    # Fixed PPP-AR interim slot interval (hours) - 0h, 4h, 8h, ... up to
+    # (but excluding) target_hours, per Pesho's explicit "fixed absolute
+    # slots, not floating last_success+interval" instruction. The final
+    # slot (target_hours) is handled separately by _finalize_survey(),
+    # never by this interim schedule.
+    PPP_AR_SLOT_INTERVAL_HOURS = 4.0
+
+    # Hard-timeout threshold (minutes) used INSTEAD OF
+    # update_timeout_minutes when self.ppp_ar_enabled - the normal
+    # update_timeout_minutes (default 60min) is calibrated for the
+    # rnx2rtkp path's ~15min/1h interval-with-60s-retry-on-failure
+    # schedule, and would spuriously hard-fail a PPP-AR survey roughly an
+    # hour after every successful 4h slot, since last_success_update_time
+    # legitimately does not change between fixed slots. Set well above
+    # PPP_AR_SLOT_INTERVAL_HOURS so only multiple consecutive missed/
+    # skipped slots (not the normal multi-hour gap between successful
+    # ones) trip it. UNCALIBRATED - a round "2 slot intervals + margin"
+    # choice, not derived from any live PPP-AR failure-rate data.
+    PPP_AR_UPDATE_TIMEOUT_MINUTES = int(PPP_AR_SLOT_INTERVAL_HOURS * 2 * 60) + 60
+
+    def _apply_geodetic_position(self,
+                                  lat: float, lon: float, height: float,
+                                  obs_file: Path,
+                                  is_final: bool,
+                                  ppp_backend: str,
+                                  position_std: Dict[str, float],
+                                  num_epochs: int,
+                                  quality_metrics: Dict,
+                                  extra_position_fields: Optional[Dict] = None) -> bool:
+        """
+        Shared geoid-correction / ITRF2020->BGS2005 transform / RTCM
+        broadcast / state-update pipeline - extracted from _perform_update()'s
+        former Steps 6-9 so BOTH the rnx2rtkp path (_perform_update()) and
+        the PRIDE-PPPAR-only path (_run_ppp_ar_interim()/_finalize_survey()
+        when self.ppp_ar_enabled) can reach an actual RTCM broadcast, not
+        just an in-memory lat/lon/height.
+
+        Before this extraction, PRIDE-PPPAR's result only ever overwrote an
+        rnx2rtkp result's lat/lon/height AFTER _perform_update() had already
+        run the full geoid/BGS2005/broadcast pipeline once - workable only
+        because rnx2rtkp always ran first. A PRIDE-PPPAR-ONLY mode (no
+        rnx2rtkp at all) has no such pipeline run to overwrite, so this
+        method exists to give it one of its own.
+
+        Args:
+            lat, lon, height: raw geodetic position (ITRF2020/WGS84-family
+                datum) BEFORE geoid/BGS2005 processing - rnx2rtkp's
+                estimate.lat/lon/height, or PRIDE-PPPAR's
+                parse_ppp_ar_result()['lat'/'lon'/'height'].
+            obs_file: RINEX observation file this position was derived
+                from - needed for extract_observation_epoch() (BGS2005
+                transform's t_obs).
+            is_final: whether this is the survey's final update.
+            ppp_backend: 'rnx2rtkp' | 'pride-pppar' - recorded verbatim in
+                the position audit trail dict.
+            position_std: dict with std_lat/std_lon/std_height/
+                std_h_meters - caller-supplied since rnx2rtkp's multi-epoch
+                estimator and PRIDE-PPPAR's single-point Sx/Sy/Sz have no
+                common shape; each caller builds what it actually has.
+            num_epochs: epoch count for state's num_epochs field (0/1 for
+                PRIDE-PPPAR's single-point result).
+            quality_metrics: dict merged into state's quality_metrics -
+                caller-supplied for the same reason as position_std.
+            extra_position_fields: additional keys merged into the
+                position dict before it's persisted (e.g. PRIDE-PPPAR's
+                ar_wl_fix_rate/ar_nl_fix_rate) - None for the plain
+                rnx2rtkp path.
+
+        Returns:
+            True on success (broadcast applied, state updated), False on
+            failure (geoid/BGS2005/broadcast problem - caller should treat
+            this the same as any other failed update).
+        """
+        try:
+            # Step 6: Compute orthometric (MSL) height via geoid model.
+            # Per АГКК's official requirement, this IS the height broadcast
+            # via RTCM 1005/1006 below (not ellipsoidal) - see the
+            # fallback behavior below when no geoid model is loaded / the
+            # position is outside grid bounds.
+            h_ortho = self.geoid.ellipsoidal_to_orthometric(lat, lon, height)
+
+            if h_ortho is None:
+                logger.info("No geoid model loaded / position outside grid bounds - orthometric height unavailable")
+            else:
+                geoid_sep = height - h_ortho
+                logger.info(f"Geoid correction: {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m")
+
+            # Step 7: ITRF2020 -> BGS2005 transformation. Per Инструкция №
+            # РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1: relative GNSS
+            # methods (RTK, classified as such in Чл.11) require base
+            # station reference coordinates in BGS2005, not raw ITRF/WGS84.
+            # The transformed position below - NOT the raw lat/lon/height
+            # argument - is what gets broadcast via RTCM.
+            t_obs = extract_observation_epoch(obs_file)
+            if t_obs is None:
+                logger.error("Could not extract observation epoch from RINEX header - "
+                             "cannot perform ITRF2020->BGS2005 transformation")
+                self.state.record_update_failure("Missing RINEX observation epoch for BGS2005 transform")
+                return False
+
+            try:
+                bgs2005 = itrf2020_to_bgs2005(
+                    GeodeticPoint(lat=lat, lon=lon, height=height),
+                    t_obs
+                )
+            except Exception as e:
+                logger.error(f"ITRF2020->BGS2005 transformation failed: {e}", exc_info=True)
+                self.state.record_update_failure(f"BGS2005 transformation failed: {e}")
+                return False
+
+            logger.info(f"Position estimate (BGS2005, t_obs={t_obs:.4f}): "
+                        f"{bgs2005['lat_dd']:.8f}°, {bgs2005['lon_dd']:.8f}°, {bgs2005['height_m']:.3f}m")
+            logger.info(f"BGS2005 broadcast coordinate per {bgs2005['regulation_reference']}")
+
+            # Step 8: Update RTKBase configuration
+            # CRITICAL: broadcast the BGS2005-transformed, ORTHOMETRIC
+            # (MSL/geoid) height (h_ortho from Step 6), never
+            # bgs2005['height_m'] (ellipsoidal) or the raw input height.
+            # This is the value str2str -p embeds into RTCM 1005/1006 for
+            # rover baseline calculations. Per АГКК's official requirement,
+            # base station RTCM broadcast positions must carry orthometric
+            # height computed from the .ggf geoid model, not
+            # ellipsoidal/WGS84 height.
+            #
+            # Fallback: if no geoid model is loaded / the position is
+            # outside the loaded grid's bounds (h_ortho is None), fall back
+            # to ellipsoidal height for this update with an explicit
+            # warning - not a hard failure, since a temporarily-unavailable
+            # geoid correction should not stop the survey from broadcasting
+            # a usable (if height-type-inconsistent) position.
+            broadcast_height_type = 'orthometric'
+            if h_ortho is not None:
+                broadcast_height = h_ortho
+            else:
+                broadcast_height = bgs2005['height_m']
+                broadcast_height_type = 'ellipsoidal'
+                logger.warning(
+                    "No geoid model loaded / position is outside grid "
+                    "bounds - falling back to ellipsoidal height for this "
+                    "update (cannot broadcast orthometric height without a "
+                    "geoid correction to compute it from)."
+                )
+
+            logger.info(f"RTCM broadcast height type this session: {broadcast_height_type} "
+                        f"({broadcast_height:.3f}m)")
+
+            if is_final:
+                logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
+            else:
+                logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates (BGS2005)...")
+
+            if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height):
+                if is_final:
+                    logger.info("✓ Final configuration applied successfully")
+                else:
+                    logger.info("✓ Temporary configuration updated")
+
+                # Restart services on every update so new coords take effect immediately
+                try:
+                    _announce_planned_disconnect(self.rtkbase, "auto_survey")
+                    restart_result = self.restart_rtkbase_services()
+                    if not restart_result.get('success', False):
+                        logger.warning("Service restart reported failure during update")
+                except Exception as restart_err:
+                    logger.error(f"Service restart after update failed: {restart_err}")
+            else:
+                logger.error("Failed to update configuration")
+                self.state.record_update_failure("Failed to update RTKBase settings.conf")
+                return False
+
+            # Step 9: Update state
+            # Explicit float() casts: values coming from rnx2rtkp's
+            # numpy-based estimator would otherwise leak numpy.float64 into
+            # the JSON-serialized state - kept here since this method now
+            # owns that serialization boundary for both backends.
+            #
+            # position['height'] holds the height TYPE ACTUALLY BROADCAST
+            # this update (broadcast_height, computed above - ellipsoidal
+            # by default, or orthometric if broadcast_height_type ==
+            # 'orthometric') - the value actually written to
+            # settings.conf/RTCM. 'height_ellipsoidal' and 'height_msl' are
+            # both always recorded alongside it (regardless of which was
+            # broadcast) for audit purposes, so it is always possible to
+            # tell after the fact which height type a given update
+            # actually sent, and what the other one would have been. The
+            # raw ITRF2020 estimate is likewise kept for display/
+            # diagnostics only, never re-broadcast.
+            position = {
+                'lat': float(bgs2005['lat_dd']),
+                'lon': float(bgs2005['lon_dd']),
+                'height': float(broadcast_height),  # ACTUALLY BROADCAST this update - orthometric (MSL), or ellipsoidal fallback if no geoid model - see broadcast_height_type
+                'broadcast_height_type': broadcast_height_type,  # 'orthometric' (standard) | 'ellipsoidal' (fallback when no geoid model loaded) - audit trail
+                'height_ellipsoidal': float(bgs2005['height_m']),  # BGS2005 ellipsoidal, always recorded regardless of what was broadcast
+                'height_msl': float(h_ortho) if h_ortho is not None else None,  # orthometric (MSL) of the ITRF2020 estimate, always recorded regardless of what was broadcast
+                'coordinate_system': 'BGS2005',
+                'itrf2020_lat': float(lat),
+                'itrf2020_lon': float(lon),
+                'itrf2020_height': float(height),
+                # Which PPP backend produced the broadcast lat/lon/height
+                # above - see _perform_update()/_run_ppp_ar_interim()/
+                # _finalize_survey() callers.
+                'ppp_backend': ppp_backend,
+            }
+            if extra_position_fields:
+                position.update(extra_position_fields)
+
+            self.state.update_progress(
+                position=position,
+                position_std=position_std,
+                num_epochs=num_epochs,
+                quality_metrics=quality_metrics
+            )
+
+            if is_final:
+                logger.info(f"✓ FINAL UPDATE complete ({ppp_backend}) - Epochs: {num_epochs}")
+            else:
+                logger.info(f"✓ Interim update complete ({ppp_backend}) - Epochs: {num_epochs}"
+                            + (" (still converging)" if quality_metrics.get('still_converging') else ""))
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to apply geodetic position: {e}", exc_info=True)
+            try:
+                self.state.record_update_failure(f"Unhandled exception: {e}")
+            except Exception:
+                pass
+            return False
+
     def _perform_update(self, is_final: bool = False) -> bool:
         """
         Perform position update using RINEX + PPP-static workflow:
@@ -660,12 +994,9 @@ class SurveyController:
            rnx2rtkp -p 8 (PPP-static)
         4. Parse position solutions
         5. Estimate mean position with outlier rejection
-        6. Apply geoid correction (display/record only)
-        7. Transform ITRF2020 -> BGS2005 (Инструкция № РД-02-20-25, Чл.22,
-           ал.1 - see bgs2005_transformer.py) - THIS is the coordinate
-           broadcast via RTCM, not the raw ITRF2020 PPP estimate
-        8. Update RTKBase configuration
-        9. Save state
+        6-9. Geoid correction, ITRF2020->BGS2005 transform, RTCM broadcast,
+           state update - delegated to _apply_geodetic_position() (shared
+           with the PRIDE-PPPAR-only path - see that method's docstring).
         """
         try:
             # Step 1: Find latest raw data file
@@ -755,150 +1086,6 @@ class SurveyController:
             logger.info(f"Position estimate (ITRF2020): {estimate.lat:.8f}°, {estimate.lon:.8f}°, {estimate.height:.3f}m")
             logger.info(f"Std: H={estimate.horizontal_std_meters*1000:.1f}mm, V={estimate.std_height*1000:.1f}mm")
 
-            # Step 6: Compute orthometric (MSL) height via geoid model.
-            # Per АГКК's official requirement, this IS the height broadcast
-            # via RTCM 1005/1006 in Step 8 below (not ellipsoidal) - see
-            # Step 8's comment for the fallback behavior when no geoid
-            # model is loaded / the position is outside grid bounds.
-            h_ortho = self.geoid.ellipsoidal_to_orthometric(
-                estimate.lat,
-                estimate.lon,
-                estimate.height
-            )
-
-            if h_ortho is None:
-                logger.info("No geoid model loaded / position outside grid bounds - orthometric height unavailable")
-            else:
-                geoid_sep = estimate.height - h_ortho
-                logger.info(f"Geoid correction: {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m")
-
-            # Step 7: ITRF2020 -> BGS2005 transformation. Per Инструкция №
-            # РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1: relative GNSS
-            # methods (RTK, classified as such in Чл.11) require base
-            # station reference coordinates in BGS2005, not raw ITRF/WGS84.
-            # The transformed position below - NOT estimate.lat/lon/height -
-            # is what gets broadcast via RTCM in Step 8.
-            t_obs = extract_observation_epoch(obs_file)
-            if t_obs is None:
-                logger.error("Could not extract observation epoch from RINEX header - "
-                             "cannot perform ITRF2020->BGS2005 transformation")
-                self.state.record_update_failure("Missing RINEX observation epoch for BGS2005 transform")
-                return False
-
-            try:
-                bgs2005 = itrf2020_to_bgs2005(
-                    GeodeticPoint(lat=estimate.lat, lon=estimate.lon, height=estimate.height),
-                    t_obs
-                )
-            except Exception as e:
-                logger.error(f"ITRF2020->BGS2005 transformation failed: {e}", exc_info=True)
-                self.state.record_update_failure(f"BGS2005 transformation failed: {e}")
-                return False
-
-            logger.info(f"Position estimate (BGS2005, t_obs={t_obs:.4f}): "
-                        f"{bgs2005['lat_dd']:.8f}°, {bgs2005['lon_dd']:.8f}°, {bgs2005['height_m']:.3f}m")
-            logger.info(f"BGS2005 broadcast coordinate per {bgs2005['regulation_reference']}")
-
-            # Step 8: Update RTKBase configuration
-            # CRITICAL: broadcast the BGS2005-transformed, ORTHOMETRIC
-            # (MSL/geoid) height (h_ortho from Step 6), never
-            # bgs2005['height_m'] (ellipsoidal) or estimate.height (raw
-            # ITRF2020). This is the value str2str -p embeds into RTCM
-            # 1005/1006 for rover baseline calculations. Per АГКК's
-            # official requirement, base station RTCM broadcast positions
-            # must carry orthometric height computed from the .ggf geoid
-            # model, not ellipsoidal/WGS84 height.
-            #
-            # Fallback: if no geoid model is loaded / the position is
-            # outside the loaded grid's bounds (h_ortho is None), fall back
-            # to ellipsoidal height for this update with an explicit
-            # warning - not a hard failure, since a temporarily-unavailable
-            # geoid correction should not stop the survey from broadcasting
-            # a usable (if height-type-inconsistent) position.
-            broadcast_height_type = 'orthometric'
-            if h_ortho is not None:
-                broadcast_height = h_ortho
-            else:
-                broadcast_height = bgs2005['height_m']
-                broadcast_height_type = 'ellipsoidal'
-                logger.warning(
-                    "No geoid model loaded / position is outside grid "
-                    "bounds - falling back to ellipsoidal height for this "
-                    "update (cannot broadcast orthometric height without a "
-                    "geoid correction to compute it from)."
-                )
-
-            logger.info(f"RTCM broadcast height type this session: {broadcast_height_type} "
-                        f"({broadcast_height:.3f}m)")
-
-            if is_final:
-                logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
-            else:
-                logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates (BGS2005)...")
-
-            if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height):
-                if is_final:
-                    logger.info("✓ Final configuration applied successfully")
-                else:
-                    logger.info("✓ Temporary configuration updated")
-
-                # Restart services on every update so new coords take effect immediately
-                try:
-                    _announce_planned_disconnect(self.rtkbase, "auto_survey")
-                    restart_result = self.restart_rtkbase_services()
-                    if not restart_result.get('success', False):
-                        logger.warning("Service restart reported failure during update")
-                except Exception as restart_err:
-                    logger.error(f"Service restart after update failed: {restart_err}")
-            else:
-                logger.error("Failed to update configuration")
-                self.state.record_update_failure("Failed to update RTKBase settings.conf")
-                return False
-
-            # Step 9: Update state
-            # Explicit float()/int() casts: estimate.* fields come from numpy
-            # aggregations (np.sum/np.sqrt/np.mean) and would otherwise leak
-            # numpy.float64/numpy.int64 into the JSON-serialized state.
-            #
-            # position['height'] holds the height TYPE ACTUALLY BROADCAST
-            # this update (broadcast_height, computed in Step 8 above -
-            # ellipsoidal by default, or orthometric if
-            # self.broadcast_height_type == 'orthometric') - the value
-            # actually written to settings.conf/RTCM. 'height_ellipsoidal'
-            # and 'height_msl' are both always recorded alongside it
-            # (regardless of which was broadcast) for audit purposes, so
-            # it is always possible to tell after the fact which height
-            # type a given update actually sent, and what the other one
-            # would have been. The raw ITRF2020 PPP estimate is likewise
-            # kept for display/diagnostics only, never re-broadcast.
-            position = {
-                'lat': float(bgs2005['lat_dd']),
-                'lon': float(bgs2005['lon_dd']),
-                'height': float(broadcast_height),  # ACTUALLY BROADCAST this update - orthometric (MSL), or ellipsoidal fallback if no geoid model - see broadcast_height_type
-                'broadcast_height_type': broadcast_height_type,  # 'orthometric' (standard) | 'ellipsoidal' (fallback when no geoid model loaded) - audit trail
-                'height_ellipsoidal': float(bgs2005['height_m']),  # BGS2005 ellipsoidal, always recorded regardless of what was broadcast
-                'height_msl': float(h_ortho) if h_ortho is not None else None,  # orthometric (MSL) of the ITRF2020 estimate, always recorded regardless of what was broadcast
-                'coordinate_system': 'BGS2005',
-                'itrf2020_lat': float(estimate.lat),
-                'itrf2020_lon': float(estimate.lon),
-                'itrf2020_height': float(estimate.height),
-                # Which PPP backend produced the broadcast lat/lon/height
-                # above - 'rnx2rtkp' here always; _finalize_survey()
-                # overwrites this to 'pride-pppar' (plus ar_wl_fix_rate/
-                # ar_nl_fix_rate) if the opt-in PPP-AR step ran and its
-                # fix rate cleared PPP_AR_MIN_FIX_RATE_PERCENT - see
-                # _run_ppp_ar()/_finalize_survey(). Always present so this
-                # field's absence is never ambiguous with "unknown".
-                'ppp_backend': 'rnx2rtkp',
-            }
-
-            position_std = {
-                'std_lat': float(estimate.std_lat),
-                'std_lon': float(estimate.std_lon),
-                'std_height': float(estimate.std_height),
-                'std_h_meters': float(estimate.horizontal_std_meters)
-            }
-
             # PPP-static convergence is slow relative to SPP (see
             # PPP_CONVERGENCE_STD_METERS above) - interim updates whose
             # horizontal std is still above that (unverified placeholder)
@@ -911,9 +1098,9 @@ class SurveyController:
             # property), so the ">" comparison produces numpy.bool_, not a
             # native bool - confirmed live on BaseStation as the cause of
             # "Object of type bool is not JSON serializable" at save_state()
-            # time. Explicit cast here, consistent with the float()/int()
-            # casts already applied to the other numpy-derived
-            # quality_metrics fields below.
+            # time. Explicit cast here, consistent with the float() casts
+            # applied to the other numpy-derived quality_metrics fields
+            # below.
             still_converging = bool((not is_final) and (estimate.horizontal_std_meters > self.PPP_CONVERGENCE_STD_METERS))
 
             # Grep-able std-vs-time data point, logged on every update
@@ -929,28 +1116,32 @@ class SurveyController:
                 f"still_converging={still_converging}"
             )
 
-            quality_metrics = {
-                'mean_sats': float(estimate.mean_sats) if hasattr(estimate, 'mean_sats') else 0,
-                'rejected_epochs': int(estimate.rejected_epochs) if hasattr(estimate, 'rejected_epochs') else 0,
-                'is_final': is_final,  # Mark if this is final or interim
-                'ppp_tier': self.ppp_tier,
-                'still_converging': still_converging,
-            }
-
-            self.state.update_progress(
-                position=position,
-                position_std=position_std,
+            # Steps 6-9 (geoid correction, ITRF2020->BGS2005 transform,
+            # RTCM broadcast, state update) - delegated to the shared
+            # helper (see its docstring for why this is now shared with
+            # the PRIDE-PPPAR-only path).
+            return self._apply_geodetic_position(
+                lat=estimate.lat,
+                lon=estimate.lon,
+                height=estimate.height,
+                obs_file=obs_file,
+                is_final=is_final,
+                ppp_backend='rnx2rtkp',
+                position_std={
+                    'std_lat': float(estimate.std_lat),
+                    'std_lon': float(estimate.std_lon),
+                    'std_height': float(estimate.std_height),
+                    'std_h_meters': float(estimate.horizontal_std_meters),
+                },
                 num_epochs=estimate.num_epochs,
-                quality_metrics=quality_metrics
+                quality_metrics={
+                    'mean_sats': float(estimate.mean_sats) if hasattr(estimate, 'mean_sats') else 0,
+                    'rejected_epochs': int(estimate.rejected_epochs) if hasattr(estimate, 'rejected_epochs') else 0,
+                    'is_final': is_final,
+                    'ppp_tier': self.ppp_tier,
+                    'still_converging': still_converging,
+                },
             )
-
-            if is_final:
-                logger.info(f"✓ FINAL UPDATE complete - Epochs: {estimate.num_epochs}, H_std: {estimate.horizontal_std_meters*1000:.1f}mm")
-            else:
-                logger.info(f"✓ Interim update complete - Epochs: {estimate.num_epochs}, H_std: {estimate.horizontal_std_meters*1000:.1f}mm"
-                            + (" (still converging)" if quality_metrics['still_converging'] else ""))
-
-            return True
 
         except Exception as e:
             logger.error(f"Update failed: {e}", exc_info=True)
@@ -962,43 +1153,49 @@ class SurveyController:
     
     def _run_ppp_ar(self) -> Optional[Dict]:
         """
-        Run PRIDE-PPPAR (pdp3) as an opt-in FINAL ambiguity-resolution
-        step, ONCE, at survey finalization only - never per interim
-        update, per Pesho's explicit RAM-budget instruction for this
-        station.
+        Run PRIDE-PPPAR (pdp3) for ambiguity-resolved PPP-static
+        positioning - the shared worker behind BOTH:
+        - the PRIDE-PPPAR-only interim path (_run_ppp_ar_interim(),
+          fixed-slot schedule, when self.ppp_ar_enabled), and
+        - the finalize-time step (_finalize_survey(), when
+          self.ppp_ar_enabled - either as a pure PRIDE-PPPAR final result,
+          or - in the older, no-longer-default overwrite mode - layered on
+          top of an already-run rnx2rtkp result).
 
         Independently re-locates/re-converts the latest raw GNSS log to
-        RINEX (same Step 1/2 lookup _perform_update() already performed
-        for its own rnx2rtkp run) rather than threading obs_file state
-        through _perform_update() - both self.rtkbase.get_data_file() and
+        RINEX rather than threading obs_file state through
+        _perform_update() - both self.rtkbase.get_data_file() and
         self.rinex.convert_raw_to_rinex_obs() are idempotent lookups
         against the same latest raw file / rinex_dir, so redoing them
-        here is cheap and keeps this method fully self-contained.
+        here is cheap and keeps this method fully self-contained (also
+        needed since, with ppp_ar_enabled=True, _perform_update() never
+        runs at all - see _finalize_survey()/_run_ppp_ar_interim()).
 
         Returns:
-            Dict from PridePpparProcessor.parse_ppp_ar_result() (lat/lon/
-            height/sig0/nobs/wl_fix_rate/nl_fix_rate/...) on success, or
-            None if PRIDE-PPPAR is not installed, the run failed, or no
-            usable result could be parsed - NEVER raises; a failure here
-            must fall back to the existing rnx2rtkp result, not fail the
-            survey.
+            Dict from PridePpparProcessor.parse_ppp_ar_result()
+            (lat/lon/height/sig0/nobs/wl_fix_rate/nl_fix_rate/...), PLUS
+            an 'obs_file' key (the RINEX obs file this result was derived
+            from - needed by callers for _apply_geodetic_position()'s
+            BGS2005 t_obs extraction), on success. None if PRIDE-PPPAR is
+            not installed, no raw data is available yet, the run failed,
+            or no usable result could be parsed - NEVER raises; callers
+            must treat None as "skip this run", not as a fatal error.
         """
         try:
             pride = PridePpparProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
         except Pdp3NotFoundError as e:
-            logger.warning(f"PPP-AR enabled but pdp3 not available - skipping, "
-                            f"falling back to rnx2rtkp result: {e}")
+            logger.warning(f"PPP-AR enabled but pdp3 not available - skipping this run: {e}")
             return None
 
         raw_file = self.rtkbase.get_data_file()
         if not raw_file or not raw_file.exists():
-            logger.warning("PPP-AR: no raw data file found - skipping")
+            logger.warning("PPP-AR: no raw data file found - skipping this run")
             return None
 
         rinex_dir = self.work_dir / "rinex"
         rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
         if not rinex_result:
-            logger.warning("PPP-AR: RINEX conversion failed - skipping")
+            logger.warning("PPP-AR: RINEX conversion failed - skipping this run")
             return None
 
         obs_file, _nav_file = rinex_result
@@ -1006,14 +1203,12 @@ class SurveyController:
         ppp_ar_dir = self.work_dir / "pride_pppar"
         pos_file = pride.process_ppp_ar(obs_file, work_dir=ppp_ar_dir)
         if not pos_file:
-            logger.warning("PPP-AR: pdp3 run failed or produced no result - "
-                            "falling back to rnx2rtkp result")
+            logger.warning("PPP-AR: pdp3 run failed or produced no result - skipping this run")
             return None
 
         result = pride.parse_ppp_ar_result(pos_file)
         if not result:
-            logger.warning("PPP-AR: could not parse pdp3 result - "
-                            "falling back to rnx2rtkp result")
+            logger.warning("PPP-AR: could not parse pdp3 result - skipping this run")
             return None
 
         logger.info(f"PPP-AR result: {result['lat']:.8f}°, {result['lon']:.8f}°, "
@@ -1021,7 +1216,118 @@ class SurveyController:
                     f"wl_fix_rate={result['wl_fix_rate']}, "
                     f"nl_fix_rate={result['nl_fix_rate']}, sig0={result['sig0']}")
 
+        result['obs_file'] = obs_file
         return result
+
+    def _ppp_ar_fix_rate_ok(self, ppp_ar_result: Dict) -> bool:
+        """
+        Whether a PRIDE-PPPAR result's wide-lane/narrow-lane fix rates
+        both clear PPP_AR_MIN_FIX_RATE_PERCENT - shared threshold check
+        used by both _run_ppp_ar_interim() and _finalize_survey().
+        """
+        wl = ppp_ar_result.get('wl_fix_rate')
+        nl = ppp_ar_result.get('nl_fix_rate')
+        return (
+            wl is not None and nl is not None and
+            wl >= self.PPP_AR_MIN_FIX_RATE_PERCENT and
+            nl >= self.PPP_AR_MIN_FIX_RATE_PERCENT
+        )
+
+    def _run_ppp_ar_interim(self, elapsed_hours: float, slot_hours: float) -> bool:
+        """
+        Run one PRIDE-PPPAR-only interim update, for the fixed-slot
+        schedule (_survey_loop(), when self.ppp_ar_enabled) - the
+        PRIDE-PPPAR analogue of _perform_interim_update()/_perform_update(),
+        but using _run_ppp_ar() instead of rnx2rtkp/CDDIS, and applied only
+        if the fix rate clears PPP_AR_MIN_FIX_RATE_PERCENT.
+
+        Never raises, never triggers a retry-sooner reschedule in the
+        caller - per Pesho's explicit "skip this slot entirely, wait for
+        the next fixed slot" instruction (unlike the rnx2rtkp interim
+        path's "retry in 60s on failure" behavior). The caller
+        (_survey_loop()) marks slot_hours as attempted regardless of this
+        method's return value, so a failed/skipped run is never retried
+        before the next fixed slot.
+
+        Args:
+            elapsed_hours: hours elapsed since survey start (for logging).
+            slot_hours: the fixed schedule slot (0, 4, 8, ...) this run
+                corresponds to (for logging).
+
+        Returns:
+            True if a PRIDE-PPPAR position was successfully computed AND
+            applied (broadcast) for this slot, False if skipped for any
+            reason (pdp3 unavailable, run failure, parse failure, fix
+            rate below threshold, or broadcast/state-update failure) -
+            False is the expected, non-alarming outcome for "wait for the
+            next slot", not a survey-level failure.
+        """
+        logger.info(f"=== PPP-AR Interim Update (slot={slot_hours}h, elapsed={elapsed_hours:.2f}h) ===")
+
+        ppp_ar_result = self._run_ppp_ar()
+        if ppp_ar_result is None:
+            logger.warning(f"PPP-AR interim slot={slot_hours}h: no result - "
+                            f"skipping this slot, will retry at the next fixed slot")
+            return False
+
+        if not self._ppp_ar_fix_rate_ok(ppp_ar_result):
+            logger.info(
+                f"PPP-AR interim slot={slot_hours}h: fix rate below threshold "
+                f"(WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
+                f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - skipping this slot"
+            )
+            return False
+
+        logger.info(
+            f"✓ PPP-AR interim slot={slot_hours}h: fix rate cleared threshold "
+            f"(WL={ppp_ar_result['wl_fix_rate']}%, NL={ppp_ar_result['nl_fix_rate']}%) - "
+            f"applying position"
+        )
+
+        applied = self._apply_geodetic_position(
+            lat=ppp_ar_result['lat'],
+            lon=ppp_ar_result['lon'],
+            height=ppp_ar_result['height'],
+            obs_file=ppp_ar_result['obs_file'],
+            is_final=False,
+            ppp_backend='pride-pppar',
+            position_std={
+                # PRIDE-PPPAR's pos_* file reports ECEF-frame Sx/Sy/Sz
+                # (see pride_pppar_processor.py), not local-frame N/E/U
+                # std the way rnx2rtkp's estimator does - no direct
+                # equivalent of std_lat/std_lon/std_height/std_h_meters
+                # is computed here (would require an ECEF->local frame
+                # rotation not otherwise needed by this pipeline). Left
+                # as 0.0 placeholders rather than fabricating a
+                # conversion; sig0 (in quality_metrics below) is the real
+                # per-run quality signal for this backend.
+                'std_lat': 0.0,
+                'std_lon': 0.0,
+                'std_height': 0.0,
+                'std_h_meters': 0.0,
+            },
+            num_epochs=int(ppp_ar_result.get('nobs', 0)),
+            quality_metrics={
+                'is_final': False,
+                'ppp_tier': self.ppp_tier,
+                'still_converging': False,  # PRIDE-PPPAR is a single-point AR solution, not an accumulating estimator - no analogous "still converging" state
+                'ppp_ar_sig0': ppp_ar_result.get('sig0'),
+                'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+                'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+            },
+            extra_position_fields={
+                'ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+                'ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+            },
+        )
+
+        if not applied:
+            logger.warning(f"PPP-AR interim slot={slot_hours}h: broadcast/state update failed - "
+                            f"skipping this slot")
+            return False
+
+        return True
 
     def _finalize_survey(self):
         """
@@ -1033,15 +1339,23 @@ class SurveyController:
         5. Restart main service to apply new coordinates
         6. Stop file logging to prevent disk space issues
 
-        If self.ppp_ar_enabled: after the normal rnx2rtkp-based final
-        update (step 2), ALSO runs PRIDE-PPPAR once (_run_ppp_ar()) and,
-        if its wide-lane/narrow-lane fix rates both clear
-        PPP_AR_MIN_FIX_RATE_PERCENT, overwrites the just-computed final
-        position (in-memory and in state) with PRIDE-PPPAR's
-        ambiguity-resolved position before it gets broadcast/applied
-        below - never a hard failure either way; any PPP-AR problem
-        (not installed, run failure, parse failure, fix rate below
-        threshold) simply leaves the existing rnx2rtkp position in place.
+        ARCHITECTURE: if self.ppp_ar_enabled, this is a PRIDE-PPPAR-ONLY
+        survey end to end - step 2's rnx2rtkp/CDDIS final update
+        (_perform_update(is_final=True)) is SKIPPED ENTIRELY, not merely
+        overwritten afterward (that was the OLD behavior, before this was
+        made a full architectural switch rather than an overlay). Only
+        _run_ppp_ar() runs, and only if its wide-lane/narrow-lane fix
+        rates both clear PPP_AR_MIN_FIX_RATE_PERCENT is its result applied
+        via _apply_geodetic_position() (the same shared broadcast/state
+        pipeline _perform_update() uses). If PRIDE-PPPAR is unavailable,
+        fails, or its fix rate doesn't clear the threshold, this survey's
+        final update simply does not happen this run - there is no
+        rnx2rtkp result to fall back to any more when ppp_ar_enabled is
+        True (by design - see this session's explicit instruction). Any
+        previously-recorded current_position (e.g. from PRIDE-PPPAR
+        interim slots via _run_ppp_ar_interim()) is still used as the
+        completed-survey position via before_pos below, so a failed FINAL
+        run does not necessarily mean an empty result.
         """
         try:
             logger.info("=" * 60)
@@ -1052,74 +1366,65 @@ class SurveyController:
             before_status = self.state.get_status()
             before_pos = before_status.get('current_position')
 
-            # Perform final update with all accumulated data
-            self._perform_update(is_final=True)
-
-            # Opt-in PRIDE-PPPAR final AR step - ONCE, here, never per
-            # interim update. Runs after the normal rnx2rtkp final update
-            # above so there is always an rnx2rtkp result to fall back to
-            # if PPP-AR is unavailable/fails/doesn't clear the fix-rate
-            # threshold.
             if self.ppp_ar_enabled:
+                # PRIDE-PPPAR-ONLY final update - rnx2rtkp/CDDIS is never
+                # invoked when ppp_ar_enabled is True (see docstring).
+                logger.info("PPP-AR enabled: running PRIDE-PPPAR-only final update (rnx2rtkp/CDDIS skipped)")
                 try:
                     ppp_ar_result = self._run_ppp_ar()
-                    if ppp_ar_result is not None:
-                        wl = ppp_ar_result.get('wl_fix_rate')
-                        nl = ppp_ar_result.get('nl_fix_rate')
-                        fix_rate_ok = (
-                            wl is not None and nl is not None and
-                            wl >= self.PPP_AR_MIN_FIX_RATE_PERCENT and
-                            nl >= self.PPP_AR_MIN_FIX_RATE_PERCENT
+                    if ppp_ar_result is None:
+                        logger.warning(
+                            "PPP-AR final run produced no result - no final update this run "
+                            "(any prior interim PRIDE-PPPAR position, if any, is still used below)"
                         )
-                        if fix_rate_ok:
-                            current_status = self.state.get_status()
-                            current_pos = current_status.get('current_position')
-                            if current_pos:
-                                logger.info(
-                                    f"✓ PPP-AR fix rate cleared threshold "
-                                    f"(WL={wl}%, NL={nl}% >= "
-                                    f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - "
-                                    f"using PRIDE-PPPAR position for final broadcast"
-                                )
-                                # PRIDE-PPPAR's ECEF->geodetic result is on
-                                # the same ITRF/WGS84-family geodetic
-                                # datum rnx2rtkp's estimate.lat/lon/height
-                                # already was before BGS2005 transform -
-                                # overwrite just the broadcast lat/lon/
-                                # height fields, keep every other
-                                # already-computed audit field
-                                # (broadcast_height_type, itrf2020_*, etc)
-                                # as-is since those describe the transform
-                                # pipeline, not which backend fed it.
-                                current_pos['lat'] = ppp_ar_result['lat']
-                                current_pos['lon'] = ppp_ar_result['lon']
-                                current_pos['height'] = ppp_ar_result['height']
-                                current_pos['ppp_backend'] = 'pride-pppar'
-                                current_pos['ar_wl_fix_rate'] = wl
-                                current_pos['ar_nl_fix_rate'] = nl
-                                self.state.update_progress(
-                                    position=current_pos,
-                                    position_std=current_status.get('position_std') or {},
-                                    num_epochs=current_status.get('num_epochs', 0),
-                                    quality_metrics=current_status.get('quality_metrics', {}),
-                                )
-                            else:
-                                logger.warning(
-                                    "PPP-AR fix rate cleared threshold but no "
-                                    "current_position to overwrite - keeping rnx2rtkp result"
-                                )
-                        else:
-                            logger.info(
-                                f"PPP-AR fix rate below threshold "
-                                f"(WL={wl}%, NL={nl}%, need >= "
-                                f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - "
-                                f"keeping rnx2rtkp result for final broadcast"
-                            )
+                    elif not self._ppp_ar_fix_rate_ok(ppp_ar_result):
+                        logger.warning(
+                            f"PPP-AR final run: fix rate below threshold "
+                            f"(WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                            f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
+                            f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - no final update this run"
+                        )
+                    else:
+                        logger.info(
+                            f"✓ PPP-AR final run: fix rate cleared threshold "
+                            f"(WL={ppp_ar_result['wl_fix_rate']}%, "
+                            f"NL={ppp_ar_result['nl_fix_rate']}%) - applying final position"
+                        )
+                        self._apply_geodetic_position(
+                            lat=ppp_ar_result['lat'],
+                            lon=ppp_ar_result['lon'],
+                            height=ppp_ar_result['height'],
+                            obs_file=ppp_ar_result['obs_file'],
+                            is_final=True,
+                            ppp_backend='pride-pppar',
+                            position_std={
+                                # Same "no direct N/E/U std available"
+                                # caveat as _run_ppp_ar_interim() - see
+                                # that method's comment.
+                                'std_lat': 0.0,
+                                'std_lon': 0.0,
+                                'std_height': 0.0,
+                                'std_h_meters': 0.0,
+                            },
+                            num_epochs=int(ppp_ar_result.get('nobs', 0)),
+                            quality_metrics={
+                                'is_final': True,
+                                'ppp_tier': self.ppp_tier,
+                                'still_converging': False,
+                                'ppp_ar_sig0': ppp_ar_result.get('sig0'),
+                                'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+                                'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+                            },
+                            extra_position_fields={
+                                'ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+                                'ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+                            },
+                        )
                 except Exception as ppp_ar_err:
-                    # Never let a PPP-AR problem fail the survey - the
-                    # rnx2rtkp final update above already succeeded (or
-                    # didn't, independently of this).
-                    logger.error(f"PPP-AR step failed (falling back to rnx2rtkp result): {ppp_ar_err}", exc_info=True)
+                    logger.error(f"PPP-AR final step failed: {ppp_ar_err}", exc_info=True)
+            else:
+                # Standard rnx2rtkp/CDDIS final update - unchanged.
+                self._perform_update(is_final=True)
 
             # Get current state
             status = self.state.get_status()
