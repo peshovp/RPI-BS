@@ -284,8 +284,8 @@ echo "==========================================================================
 # Idempotent: skipped entirely if ~/.PRIDE_PPPAR_BIN/pdp3 already exists and
 # is executable (this is PRIDE-PPPAR's OWN install convention, not something
 # this project chose - see pride_pppar_processor.py's find_pdp3()), so
-# re-running install.sh never re-clones/rebuilds the ~1.65GiB repo, which is
-# slow on a Pi 3B.
+# re-running install.sh never re-copies/rebuilds the vendored source, which
+# is slow to build (Fortran) on a Pi 3B.
 #
 # Install-user/home resolution matches the SAME "${SUDO_USER:-$USER}"
 # convention already used for tools/copy_unit.sh's --user argument at
@@ -296,23 +296,30 @@ PRIDE_PPPAR_USER_HOME="$(getent passwd "$PRIDE_PPPAR_USER" | cut -d: -f6)"
 PRIDE_PPPAR_USER_HOME="${PRIDE_PPPAR_USER_HOME:-/root}"
 PRIDE_PPPAR_BIN="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN/pdp3"
 
+# Vendored source (addons/PRIDE-PPPAR/, committed to this repo) - no longer
+# cloned from GitHub at install time. PrideLab/PRIDE-PPPAR's own install.sh
+# writes build outputs into ./src (make/make install) and reads
+# ./table/config_template, so it must run from a writable COPY of the
+# vendored tree, not directly against this repo's checkout (which must stay
+# clean/read-only from install.sh's perspective) - copied into the install
+# user's home directory, same target path ($PRIDE_PPPAR_USER_HOME/PRIDE-PPPAR)
+# the old clone step used, just populated by cp now instead of git clone.
+# This also removes the prior network-dependency entirely (no more
+# GitHub clone, no more transient "Could not resolve host" failures at
+# remote sites like BaseStation - see the removed retry logic this
+# replaces).
+PRIDE_PPPAR_VENDORED_SRC="$SCRIPT_DIR/addons/PRIDE-PPPAR"
+PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
+
 if [ -x "$PRIDE_PPPAR_BIN" ]; then
     echo "✓ PRIDE-PPPAR already installed at $PRIDE_PPPAR_BIN - skipping build."
+elif [ ! -d "$PRIDE_PPPAR_VENDORED_SRC/src" ]; then
+    echo "WARNING: vendored PRIDE-PPPAR source not found at $PRIDE_PPPAR_VENDORED_SRC - skipping (this is an opt-in feature)." >&2
+    echo "rnx2rtkp PPP-static remains fully functional regardless." >&2
 else
-    PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
-    # CRITICAL: clone into the install user's home directory, NOT /tmp -
-    # /tmp is tmpfs with only ~453MB on these Pi boards, far too small for
-    # the ~1.65GiB PRIDE-PPPAR repo (confirmed on BaseStation, Pi 3B).
-    # NOTE: PrideLab/PRIDE-PPPAR has no semver-style release tags (confirmed
-    # via `git ls-remote --tags` - only three date-stamped tags exist:
-    # 2022-04-07/2023-03-31/2023-09-28, none matching "v3.2.x"). Cloning the
-    # default branch (master, confirmed via `git ls-remote --symref ... HEAD`)
-    # instead of a specific tag - this is what the original manual install on
-    # BaseStation actually did too (no tag was pinned there either), just made
-    # explicit here rather than assumed.
-    echo "Cloning PrideLab/PRIDE-PPPAR (default branch) into $PRIDE_PPPAR_REPO_DIR..."
-    if sudo -u "$PRIDE_PPPAR_USER" git clone --depth 1 \
-        https://github.com/PrideLab/PRIDE-PPPAR.git "$PRIDE_PPPAR_REPO_DIR"; then
+    echo "Copying vendored PRIDE-PPPAR source into $PRIDE_PPPAR_REPO_DIR..."
+    rm -rf "$PRIDE_PPPAR_REPO_DIR"
+    if sudo -u "$PRIDE_PPPAR_USER" cp -r "$PRIDE_PPPAR_VENDORED_SRC" "$PRIDE_PPPAR_REPO_DIR"; then
 
         # CRITICAL BUILD FIX: gfortran 14.2.0 (Debian 14.2.0-19, aarch64) has
         # a genuine internal compiler error (segfault during the "fre"
@@ -338,9 +345,11 @@ else
         if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
             if [ -x "$PRIDE_PPPAR_BIN" ]; then
                 echo "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
-                # No git tag was pinned (see clone step's comment - upstream
-                # has none), so the actually-installed version can only be
-                # confirmed by reading the repo's own self-reported version
+                # No git tag is pinned upstream (PrideLab/PRIDE-PPPAR has no
+                # semver-style release tags - vendored source is simply
+                # whatever snapshot was committed to addons/PRIDE-PPPAR/), so
+                # the actually-installed version can only be confirmed by
+                # reading the vendored tree's own self-reported version
                 # string, per its README.md header line (confirmed live,
                 # e.g. "## PRIDE-PPPAR ver. 3.2.11 (last updated on
                 # 2026-09-20)") - logged explicitly so every install/update
@@ -363,7 +372,7 @@ else
             echo "Investigate manually at $PRIDE_PPPAR_REPO_DIR if PRIDE-PPPAR ambiguity resolution is needed on this station." >&2
         fi
     else
-        echo "WARNING: PRIDE-PPPAR clone failed (network issue?) - continuing install (this is an opt-in feature)." >&2
+        echo "WARNING: failed to copy vendored PRIDE-PPPAR source to $PRIDE_PPPAR_REPO_DIR - continuing install (this is an opt-in feature)." >&2
         echo "rnx2rtkp PPP-static remains fully functional regardless." >&2
     fi
 fi

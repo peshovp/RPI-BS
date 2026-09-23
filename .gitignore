@@ -8,6 +8,12 @@ settings.conf
 /log/*
 test.sh
 test.conf
+# Exception to the test.sh rule above: PRIDE-PPPAR's own vendored install.sh
+# (addons/PRIDE-PPPAR/install.sh) requires example/test.sh to exist (it globs
+# `./example/*.sh` unconditionally, before the non-interactive "run tests?"
+# prompt is even answered) - this is the upstream test harness entry point,
+# not this project's own test.sh convention the blanket rule above targets.
+!/addons/PRIDE-PPPAR/example/test.sh
 *.FCStd1
 **/venv*/*
 **/build/

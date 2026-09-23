@@ -173,16 +173,26 @@ PRIDE_PPPAR_USER_HOME="$(getent passwd "$PRIDE_PPPAR_USER" | cut -d: -f6)"
 PRIDE_PPPAR_USER_HOME="${PRIDE_PPPAR_USER_HOME:-/root}"
 PRIDE_PPPAR_BIN="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN/pdp3"
 
+# Vendored source (addons/PRIDE-PPPAR/, committed to this repo) - no longer
+# cloned from GitHub at update time. Mirrors install.sh's own PRIDE-PPPAR
+# step exactly: PrideLab/PRIDE-PPPAR's own install.sh writes build outputs
+# into ./src and reads ./table/config_template, so it must run from a
+# writable COPY of the vendored tree, not directly against this repo's
+# checkout - copied into the install user's home directory. This also
+# removes the prior network dependency entirely (no more GitHub clone, no
+# more transient "Could not resolve host" failures at remote sites like
+# BaseStation - see the removed retry logic this replaces).
+PRIDE_PPPAR_VENDORED_SRC="$DEV_REPO_PATH/addons/PRIDE-PPPAR"
+
 if [ -x "$PRIDE_PPPAR_BIN" ]; then
     log_status "info" "✓ PRIDE-PPPAR already installed at $PRIDE_PPPAR_BIN - skipping build"
+elif [ ! -d "$PRIDE_PPPAR_VENDORED_SRC/src" ]; then
+    log_status "info" "⚠ vendored PRIDE-PPPAR source not found at $PRIDE_PPPAR_VENDORED_SRC - skipping (opt-in feature, rnx2rtkp unaffected)"
 else
     PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
-    # NOTE: no semver-style release tags exist upstream - see install.sh's
-    # matching comment for the confirmed `git ls-remote --tags` evidence.
-    # Cloning the default branch (master), matching install.sh.
-    log_status "info" "Cloning PrideLab/PRIDE-PPPAR (default branch) into $PRIDE_PPPAR_REPO_DIR..."
-    if sudo -u "$PRIDE_PPPAR_USER" git clone --depth 1 \
-        https://github.com/PrideLab/PRIDE-PPPAR.git "$PRIDE_PPPAR_REPO_DIR" 2>&1 | tee -a /tmp/ota_update.log; then
+    log_status "info" "Copying vendored PRIDE-PPPAR source into $PRIDE_PPPAR_REPO_DIR..."
+    rm -rf "$PRIDE_PPPAR_REPO_DIR"
+    if sudo -u "$PRIDE_PPPAR_USER" cp -r "$PRIDE_PPPAR_VENDORED_SRC" "$PRIDE_PPPAR_REPO_DIR" 2>&1 | tee -a /tmp/ota_update.log; then
 
         log_status "info" "Applying -O0 workaround for gfortran aarch64 ICE..."
         find "$PRIDE_PPPAR_REPO_DIR" -name Makefile -exec sed -i 's/-O3/-O0/g; s/-O2/-O0/g; s/-O1/-O0/g' {} \;
@@ -193,9 +203,10 @@ else
         if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh') 2>&1 | tee -a /tmp/ota_update.log; then
             if [ -x "$PRIDE_PPPAR_BIN" ]; then
                 log_status "info" "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
-                # No git tag pinned upstream - see install.sh's matching
-                # comment. Detect and log the actually-installed version
-                # from the repo's own README.md self-report.
+                # No git tag is pinned upstream (vendored source is simply
+                # whatever snapshot was committed to addons/PRIDE-PPPAR/).
+                # Detect and log the actually-installed version from the
+                # vendored tree's own README.md self-report.
                 detected_version=$(grep -oE 'PRIDE-PPPAR ver\.? [0-9]+\.[0-9]+(\.[0-9]+)?' "$PRIDE_PPPAR_REPO_DIR/README.md" 2>/dev/null | head -1)
                 if [ -n "$detected_version" ]; then
                     log_status "info" "PRIDE-PPPAR version installed: $detected_version"
@@ -209,7 +220,7 @@ else
             log_status "info" "⚠ PRIDE-PPPAR build failed - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
         fi
     else
-        log_status "info" "⚠ PRIDE-PPPAR clone failed (network issue?) - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
+        log_status "info" "⚠ failed to copy vendored PRIDE-PPPAR source to $PRIDE_PPPAR_REPO_DIR - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
     fi
 fi
 
