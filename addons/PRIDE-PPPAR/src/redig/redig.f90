@@ -159,7 +159,7 @@ program redig
     if (intv .lt. 0.d0 .or. cutemod(intv, RCF%dintv) .ne. 0.d0) cycle
     iepo = nint(intv/RCF%dintv) + 1
     if (iepo .gt. nepo .or. iepo .lt. 1) then
-      write (*, '(a,i5,f10.2,a,i12,a,f20.4,a,i8,a,i4,5i3,f11.7)') &
+      write (*, '(a,i5,f10.2,a,i12,a,f20.4,a,i8,a,i4,4i3,f11.7)') &
         '###DEBUG(redig): bad iepo at jdb/tb=', jdb, tb, ' iepo=', iepo, &
         ' intv=', intv, ' nepo=', nepo, ' from TIM line: ', iy, imon, id, ih, im, sec
       write (*, '(a,i5,f10.2)') '%%%MESSAGE(redig): log file truncated at ', jdb, tb
