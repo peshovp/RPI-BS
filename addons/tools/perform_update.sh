@@ -31,8 +31,18 @@ git config --system --replace-all safe.directory "$DEV_REPO_PATH" 2>/dev/null ||
 log_status() {
     local status="$1"
     local message="$2"
+
+    # STATUS_FILE is optional - empty when this script is run manually
+    # without a second argument (confirmed live: an empty string makes
+    # Python's Path('') resolve to '.', the current directory, which
+    # exists() as True but then fails open(status_file, 'r') with
+    # "IsADirectoryError: [Errno 21] Is a directory: '.'" on every single
+    # log_status call - skip the JSON status write entirely rather than
+    # hitting that every time.
+    [ -z "$STATUS_FILE" ] && return 0
+
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%6N")
-    
+
     # Append to log
     python3 -c "
 import json
@@ -262,17 +272,28 @@ PRIDE_PPPAR_VENDORED_SRC="$DEV_REPO_PATH/addons/PRIDE-PPPAR"
 # this step forever (the old `[ -x "$PRIDE_PPPAR_BIN" ]`-only check), so a
 # future fix to vendored PRIDE-PPPAR source (e.g. a redig.f90 segfault fix)
 # would never reach an already-installed station through the normal OTA
-# path. Hash covers only the files that actually affect the build (src/,
-# install.sh, README.md - not table/ or example/, so unrelated churn there
-# doesn't force needless rebuilds).
-PRIDE_PPPAR_HASH_FILE="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN/.vendored_src_hash"
+# path.
+#
+# CONFIRMED LIVE BUG (BaseStation, 2026-09-24): an earlier version of this
+# hash restricted itself to src/, install.sh, and README.md only - but the
+# igs.gnsswhu.cn timeout fix (commit dd9f0bd) lives in scripts/pdp3.sh,
+# which that filter did NOT cover, so the hash never changed and the
+# rebuild was silently skipped despite the vendored source having
+# genuinely changed. Hashing the ENTIRE vendored tree (no path filter)
+# instead, so no future file added/changed anywhere under
+# addons/PRIDE-PPPAR/ can silently bypass this check again.
+PRIDE_PPPAR_HASH_FILE="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN/.source_hash"
 PRIDE_PPPAR_CURRENT_HASH=""
 if [ -d "$PRIDE_PPPAR_VENDORED_SRC" ]; then
-    PRIDE_PPPAR_CURRENT_HASH=$(find "$PRIDE_PPPAR_VENDORED_SRC" -type f \( -path "*/src/*" -o -name "install.sh" -o -name "README.md" \) -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+    PRIDE_PPPAR_CURRENT_HASH=$(find "$PRIDE_PPPAR_VENDORED_SRC" -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
 fi
 
 PRIDE_PPPAR_NEEDS_BUILD=1
-if [ -x "$PRIDE_PPPAR_BIN" ] && [ -f "$PRIDE_PPPAR_HASH_FILE" ] && [ "$(cat "$PRIDE_PPPAR_HASH_FILE" 2>/dev/null)" = "$PRIDE_PPPAR_CURRENT_HASH" ]; then
+PRIDE_PPPAR_STORED_HASH=""
+if [ -f "$PRIDE_PPPAR_HASH_FILE" ]; then
+    PRIDE_PPPAR_STORED_HASH="$(cat "$PRIDE_PPPAR_HASH_FILE" 2>/dev/null)"
+fi
+if [ -x "$PRIDE_PPPAR_BIN" ] && [ -n "$PRIDE_PPPAR_STORED_HASH" ] && [ "$PRIDE_PPPAR_STORED_HASH" = "$PRIDE_PPPAR_CURRENT_HASH" ]; then
     PRIDE_PPPAR_NEEDS_BUILD=0
 fi
 
@@ -281,6 +302,14 @@ if [ "$PRIDE_PPPAR_NEEDS_BUILD" -eq 0 ]; then
 elif [ ! -d "$PRIDE_PPPAR_VENDORED_SRC/src" ]; then
     log_status "info" "⚠ vendored PRIDE-PPPAR source not found at $PRIDE_PPPAR_VENDORED_SRC - skipping (opt-in feature, rnx2rtkp unaffected)"
 else
+    if [ -x "$PRIDE_PPPAR_BIN" ]; then
+        # Binary exists but the vendored source hash has changed since the
+        # last build (or no marker was ever recorded) - this is the case
+        # the live BaseStation bug hit: a real fix landed in
+        # addons/PRIDE-PPPAR/ but was never rebuilt because the old hash
+        # filter didn't cover the changed file.
+        log_status "info" "PRIDE-PPPAR vendored source has changed since last build (or no build record found) - rebuilding..."
+    fi
     PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
     log_status "info" "Copying vendored PRIDE-PPPAR source into $PRIDE_PPPAR_REPO_DIR..."
     rm -rf "$PRIDE_PPPAR_REPO_DIR"
