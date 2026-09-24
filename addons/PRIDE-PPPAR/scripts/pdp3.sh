@@ -3200,8 +3200,27 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
         [[ "$abs_atx" =~ \.(ATX|atx)$ ]] || abs_atx="${abs_atx}.atx"
         echo -e "$MSGINF Prepare IGS ANTEX file: $abs_atx ..."
     else
-        [[ "$OFFLINE" == "NO" ]] && abs_atx=$(curl https://files.igs.org/pub/station/general/ | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
-        [ -n "$abs_atx" ] || abs_atx=$(ls "$table_dir" | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
+        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+        # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
+        # so this timeout is never silently dropped on a future re-vendor
+        # from a new upstream snapshot). Confirmed live on BaseStation
+        # 2026-09-24: this curl call (listing files.igs.org's directory to
+        # find the latest igsNN_NNNN.atx name) had NO timeout flags at all,
+        # unlike every other network call in this script, which goes
+        # through WgetDownload()'s own timeout handling. On network
+        # instability this could hang indefinitely instead of failing fast
+        # into the local table_dir cache fallback on the next line.
+        # --connect-timeout 10 --max-time 20 -s: short and quiet, since
+        # this is a small directory listing request, not a file download -
+        # WgetDownload()'s much more generous timeouts (used for the actual
+        # ANTEX file transfer below, if the cache miss) don't apply here.
+        [[ "$OFFLINE" == "NO" ]] && abs_atx=$(curl --connect-timeout 10 --max-time 20 -s https://files.igs.org/pub/station/general/ | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
+        if [ -z "$abs_atx" ]; then
+            abs_atx=$(ls "$table_dir" | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
+            if [ -n "$abs_atx" ]; then
+                echo -e "$MSGWAR files.igs.org listing unavailable (network issue?) - using cached/possibly outdated ANTEX $abs_atx from $table_dir instead"
+            fi
+        fi
         echo -e "$MSGINF Prepare IGS ANTEX file: $abs_atx ..."
         echo -e "$MSGWAR no PCO/PCV model specified in clock product $clk, use $table_dir/$abs_atx instead"
     fi
