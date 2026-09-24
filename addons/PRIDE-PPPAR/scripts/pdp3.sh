@@ -3548,7 +3548,19 @@ WgetDownload() { # purpose : download a file with wget
     local curl_ver=$(curl --version | head -n 1 | awk '{print $2}')
     local wget_ver=$(wget --version | head -n 1 | awk '{print $3}')
    if [[ "$url" == *bdspride* ]]; then
-        arg="--ftp-ssl -k --progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 60 -O"
+        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+        # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
+        # so the "-4" below is never silently dropped on a future re-vendor
+        # from a new upstream snapshot). Confirmed live on BaseStation
+        # 2026-09-24: this system has no real IPv6 route (`getent ahostsv6
+        # bdspride.com` returns only an IPv4-mapped address, ::ffff:.../128,
+        # not a genuine AAAA record). Without "-4", curl intermittently
+        # attempts IPv6 resolution/connect to bdspride.com first and hangs
+        # until "Resolving timed out" before falling back to IPv4 (confirmed
+        # live: 2/2 manual curl tests succeeded, but an earlier run saw 3/3
+        # fail the same way - genuinely intermittent, not deterministic).
+        # "-4" forces IPv4-only and eliminates the hang.
+        arg="--ftp-ssl -k --progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 60 -4 -O"
         local cmd="curl $arg $url"
         echo "$cmd" | bash
     elif [[ $wget_ver =~ ^1(\.[0-9]+){0,2}$ ]]; then
