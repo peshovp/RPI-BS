@@ -158,7 +158,10 @@ program redig
     intv = timdif(jdb, tb, RCF%jd0, RCF%sod0)
     if (intv .lt. 0.d0 .or. cutemod(intv, RCF%dintv) .ne. 0.d0) cycle
     iepo = nint(intv/RCF%dintv) + 1
-    if (iepo .gt. nepo) then
+    if (iepo .gt. nepo .or. iepo .lt. 1) then
+      write (*, '(a,i5,f10.2,a,i12,a,f20.4,a,i8,a,i4,5i3,f11.7)') &
+        '###DEBUG(redig): bad iepo at jdb/tb=', jdb, tb, ' iepo=', iepo, &
+        ' intv=', intv, ' nepo=', nepo, ' from TIM line: ', iy, imon, id, ih, im, sec
       write (*, '(a,i5,f10.2)') '%%%MESSAGE(redig): log file truncated at ', jdb, tb
       exit
     end if
@@ -173,6 +176,11 @@ program redig
       read (line, *) iprn
       isat = pointer_string(RCF%nprn, RCF%prn, iprn)
       if (isat .eq. 0) cycle
+      if (isat .lt. 1 .or. isat .gt. RCF%nprn) then
+        write (*, '(a,i8,a,a3,a,i8)') '###DEBUG(redig): isat OOB=', isat, &
+          ' iprn=', iprn, ' at iepo=', iepo
+        cycle
+      end if
       rhd(isat, iepo) = line(61:len_trim(line))
     end do
   end do
