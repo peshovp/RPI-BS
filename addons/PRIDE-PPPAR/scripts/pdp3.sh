@@ -2362,11 +2362,25 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
                     echo -e "$MSGWAR PrepareProducts: failed to download RAP satellite orbit product $cmp, try downloading RTS products"
                     if [ -f "$product_cmn_dir/$cmp" ]; then
                         size_last=$(ls -l "$product_cmn_dir/$cmp" | awk '{print($5)}')
-                        size_next=$(curl "$(dirname $url)/" | grep "$sp3" | awk '{print($5)}')
-                        if [ $? -eq 0 ]; then
-                            if [ "$size_next" -gt "$size_last" ]; then
-                                rm -f "$sp3"* "$product_cmn_dir/$sp3"*
-                            fi
+                        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR
+                        # behavior - addons/PRIDE-PPPAR/ is vendored upstream source;
+                        # keep this comment so this fix is never silently dropped on
+                        # a future re-vendor). Same class of bug as the CLK/ERP/OSB
+                        # branches elsewhere in this function: this curl call
+                        # (listing the RTS directory to find this file's remote
+                        # size) had no timeout flags, and its result was never
+                        # validated as numeric before the `-gt` comparison - on a
+                        # DNS/network failure size_next comes back empty, crashing
+                        # that comparison with "[: : integer expression expected"
+                        # (non-fatal since this script has no `set -e`, but it
+                        # silently skipped the size check every time). This SP3
+                        # branch happened not to hit this in the live run that
+                        # surfaced the bug (the CLK branch did), but the same fix
+                        # applies here for consistency and to prevent a future
+                        # occurrence.
+                        size_next=$(curl --connect-timeout 10 --max-time 20 -s "$(dirname $url)/" | grep "$sp3" | awk '{print($5)}')
+                        if [[ "$size_next" =~ ^[0-9]+$ ]] && [ "$size_next" -gt "$size_last" ]; then
+                            rm -f "$sp3"* "$product_cmn_dir/$sp3"*
                         fi
                     fi
                     CopyOrDownloadProduct "$product_cmn_dir/$sp3"
@@ -2510,11 +2524,17 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
                     echo -e "$MSGWAR PrepareProducts: failed to download RAP satellite clock product $cmp, try downloading RTS products"
                     if [ -f "$product_cmn_dir/$cmp" ]; then
                         size_last=$(ls -l "$product_cmn_dir/$cmp" | awk '{print($5)}')
-                        size_next=$(curl "$(dirname $url)/" | grep "$clk" | awk '{print($5)}')
-                        if [ $? -eq 0 ]; then
-                            if [ "$size_next" -gt "$size_last" ]; then
-                                rm -f "$clk"* "$product_cmn_dir/$clk"*
-                            fi
+                        # LOCAL DOWNSTREAM PATCH - see the identical fix's full
+                        # explanation on the OSB/FCB branch below this one
+                        # (CONFIRMED LIVE BUG on BaseStation 2026-09-24: no
+                        # timeout, unvalidated numeric comparison that crashed
+                        # with "[: : integer expression expected" on network
+                        # failure - this exact CLK path was the one that
+                        # actually fired live and led straight into the
+                        # garbage MJD-0 pos/res output).
+                        size_next=$(curl --connect-timeout 10 --max-time 20 -s "$(dirname $url)/" | grep "$clk" | awk '{print($5)}')
+                        if [[ "$size_next" =~ ^[0-9]+$ ]] && [ "$size_next" -gt "$size_last" ]; then
+                            rm -f "$clk"* "$product_cmn_dir/$clk"*
                         fi
                     fi
                     CopyOrDownloadProduct "$product_cmn_dir/$clk"
@@ -2656,11 +2676,15 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
                     echo -e "$MSGWAR PrepareProducts: failed to download RAP ERP product $cmp, try downloading RTS products"
                     if [ -f "$product_cmn_dir/$cmp" ]; then
                         size_last=$(ls -l "$product_cmn_dir/$cmp" | awk '{print($5)}')
-                        size_next=$(curl "$(dirname $url)/" | grep "$erp" | awk '{print($5)}')
-                        if [ $? -eq 0 ]; then
-                            if [ "$size_next" -gt "$size_last" ]; then
-                                rm -f "$erp"* "$product_cmn_dir/$erp"*
-                            fi
+                        # LOCAL DOWNSTREAM PATCH - see the identical fix's full
+                        # explanation on the OSB/FCB branch below this one
+                        # (CONFIRMED LIVE BUG on BaseStation 2026-09-24: no
+                        # timeout, unvalidated numeric comparison that crashed
+                        # with "[: : integer expression expected" on network
+                        # failure).
+                        size_next=$(curl --connect-timeout 10 --max-time 20 -s "$(dirname $url)/" | grep "$erp" | awk '{print($5)}')
+                        if [[ "$size_next" =~ ^[0-9]+$ ]] && [ "$size_next" -gt "$size_last" ]; then
+                            rm -f "$erp"* "$product_cmn_dir/$erp"*
                         fi
                     fi
                     CopyOrDownloadProduct "$product_cmn_dir/$erp"
@@ -2942,11 +2966,28 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
                     echo -e "$MSGWAR PrepareProducts: failed to download RAP satellite code/phase bias product $cmp, try downloading RTS products"
                     if [ -f "$product_cmn_dir/$cmp" ]; then
                         size_last=$(ls -l "$product_cmn_dir/$cmp" | awk '{print($5)}')
-                        size_next=$(curl "$(dirname $url)/" | grep "$fcb" | awk '{print($5)}')
-                        if [ $? -eq 0 ]; then
-                            if [ "$size_next" -gt "$size_last" ]; then
-                                rm -f "$fcb"* "$product_cmn_dir/$fcb"*
-                            fi
+                        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR
+                        # behavior - addons/PRIDE-PPPAR/ is vendored upstream source;
+                        # keep this comment so this fix is never silently dropped on
+                        # a future re-vendor). CONFIRMED LIVE BUG on BaseStation
+                        # 2026-09-24: this curl call (listing the RTS directory to
+                        # find this file's remote size) had no timeout flags, unlike
+                        # WgetDownload()'s hardened branches, and its result was
+                        # never validated as numeric before the `-gt` comparison
+                        # below - on a DNS/network failure size_next comes back
+                        # empty, which crashed that comparison with
+                        # "[: : integer expression expected" (a non-fatal bash
+                        # runtime error, since this script has no `set -e`, but one
+                        # that silently skipped the size check every time it fired).
+                        # --connect-timeout 10 --max-time 20 -s: short/quiet, this is
+                        # a small directory listing, not a file transfer - matches
+                        # the same timeout already applied to the ANTEX listing curl
+                        # call elsewhere in this file. The `=~ ^[0-9]+$` guard makes
+                        # the numeric comparison unconditionally safe regardless of
+                        # what curl returns.
+                        size_next=$(curl --connect-timeout 10 --max-time 20 -s "$(dirname $url)/" | grep "$fcb" | awk '{print($5)}')
+                        if [[ "$size_next" =~ ^[0-9]+$ ]] && [ "$size_next" -gt "$size_last" ]; then
+                            rm -f "$fcb"* "$product_cmn_dir/$fcb"*
                         fi
                     fi
                     CopyOrDownloadProduct "$product_cmn_dir/$fcb"
@@ -3566,6 +3607,7 @@ WgetDownload() { # purpose : download a file with wget
     [ -n "$url" ] && [ "$OFFLINE" = "NO" ] || return 1
     local curl_ver=$(curl --version | head -n 1 | awk '{print $2}')
     local wget_ver=$(wget --version | head -n 1 | awk '{print $3}')
+   local dl_exit
    if [[ "$url" == *bdspride* ]]; then
         # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
         # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
@@ -3582,6 +3624,7 @@ WgetDownload() { # purpose : download a file with wget
         arg="--ftp-ssl -k --progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 60 -4 -O"
         local cmd="curl $arg $url"
         echo "$cmd" | bash
+        dl_exit=$?
     elif [[ "$url" == *igs.gnsswhu.cn* ]]; then
         # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
         # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
@@ -3602,6 +3645,7 @@ WgetDownload() { # purpose : download a file with wget
         wget --help | grep -q "\--show-progress" && arg="$arg --show-progress"
         local cmd="wget $arg $url"
         echo "$cmd" | bash
+        dl_exit=$?
     elif [[ $wget_ver =~ ^1(\.[0-9]+){0,2}$ ]]; then
        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
        # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
@@ -3628,13 +3672,39 @@ WgetDownload() { # purpose : download a file with wget
        wget --help | grep -q "\--show-progress" && arg="$arg --show-progress"
        local cmd="wget $arg $url"
        echo "$cmd" | bash
+       dl_exit=$?
     else
        echo "wget version isn't 1, using curl: $url"
        arg="--progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 60 -O"
        local cmd="curl $arg $url"
        echo "$cmd" | bash
+       dl_exit=$?
     fi
-    [ -e $(basename "$url") ] && return 0  || return 1
+    # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+    # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment so
+    # this fix is never silently dropped on a future re-vendor). CONFIRMED
+    # LIVE BUG on BaseStation 2026-09-24: this function's return value used
+    # to be based SOLELY on `[ -e $(basename "$url") ]` - whether a file of
+    # that name exists on disk - never on wget/curl's own exit status
+    # (which was silently discarded by every branch's `echo "$cmd" | bash`
+    # above). A stale/partial/zero-byte file left over from an earlier
+    # failed download attempt (e.g. a .gz that never fully transferred)
+    # satisfies `[ -e ... ]` even though the download just failed again -
+    # this function then reported SUCCESS to its caller
+    # (CopyOrDownloadProduct), which meant a genuinely failed CLK/ERP/OSB
+    # download was silently treated as complete, letting PrepareProducts
+    # proceed with no usable clock correction at all. Traced live to the
+    # exact failure mode behind a run that produced a garbage MJD-0
+    # pos/res file: "curl: (6) Could not resolve host: igs.gnsswhu.cn" was
+    # logged, yet the pipeline carried on into tedit/lsq regardless.
+    # Now requires BOTH the download command's own exit status AND the
+    # file's existence - a failed wget/curl call is never masked by an
+    # incidentally-present file of the same name.
+    if [ "$dl_exit" -eq 0 ] && [ -e "$(basename "$url")" ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 LastYearMonth() { # purpose : get last year-month
