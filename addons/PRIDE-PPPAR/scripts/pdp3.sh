@@ -3563,6 +3563,26 @@ WgetDownload() { # purpose : download a file with wget
         arg="--ftp-ssl -k --progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 60 -4 -O"
         local cmd="curl $arg $url"
         echo "$cmd" | bash
+    elif [[ "$url" == *igs.gnsswhu.cn* ]]; then
+        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+        # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
+        # so this branch is never silently dropped on a future re-vendor
+        # from a new upstream snapshot). Confirmed live on BaseStation
+        # 2026-09-24: downloads from igs.gnsswhu.cn (WHU FTP, China) take
+        # ~55-60s for a ~1MB file - right at the edge of the default
+        # --read-timeout=60 above, causing frequent silent failures (no
+        # clear fatal error in the log - the script just continues without
+        # the product) that were traced to a missing WUM0MGXRTS CLK product,
+        # which cascaded into DEL_BADRANGE on every satellite-epoch in tedit
+        # and an empty pos/res output. This is a marginal-bandwidth issue to
+        # this specific host, NOT the bdspride.com IPv6/DNS issue patched
+        # above - a separate branch, not a change to that one.
+        # --connect-timeout=30 --read-timeout=180 (up from the 10/60
+        # defaults) gives the WHU host enough margin to complete.
+        arg="$arg --connect-timeout=30 --read-timeout=180"
+        wget --help | grep -q "\--show-progress" && arg="$arg --show-progress"
+        local cmd="wget $arg $url"
+        echo "$cmd" | bash
     elif [[ $wget_ver =~ ^1(\.[0-9]+){0,2}$ ]]; then
        wget --help | grep -q "\--show-progress" && arg="$arg --show-progress"
        local cmd="wget $arg $url"
