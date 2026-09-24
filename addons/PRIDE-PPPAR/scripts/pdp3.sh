@@ -3584,6 +3584,28 @@ WgetDownload() { # purpose : download a file with wget
         local cmd="wget $arg $url"
         echo "$cmd" | bash
     elif [[ $wget_ver =~ ^1(\.[0-9]+){0,2}$ ]]; then
+       # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+       # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
+       # so this override is never silently dropped on a future re-vendor
+       # from a new upstream snapshot). Confirmed live on BaseStation
+       # 2026-09-24: repeated curl failures against other product mirror
+       # hosts (bdspride.com, igs.ign.fr, and even igs.gnsswhu.cn before it
+       # hit the dedicated branch above) - "curl: (28) Resolving timed out
+       # after 10000 milliseconds", "Problem: timeout. Will retry..." -
+       # while manual wget tests against the same hosts succeeded
+       # reliably. This is the general wget branch used for every host
+       # other than bdspride.com and igs.gnsswhu.cn (which have their own
+       # dedicated branches above), so it was still falling through to the
+       # tight 10s/60s defaults from $arg above.
+       # --connect-timeout=20 --read-timeout=120 -t 5 here (deliberately
+       # LESS generous than igs.gnsswhu.cn's 30/180 branch above): unlike
+       # that host, which is confirmed marginal/slow (~55-60s for a small
+       # file), these other mirrors either respond quickly or the file
+       # simply doesn't exist for the requested date - "file not found"
+       # isn't affected by a longer timeout, only genuine DNS/connectivity
+       # instability is, so this only needs enough margin to ride out a
+       # transient blip, not WHU's sustained slow-transfer case.
+       arg="$arg --connect-timeout=20 --read-timeout=120 -t 5"
        wget --help | grep -q "\--show-progress" && arg="$arg --show-progress"
        local cmd="wget $arg $url"
        echo "$cmd" | bash
