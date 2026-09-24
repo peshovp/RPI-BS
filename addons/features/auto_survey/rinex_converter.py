@@ -188,6 +188,13 @@ class RINEXConverter:
                 "-r", receiver_type,
                 "-d", str(output_dir),
                 "-f", "2",  # Force overwrite
+                "-hm", marker_name,  # RINEX MARKER NAME - pdp3.sh derives its
+                                      # 4-char site code from this field; left
+                                      # unset, convbin writes an empty/invalid
+                                      # MARKER NAME, and PRIDE-PPPAR fails with
+                                      # "error: site name not found in
+                                      # command-line or observation file"
+                                      # (confirmed live on BaseStation).
                 str(raw_file)
             ]
             
