@@ -310,9 +310,44 @@ else
         # filter didn't cover the changed file.
         log_status "info" "PRIDE-PPPAR vendored source has changed since last build (or no build record found) - rebuilding..."
     fi
+    # ATOMIC REBUILD: build into a TEMPORARY location and only swap it onto
+    # the real ~/.PRIDE_PPPAR_BIN on a CONFIRMED successful build, instead
+    # of building in place. Upstream PRIDE-PPPAR's own install.sh does
+    # `rm -rf "$install_dir"` (= ~/.PRIDE_PPPAR_BIN) BEFORE building the
+    # new one, with no atomic swap of its own - if the build is
+    # interrupted mid-compile, the station is left with NEITHER the old
+    # working binary NOR a new one, a strictly worse state than before the
+    # update. CONFIRMED LIVE on BaseStation 2026-09-24: a UI-triggered OTA
+    # update's PRIDE-PPPAR rebuild was cut off mid-compile
+    # ("make[1]: Entering directory '.../src/arsig'", never completing),
+    # and ~/.PRIDE_PPPAR_BIN/ was left completely missing afterward - the
+    # same script run directly over SSH always completed cleanly. The
+    # interruption itself was very likely rtkbase_web.service's systemd
+    # KillMode=control-group killing this detached build's cgroup on a
+    # service restart (see unit/rtkbase_web.service's own comment on the
+    # KillMode=process fix alongside this one) - but this atomic-swap
+    # logic is a second, independent line of defense: it must hold
+    # regardless of WHY a build gets interrupted (kill -9, OOM, power
+    # loss, or anything else), since the old working installation must
+    # never be destroyed before a replacement is confirmed ready.
+    #
+    # Mechanism: build under a throwaway $HOME (upstream install.sh writes
+    # to "${HOME}/.PRIDE_PPPAR_BIN" - confirmed by reading that script -
+    # so overriding HOME for just this subprocess redirects its output
+    # without needing to patch that vendored script), then only copy the
+    # confirmed-executable pdp3 binary (and the rest of that temporary
+    # .PRIDE_PPPAR_BIN's contents) onto the real target via rename (mv is
+    # atomic within the same filesystem, which the same user's $HOME
+    # always is here).
     PRIDE_PPPAR_REPO_DIR="${PRIDE_PPPAR_USER_HOME}/PRIDE-PPPAR"
+    PRIDE_PPPAR_TMP_HOME="${PRIDE_PPPAR_USER_HOME}/.pride_pppar_build_tmp"
+    PRIDE_PPPAR_TMP_BIN="${PRIDE_PPPAR_TMP_HOME}/.PRIDE_PPPAR_BIN"
+    PRIDE_PPPAR_REAL_BIN_DIR="${PRIDE_PPPAR_USER_HOME}/.PRIDE_PPPAR_BIN"
+
     log_status "info" "Copying vendored PRIDE-PPPAR source into $PRIDE_PPPAR_REPO_DIR..."
-    rm -rf "$PRIDE_PPPAR_REPO_DIR"
+    rm -rf "$PRIDE_PPPAR_REPO_DIR" "$PRIDE_PPPAR_TMP_HOME"
+    mkdir -p "$PRIDE_PPPAR_TMP_HOME"
+    chown "$PRIDE_PPPAR_USER":"$PRIDE_PPPAR_USER" "$PRIDE_PPPAR_TMP_HOME" 2>/dev/null || true
     if sudo -u "$PRIDE_PPPAR_USER" cp -r "$PRIDE_PPPAR_VENDORED_SRC" "$PRIDE_PPPAR_REPO_DIR" 2>&1 | tee -a /tmp/ota_update.log; then
 
         log_status "info" "Applying -O0 workaround for gfortran aarch64 ICE..."
@@ -320,35 +355,62 @@ else
 
         sudo -u "$PRIDE_PPPAR_USER" chmod +x "$PRIDE_PPPAR_REPO_DIR/install.sh" 2>/dev/null || true
 
-        log_status "info" "Building PRIDE-PPPAR (non-interactive)..."
-        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh') 2>&1 | tee -a /tmp/ota_update.log; then
-            if [ -x "$PRIDE_PPPAR_BIN" ]; then
-                log_status "info" "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
-                # No git tag is pinned upstream (vendored source is simply
-                # whatever snapshot was committed to addons/PRIDE-PPPAR/).
-                # Detect and log the actually-installed version from the
-                # vendored tree's own README.md self-report.
-                detected_version=$(grep -oE 'PRIDE-PPPAR ver\.? [0-9]+\.[0-9]+(\.[0-9]+)?' "$PRIDE_PPPAR_REPO_DIR/README.md" 2>/dev/null | head -1)
-                if [ -n "$detected_version" ]; then
-                    log_status "info" "PRIDE-PPPAR version installed: $detected_version"
-                else
-                    log_status "info" "⚠ PRIDE-PPPAR built successfully but version string could not be detected from README.md"
+        log_status "info" "Building PRIDE-PPPAR (non-interactive, into temporary location)..."
+        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" env HOME="$PRIDE_PPPAR_TMP_HOME" bash -c 'yes "" | ./install.sh') 2>&1 | tee -a /tmp/ota_update.log; then
+            if [ -x "$PRIDE_PPPAR_TMP_BIN/pdp3" ]; then
+                # Build confirmed successful (binary present and
+                # executable in the TEMPORARY location) - now, and only
+                # now, atomically replace the real installation. mv onto
+                # an existing directory fails/merges unpredictably, so
+                # swap the old one aside first, move the new one into
+                # place, then discard the old one - each mv itself is
+                # atomic; only a crash in the ~0-second window between
+                # the two mv calls could leave neither in place, an
+                # astronomically smaller risk window than a 1-2 minute
+                # compile.
+                log_status "info" "✓ PRIDE-PPPAR built successfully in temporary location - swapping into place..."
+                PRIDE_PPPAR_OLD_BIN_BAK="${PRIDE_PPPAR_REAL_BIN_DIR}.old.$$"
+                if [ -d "$PRIDE_PPPAR_REAL_BIN_DIR" ]; then
+                    mv "$PRIDE_PPPAR_REAL_BIN_DIR" "$PRIDE_PPPAR_OLD_BIN_BAK"
                 fi
-                # Record what was just built so the next OTA update's
-                # idempotency check can tell this build apart from a stale
-                # one - only skip next time if the vendored source hasn't
-                # changed since this exact hash.
-                echo "$PRIDE_PPPAR_CURRENT_HASH" > "$PRIDE_PPPAR_HASH_FILE" 2>/dev/null \
-                    || log_status "info" "⚠ failed to write $PRIDE_PPPAR_HASH_FILE - next update will rebuild unconditionally"
+                if mv "$PRIDE_PPPAR_TMP_BIN" "$PRIDE_PPPAR_REAL_BIN_DIR"; then
+                    rm -rf "$PRIDE_PPPAR_OLD_BIN_BAK"
+                    log_status "info" "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
+                    # No git tag is pinned upstream (vendored source is simply
+                    # whatever snapshot was committed to addons/PRIDE-PPPAR/).
+                    # Detect and log the actually-installed version from the
+                    # vendored tree's own README.md self-report.
+                    detected_version=$(grep -oE 'PRIDE-PPPAR ver\.? [0-9]+\.[0-9]+(\.[0-9]+)?' "$PRIDE_PPPAR_REPO_DIR/README.md" 2>/dev/null | head -1)
+                    if [ -n "$detected_version" ]; then
+                        log_status "info" "PRIDE-PPPAR version installed: $detected_version"
+                    else
+                        log_status "info" "⚠ PRIDE-PPPAR built successfully but version string could not be detected from README.md"
+                    fi
+                    # Record what was just built so the next OTA update's
+                    # idempotency check can tell this build apart from a stale
+                    # one - only skip next time if the vendored source hasn't
+                    # changed since this exact hash. Written only after the
+                    # atomic swap succeeded, matching the "only update the
+                    # marker on confirmed success" rule this step now follows
+                    # throughout.
+                    echo "$PRIDE_PPPAR_CURRENT_HASH" > "$PRIDE_PPPAR_HASH_FILE" 2>/dev/null \
+                        || log_status "info" "⚠ failed to write $PRIDE_PPPAR_HASH_FILE - next update will rebuild unconditionally"
+                else
+                    # mv into place failed - restore the old installation
+                    # (if any) rather than leaving the station with nothing.
+                    log_status "info" "⚠ failed to swap new PRIDE-PPPAR build into place - restoring previous installation (opt-in feature, rnx2rtkp unaffected)"
+                    [ -d "$PRIDE_PPPAR_OLD_BIN_BAK" ] && mv "$PRIDE_PPPAR_OLD_BIN_BAK" "$PRIDE_PPPAR_REAL_BIN_DIR"
+                fi
             else
-                log_status "info" "⚠ PRIDE-PPPAR install.sh completed but $PRIDE_PPPAR_BIN was not found - PRIDE-PPPAR ambiguity resolution will not be available until resolved manually (rnx2rtkp unaffected)"
+                log_status "info" "⚠ PRIDE-PPPAR install.sh completed but no pdp3 binary was found in the temporary build location - previous installation (if any) left untouched (rnx2rtkp unaffected)"
             fi
         else
-            log_status "info" "⚠ PRIDE-PPPAR build failed - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
+            log_status "info" "⚠ PRIDE-PPPAR build failed - previous installation (if any) left untouched (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
         fi
     else
         log_status "info" "⚠ failed to copy vendored PRIDE-PPPAR source to $PRIDE_PPPAR_REPO_DIR - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
     fi
+    rm -rf "$PRIDE_PPPAR_TMP_HOME"
 fi
 
 log_status "info" "Ensuring /var/log/rtkbase/ exists (idempotent, needed by geomaxima_watchdog.service)..."

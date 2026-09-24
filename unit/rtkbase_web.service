@@ -18,6 +18,24 @@ Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:{
 ExecStart={python_path} {script_path}/web_app/server.py
 Restart=on-failure
 RestartSec=30
+# KillMode=process (not the systemd default of "control-group"): an OTA
+# update, triggered via the web UI, launches addons/tools/perform_update.sh
+# fully detached (subprocess.Popen with nohup + start_new_session=True in
+# addons/features/ota_update/update_controller.py's perform_update()) so
+# the PRIDE-PPPAR rebuild step (a 1-2 minute Fortran compile) can outlive
+# the HTTP request that triggered it. start_new_session=True only detaches
+# the process from its POSIX session/TTY - it does NOT remove it from this
+# service's systemd cgroup. With the default control-group KillMode, ANY
+# restart/stop of this service (e.g. this exact OTA update's own final
+# "systemctl restart rtkbase_web" step, or an unrelated manual restart)
+# kills every process still in the cgroup, including that detached build -
+# confirmed live on BaseStation 2026-09-24: a PRIDE-PPPAR build triggered
+# via the UI was cut off mid-compile ("make[1]: Entering directory
+# '.../src/arsig'", never reaching completion), while the identical script
+# run directly over SSH completed cleanly every time. KillMode=process
+# makes systemd track/kill only this unit's own main PID on
+# restart/stop, leaving detached grandchild processes (this OTA script and
+# its own children) alone.
 #ProtectHome=read-only
 #ProtectSystem=strict
 #ReadWritePaths={script_path} /var/tmp /usr/local/bin
