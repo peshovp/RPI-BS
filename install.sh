@@ -90,6 +90,96 @@ if [[ -n "$ROOT_SOURCE" ]]; then
 fi
 
 apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv fonts-dejavu-core
+
+# --- DNS resolver resilience: DHCP-provided nameserver stays primary,
+# 8.8.8.8/1.1.1.1 added as fallback only ---
+# Confirmed live on BaseStation: DNS resolution to both
+# igs.gnsswhu.cn (WHU PPP product server) and
+# github.com (OTA git fetch) intermittently failed with only a single
+# upstream nameserver configured (in that case, DHCP-supplied 8.8.8.8 via
+# resolvconf - a single resolver is not resilient enough for either
+# lookup). Idempotent and warning-only: detects whichever resolver stack
+# is actually active (systemd-resolved, then NetworkManager, then
+# dhcpcd/resolvconf, in that priority order, matching this script's
+# raspi-config/armbian-config detect-and-degrade pattern above) and adds
+# 8.8.8.8/1.1.1.1 as FALLBACK entries only - it never removes or reorders
+# the DHCP-provided nameserver, which always stays first/primary. Skips
+# (with a warning, not a hard failure) if no supported stack is found,
+# since this station's GNSS/RTCM functions do not depend on it.
+#
+# Verification on a live station after this runs:
+#   resolvectl status   (systemd-resolved: shows DNS Servers incl. fallback)
+#   cat /etc/resolv.conf (dhcpcd/resolvconf: shows all nameserver lines in order)
+#   nmcli dev show <iface> | grep DNS   (NetworkManager)
+if command -v resolvectl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
+    RESOLVED_DROPIN="$RESOLVED_DROPIN_DIR/90-geomaxima-fallback-dns.conf"
+    if [ -f "$RESOLVED_DROPIN" ]; then
+        echo "✓ systemd-resolved fallback DNS drop-in already present at $RESOLVED_DROPIN - skipping."
+    else
+        mkdir -p "$RESOLVED_DROPIN_DIR"
+        cat > "$RESOLVED_DROPIN" <<'EOF'
+# Added by RPI-BS install.sh - DNS resilience fallback.
+# DHCP-provided DNS (from the router) remains primary automatically -
+# this only ADDS fallback resolvers, used when the primary one is
+# unreachable/times out, per systemd-resolved's own FallbackDNS semantics.
+[Resolve]
+FallbackDNS=8.8.8.8 1.1.1.1
+EOF
+        systemctl reload-or-restart systemd-resolved 2>/dev/null \
+            || echo "WARNING: failed to reload systemd-resolved after writing $RESOLVED_DROPIN - fallback DNS will apply after next restart/reboot." >&2
+        echo "✓ systemd-resolved fallback DNS (8.8.8.8, 1.1.1.1) configured via $RESOLVED_DROPIN."
+    fi
+elif command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    NM_ACTIVE_CONN="$(nmcli -t -f NAME connection show --active 2>/dev/null | head -1)"
+    if [ -z "$NM_ACTIVE_CONN" ]; then
+        echo "WARNING: NetworkManager is active but no active connection was found - skipping fallback DNS setup." >&2
+    else
+        NM_CURRENT_DNS="$(nmcli -g ipv4.dns connection show "$NM_ACTIVE_CONN" 2>/dev/null)"
+        if [[ "$NM_CURRENT_DNS" == *"8.8.8.8"* && "$NM_CURRENT_DNS" == *"1.1.1.1"* ]]; then
+            echo "✓ NetworkManager connection '$NM_ACTIVE_CONN' already has fallback DNS configured - skipping."
+        else
+            # ipv4.dns REPLACES the DHCP-supplied resolver list unless
+            # ipv4.ignore-auto-dns stays "no" (default) - with that default,
+            # NetworkManager appends these to (not instead of) the
+            # DHCP-provided servers, which is exactly the desired
+            # primary-then-fallback behavior.
+            if nmcli connection modify "$NM_ACTIVE_CONN" +ipv4.dns "8.8.8.8" +ipv4.dns "1.1.1.1" 2>/dev/null \
+                && nmcli connection up "$NM_ACTIVE_CONN" &>/dev/null; then
+                echo "✓ NetworkManager fallback DNS (8.8.8.8, 1.1.1.1) added to connection '$NM_ACTIVE_CONN'."
+            else
+                echo "WARNING: failed to configure NetworkManager fallback DNS on '$NM_ACTIVE_CONN' - continuing anyway." >&2
+            fi
+        fi
+    fi
+elif command -v resolvconf &>/dev/null; then
+    # openresolv (already installed above for wg-quick) - its own
+    # documented mechanism for adding permanent extra nameserver lines is
+    # /etc/resolvconf/resolv.conf.d/tail, appended to the END of the
+    # generated /etc/resolv.conf regardless of which interface supplied
+    # the DHCP nameserver, which glibc's resolver tries first/primary
+    # since it appears earlier in the file.
+    RESOLVCONF_TAIL_DIR="/etc/resolvconf/resolv.conf.d"
+    RESOLVCONF_TAIL="$RESOLVCONF_TAIL_DIR/tail"
+    if [ -f "$RESOLVCONF_TAIL" ] && grep -q "8.8.8.8" "$RESOLVCONF_TAIL" && grep -q "1.1.1.1" "$RESOLVCONF_TAIL"; then
+        echo "✓ resolvconf fallback DNS tail already present at $RESOLVCONF_TAIL - skipping."
+    else
+        mkdir -p "$RESOLVCONF_TAIL_DIR"
+        {
+            echo "# Added by RPI-BS install.sh - DNS resilience fallback."
+            echo "# DHCP-provided nameserver lines (added by resolvconf ABOVE this tail"
+            echo "# file's content) remain primary; these are fallback only."
+            echo "nameserver 8.8.8.8"
+            echo "nameserver 1.1.1.1"
+        } > "$RESOLVCONF_TAIL"
+        resolvconf -u 2>/dev/null \
+            || echo "WARNING: 'resolvconf -u' failed after writing $RESOLVCONF_TAIL - fallback DNS will apply after next network restart/reboot." >&2
+        echo "✓ resolvconf fallback DNS (8.8.8.8, 1.1.1.1) configured via $RESOLVCONF_TAIL."
+    fi
+else
+    echo "WARNING: no supported DNS resolver stack found (systemd-resolved/NetworkManager/resolvconf) - skipping fallback DNS setup. This does not affect RTKBase's own RTCM/GNSS functions." >&2
+fi
+
 if command -v raspi-config &>/dev/null; then
     raspi-config nonint do_spi 0
 elif command -v armbian-config &>/dev/null; then

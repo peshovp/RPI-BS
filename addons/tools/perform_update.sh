@@ -139,6 +139,77 @@ sudo raspi-config nonint do_spi 0 2>&1 | tee -a /tmp/ota_update.log || log_statu
 log_status "info" "Ensuring fonts-dejavu-core is installed (idempotent, needed for optional LCD display feature)..."
 sudo apt-get install -y -qq fonts-dejavu-core 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ fonts-dejavu-core install failed - continuing anyway"
 
+log_status "info" "Ensuring DNS fallback resolvers are configured (idempotent - DHCP nameserver stays primary)..."
+# Mirrors install.sh's own DNS resolver resilience step exactly (same
+# detection-and-degrade order: systemd-resolved, then NetworkManager,
+# then resolvconf) - see that script's own comment for the full
+# confirmed-live rationale (igs.gnsswhu.cn/github.com intermittent DNS
+# failures on BaseStation with only a single upstream nameserver
+# configured). This is what gets already-provisioned stations (e.g.
+# BaseStation, which never re-ran install.sh) this fix automatically on
+# their next OTA update, with no manual per-station step required.
+# Verification on a live station after this runs:
+#   resolvectl status   (systemd-resolved)
+#   cat /etc/resolv.conf (dhcpcd/resolvconf)
+#   nmcli dev show <iface> | grep DNS   (NetworkManager)
+if command -v resolvectl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
+    RESOLVED_DROPIN="$RESOLVED_DROPIN_DIR/90-geomaxima-fallback-dns.conf"
+    if [ -f "$RESOLVED_DROPIN" ]; then
+        log_status "info" "✓ systemd-resolved fallback DNS drop-in already present - skipping"
+    else
+        sudo mkdir -p "$RESOLVED_DROPIN_DIR" 2>&1 | tee -a /tmp/ota_update.log
+        sudo bash -c "cat > '$RESOLVED_DROPIN'" <<'EOF'
+# Added by RPI-BS perform_update.sh - DNS resilience fallback.
+# DHCP-provided DNS (from the router) remains primary automatically -
+# this only ADDS fallback resolvers, used when the primary one is
+# unreachable/times out, per systemd-resolved's own FallbackDNS semantics.
+[Resolve]
+FallbackDNS=8.8.8.8 1.1.1.1
+EOF
+        sudo systemctl reload-or-restart systemd-resolved 2>&1 | tee -a /tmp/ota_update.log \
+            || log_status "info" "⚠ failed to reload systemd-resolved - fallback DNS will apply after next restart/reboot"
+        log_status "info" "✓ systemd-resolved fallback DNS (8.8.8.8, 1.1.1.1) configured"
+    fi
+elif command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    NM_ACTIVE_CONN="$(nmcli -t -f NAME connection show --active 2>/dev/null | head -1)"
+    if [ -z "$NM_ACTIVE_CONN" ]; then
+        log_status "info" "⚠ NetworkManager is active but no active connection was found - skipping fallback DNS setup"
+    else
+        NM_CURRENT_DNS="$(nmcli -g ipv4.dns connection show "$NM_ACTIVE_CONN" 2>/dev/null)"
+        if [[ "$NM_CURRENT_DNS" == *"8.8.8.8"* && "$NM_CURRENT_DNS" == *"1.1.1.1"* ]]; then
+            log_status "info" "✓ NetworkManager connection '$NM_ACTIVE_CONN' already has fallback DNS - skipping"
+        else
+            if sudo nmcli connection modify "$NM_ACTIVE_CONN" +ipv4.dns "8.8.8.8" +ipv4.dns "1.1.1.1" 2>&1 | tee -a /tmp/ota_update.log \
+                && sudo nmcli connection up "$NM_ACTIVE_CONN" &>/dev/null; then
+                log_status "info" "✓ NetworkManager fallback DNS (8.8.8.8, 1.1.1.1) added to connection '$NM_ACTIVE_CONN'"
+            else
+                log_status "info" "⚠ failed to configure NetworkManager fallback DNS on '$NM_ACTIVE_CONN' - continuing anyway"
+            fi
+        fi
+    fi
+elif command -v resolvconf &>/dev/null; then
+    RESOLVCONF_TAIL_DIR="/etc/resolvconf/resolv.conf.d"
+    RESOLVCONF_TAIL="$RESOLVCONF_TAIL_DIR/tail"
+    if [ -f "$RESOLVCONF_TAIL" ] && grep -q "8.8.8.8" "$RESOLVCONF_TAIL" && grep -q "1.1.1.1" "$RESOLVCONF_TAIL"; then
+        log_status "info" "✓ resolvconf fallback DNS tail already present - skipping"
+    else
+        sudo mkdir -p "$RESOLVCONF_TAIL_DIR" 2>&1 | tee -a /tmp/ota_update.log
+        sudo bash -c "cat > '$RESOLVCONF_TAIL'" <<'EOF'
+# Added by RPI-BS perform_update.sh - DNS resilience fallback.
+# DHCP-provided nameserver lines (added by resolvconf ABOVE this tail
+# file's content) remain primary; these are fallback only.
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+        sudo resolvconf -u 2>&1 | tee -a /tmp/ota_update.log \
+            || log_status "info" "⚠ 'resolvconf -u' failed - fallback DNS will apply after next network restart/reboot"
+        log_status "info" "✓ resolvconf fallback DNS (8.8.8.8, 1.1.1.1) configured"
+    fi
+else
+    log_status "info" "⚠ no supported DNS resolver stack found (systemd-resolved/NetworkManager/resolvconf) - skipping fallback DNS setup"
+fi
+
 log_status "info" "Ensuring ANTEX (igs20.atx) is present (idempotent, needed for optional PPP-static feature)..."
 ANTEX_DIR="$DEV_REPO_PATH/geomaxima_ppp"
 ANTEX_PATH="$ANTEX_DIR/igs20.atx"
