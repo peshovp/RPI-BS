@@ -3255,7 +3255,21 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
         # this is a small directory listing request, not a file download -
         # WgetDownload()'s much more generous timeouts (used for the actual
         # ANTEX file transfer below, if the cache miss) don't apply here.
-        [[ "$OFFLINE" == "NO" ]] && abs_atx=$(curl --connect-timeout 10 --max-time 20 -s https://files.igs.org/pub/station/general/ | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
+        # LOCAL DOWNSTREAM PATCH: retry this listing 3x with a short
+        # backoff before falling back to the local cache below - confirmed
+        # live on BS-Topolchane that a single transient DNS resolution
+        # timeout to files.igs.org ("curl: (28) Resolving timed out after
+        # 10001 milliseconds") was enough to trip this, even though the
+        # same host resolved fine again seconds later (`getent hosts`
+        # confirmed) - a brief retry absorbs exactly that kind of blip
+        # instead of immediately falling through.
+        if [[ "$OFFLINE" == "NO" ]]; then
+            for _atx_listing_attempt in 1 2 3; do
+                abs_atx=$(curl --connect-timeout 10 --max-time 20 -s https://files.igs.org/pub/station/general/ | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
+                [ -n "$abs_atx" ] && break
+                [ "$_atx_listing_attempt" -lt 3 ] && sleep 2
+            done
+        fi
         if [ -z "$abs_atx" ]; then
             abs_atx=$(ls "$table_dir" | grep -Eo "igs[0-9]{2}_[0-9]{4}.atx" | tail -1)
             if [ -n "$abs_atx" ]; then
@@ -3269,12 +3283,56 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
     if [ -f "$table_dir/$abs_atx" ]; then
         ln -sf "$table_dir/$abs_atx" abs_igs.atx
     else
+        # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+        # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
+        # so this retry/fallback logic is never silently dropped on a future
+        # re-vendor). CONFIRMED LIVE on BS-Topolchane: a single transient DNS
+        # resolution timeout to files.igs.org ("curl: (28) Resolving timed out
+        # after 10001 milliseconds" - intermittent, not a permanent outage,
+        # `getent hosts` resolved the same host fine seconds later) caused the
+        # ANTEX download to fail on its only attempt, which was then treated
+        # as FATAL and aborted the entire processing run - even though every
+        # other product (SP3/CLK/ERP/OSB) was already correctly in place, and
+        # the IGS ANTEX file itself changes at most a few times a year, so a
+        # cached copy is essentially always still valid. Each WgetDownload
+        # call below is now retried up to 3x with a short backoff, and if
+        # ALL retries for the intended file still fail, falls back to ANY
+        # already-cached IGS ANTEX file in $table_dir (not just an exact
+        # name match) with a clear warning - matching the same
+        # "warn-and-continue-if-possible, fail-loud-only-if-truly-impossible"
+        # pattern already used for the OSB product elsewhere in this file.
+        # Only a genuine total absence (no fresh download AND no cached copy
+        # of any kind) still hard-fails.
+        _AtxDownloadWithRetry() {
+            local _atx_url="$1"
+            local _attempt
+            for _attempt in 1 2 3; do
+                WgetDownload "$_atx_url" && return 0
+                [ "$_attempt" -lt 3 ] && sleep 2
+            done
+            return 1
+        }
+        _AtxCachedFallback() {
+            # Any previously-downloaded IGS ANTEX file in $table_dir,
+            # regardless of exact name/GPS-week match - used only after all
+            # fresh-download retries for the intended file are exhausted.
+            local _cached
+            _cached=$(ls "$table_dir" 2>/dev/null | grep -Eo "igs[0-9]{2}_[0-9]{4}\.atx" | tail -1)
+            if [ -n "$_cached" ] && [ -f "$table_dir/$_cached" ]; then
+                echo -e "$MSGWAR PrepareProducts: ANTEX download failed after retries, using cached copy $_cached from $table_dir (may be outdated - the intended file was $abs_atx)"
+                abs_atx="$_cached"
+                ln -sf "$table_dir/$abs_atx" abs_igs.atx
+                return 0
+            fi
+            return 1
+        }
         if [ -n "$atx_url" ]; then
-            WgetDownload "$atx_url"
-            if [ $? -ne 0 ]; then
-                echo -e "$MSGERR PrepareProducts: failed to download ANTEX file: $abs_atx"
-                echo -e "$MSGINF please download from $atx_url to $table_dir for processing"
-                return 1
+            if ! _AtxDownloadWithRetry "$atx_url"; then
+                if ! _AtxCachedFallback; then
+                    echo -e "$MSGERR PrepareProducts: failed to download ANTEX file: $abs_atx"
+                    echo -e "$MSGINF please download from $atx_url to $table_dir for processing"
+                    return 1
+                fi
             fi
         elif [[ $abs_atx =~ ^igs[0-9]{2} ]]; then
             local atx_urls=(
@@ -3282,34 +3340,43 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
                 "https://files.igs.org/pub/station/general/pcv_archive/$abs_atx"
                 "https://files.igs.org/pub/station/general/pcv_archive/${abs_atx}.gz"
             )
+            local _atx_ok=1
             for atx_url in "${atx_urls[@]}"; do
-                WgetDownload "$atx_url"
-                if [ $? -eq 0 ]; then
+                if _AtxDownloadWithRetry "$atx_url"; then
                     [ -f "${abs_atx}.gz" ] && gunzip -f "${abs_atx}.gz"
+                    _atx_ok=0
                     break
                 fi
             done
-            if [ ! -f ${abs_atx} ]; then
-                echo -e "$MSGERR PrepareProducts: failed to download ANTEX file: $abs_atx"
-                echo -e "$MSGINF please download from $atx_url to $table_dir for processing"
-                return 1
-            fi
-        elif [[ $abs_atx =~ ^igsR3 ]]; then
-            atx_url="ftp://igs-rf.ign.fr/pub/IGSR3/$abs_atx"
-            WgetDownload "$atx_url"
-            if [ $? -ne 0 ]; then
-                atx_url="ftp.aiub.unibe.ch/users/villiger/$abs_atx"
-                WgetDownload "$atx_url"
-                if [ $? -ne 0 ]; then
+            if [ "$_atx_ok" -ne 0 ] && [ ! -f "${abs_atx}" ]; then
+                if ! _AtxCachedFallback; then
                     echo -e "$MSGERR PrepareProducts: failed to download ANTEX file: $abs_atx"
                     echo -e "$MSGINF please download from $atx_url to $table_dir for processing"
                     return 1
+                fi
+            fi
+        elif [[ $abs_atx =~ ^igsR3 ]]; then
+            atx_url="ftp://igs-rf.ign.fr/pub/IGSR3/$abs_atx"
+            if ! _AtxDownloadWithRetry "$atx_url"; then
+                atx_url="ftp.aiub.unibe.ch/users/villiger/$abs_atx"
+                if ! _AtxDownloadWithRetry "$atx_url"; then
+                    if ! _AtxCachedFallback; then
+                        echo -e "$MSGERR PrepareProducts: failed to download ANTEX file: $abs_atx"
+                        echo -e "$MSGINF please download from $atx_url to $table_dir for processing"
+                        return 1
+                    fi
                 fi
             fi
         fi
         if [ -f "$abs_atx" ]; then
             [ -f "$table_dir/$abs_atx" ] || cp -f "$abs_atx" "$table_dir/"
             mv -f "$abs_atx" abs_igs.atx
+        elif [ -f abs_igs.atx ]; then
+            # _AtxCachedFallback() already symlinked the cached copy to
+            # abs_igs.atx directly (it lives in $table_dir, not the current
+            # working directory, so there's no loose $abs_atx file to move
+            # here) - nothing further to do.
+            :
         else
             echo -e "$MSGERR PrepareProducts: no IGS ANTEX file: $table_dir/$abs_atx"
             return 1
