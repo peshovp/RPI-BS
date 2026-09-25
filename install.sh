@@ -29,37 +29,317 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# --- Bootstrap: get a real, single, consistent checkout on disk FIRST ---
+# GeoMaxima: previously, `curl | sudo bash` fetched a couple of small helper
+# files individually (platform_detect.sh, armbian_kernel_pin.sh) by raw URL
+# before the actual clone happened later in the script, then read the rest
+# of the helpers from that later clone. That risks version skew between
+# "main" at the time of the curl-fetched helpers vs. "main" at the time of
+# the later git clone (a push landing in between), and duplicates the
+# clone/fetch logic. Fixed by moving the clone to the very first thing this
+# script does, then re-exec'ing the SAME install.sh from inside that single
+# checkout - everything from this point on (this process and its children)
+# reads from one consistent, already-on-disk revision, and there is no more
+# curl-by-raw-URL fetching of individual helper files anywhere in this
+# script. Under a local checkout (`cd RPI-BS && sudo ./install.sh`), the
+# checkout already exists and no clone/exec/re-launch happens at all.
+#
+# detect_existing_checkout(): true if BASH_SOURCE[0] is a real file that is
+# part of an actual RPI-BS checkout. Under `curl | sudo bash`, BASH_SOURCE[0]
+# is something like "bash" or "/dev/stdin" - not a real path - so this
+# correctly (and silently) fails in that case; it isn't an error condition.
+detect_existing_checkout() {
+    local src="${BASH_SOURCE[0]}"
+    [[ -f "$src" ]] || return 1
+    local dir
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    [[ -f "$dir/tools/security_setup.sh" && -f "$dir/web_app/server.py" ]] || return 1
+    echo "$dir"
+}
+
+# Clones (or, if already present, fast-forward pulls) the repo into
+# INSTALL_DIR. Prints the resolved directory as the ONLY line on stdout so
+# callers can safely capture it with $(...); all progress/log messages are
+# sent to stderr via log() to avoid polluting that capture.
+bootstrap_repo() {
+    if ! command -v git &>/dev/null; then
+        log "git not found, installing..."
+        apt update -qq && apt install -y -qq git || { log "ERROR: failed to install git"; exit 1; }
+    fi
+
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        log "Existing checkout found at $INSTALL_DIR, updating (git pull --ff-only)..."
+        # GeoMaxima: warn-and-continue-with-what's-already-there, not exit.
+        # Re-running the curl|bash one-liner on a station that has local
+        # changes (or a non-ff-only-able history, e.g. after a rebase
+        # upstream) must not brick an otherwise-working, already-cloned
+        # install just because this particular pull couldn't fast-forward.
+        git -C "$INSTALL_DIR" pull --ff-only \
+            || log "WARNING: git pull --ff-only failed in $INSTALL_DIR - continuing with the existing checkout as-is (not re-cloning, not exiting)."
+    else
+        log "No existing checkout found. Cloning $REPO_URL into $INSTALL_DIR..."
+        git clone "$REPO_URL" "$INSTALL_DIR" || { log "ERROR: git clone failed"; exit 1; }
+    fi
+
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown -R "$SUDO_USER":"$SUDO_USER" "$INSTALL_DIR" || log "WARNING: chown to $SUDO_USER failed"
+    fi
+
+    if [[ ! -f "$INSTALL_DIR/web_app/server.py" || ! -f "$INSTALL_DIR/tools/security_setup.sh" ]]; then
+        log "ERROR: $INSTALL_DIR does not look like a valid RPI-BS checkout after bootstrap."
+        exit 1
+    fi
+
+    echo "$INSTALL_DIR"
+}
+
+if SCRIPT_DIR="$(detect_existing_checkout)"; then
+    log "Running from existing checkout: $SCRIPT_DIR"
+else
+    log "No local checkout detected (likely running via curl | sudo bash). Bootstrapping..."
+    SCRIPT_DIR="$(bootstrap_repo | tail -1)"
+    # Re-exec THIS SAME install.sh, but now as a real file inside the
+    # checkout we just cloned, instead of continuing to run as the
+    # curl-piped copy. GM_REEXECD guards against a re-exec loop if
+    # $SCRIPT_DIR/install.sh were somehow still not a real, detectable
+    # checkout (defensive; bootstrap_repo already validates this above).
+    if [[ -z "${GM_REEXECD:-}" && -f "$SCRIPT_DIR/install.sh" ]]; then
+        log "Re-launching install.sh from the cloned checkout at $SCRIPT_DIR ..."
+        export GM_REEXECD=1
+        # GeoMaxima: under `curl | sudo bash`, this process's stdin IS the
+        # curl-piped script text - whatever of it bash hasn't consumed yet
+        # is still sitting there. Without redirecting it, the re-exec'd
+        # child would inherit that same stdin and could read leftover
+        # script text as if it were interactive input (e.g. into a `read`
+        # somewhere downstream). Redirect from /dev/tty when one exists (a
+        # real interactive terminal further down the line, e.g. someone
+        # running `bash <(curl ...)` at a real console), otherwise
+        # /dev/null - never the inherited pipe.
+        if [[ -r /dev/tty ]]; then
+            exec bash "$SCRIPT_DIR/install.sh" "$@" </dev/tty
+        else
+            exec bash "$SCRIPT_DIR/install.sh" "$@" </dev/null
+        fi
+    fi
+fi
+
+cd "$SCRIPT_DIR"
+
+# --- Platform detection (Raspberry Pi vs Armbian/A733 vs other) ---
+# Now always read locally - SCRIPT_DIR is guaranteed to be a real checkout
+# on disk at this point (either pre-existing, or just cloned+re-exec'd into
+# above), so there is never a need to fetch this by raw URL.
+# shellcheck source=tools/platform_detect.sh
+source "$SCRIPT_DIR/tools/platform_detect.sh"
+echo "Detected platform: ${GM_PLATFORM:-unknown} (board: ${GM_BOARD:-unknown}, arch: ${GM_ARCH:-$(uname -m)})"
+
+# --- Defensive check: A733 (Orange Pi 4 Pro+ and future same-SoC boards)
+# bootloader-write vs. root-partition overlap ---
+# GeoMaxima: moved here, BEFORE `apt-get update/upgrade` and the kernel pin
+# below - if this ran after the upgrade (as an earlier version of this
+# check did) and a linux-u-boot-* package slipped through despite the pin,
+# the superblock corruption would already have happened by the time this
+# check ran. This check itself never installs/upgrades anything, so
+# running it this early has no downside.
+#
+# HALTS (does not just warn) when it detects an overlap, since every U-Boot
+# write from this point on - including a routine `apt upgrade` of
+# linux-u-boot-* - would silently overwrite the ext4 superblock and brick
+# the board at next reboot. Confirmed live on an Orange Pi 4 Pro+: armbian-
+# install had created the root partition starting at 16 MiB (sector 32768)
+# instead of the official image's 32 MiB (sector 65536), which
+# /usr/lib/u-boot/platform_install.sh's boot_package.fex write (at
+# seek=16400K) overlaps.
+#
+# The check itself runs for the root partition regardless of whether it is
+# on SD or eMMC - the overlap is purely a matter of partition geometry vs.
+# the bootloader's fixed write offset, and applies identically either way.
+# /sys/block/mmcblkN/device/type ("MMC" vs "SD") is used ONLY to phrase the
+# message/recommendation below (root already on eMMC gets a different fix
+# than root still on SD), never to decide whether to run the check - NOT
+# /sys/block/*/removable, which is unreliable on mmc hosts (SD cards often
+# report 0/non-removable there too). This matches tools/emmc-install-opi4pro.sh's
+# own detection and was verified live on an Orange Pi 4 Pro+ (mmcblk0 =
+# MMC/eMMC, mmcblk1 = SD).
+# GM_DRY_RUN=1 prints the check's verdict without exiting, for CI.
+if [[ "${GM_PLATFORM:-}" == "armbian-a733" ]]; then
+    GM_PLATFORM_INSTALL_SCRIPT="/usr/lib/u-boot/platform_install.sh"
+    # `|| true`: under set -euo pipefail, `ls -d ... | head -1` with no
+    # match makes `ls` exit non-zero, which without this would exit the
+    # WHOLE SCRIPT here rather than just leaving GM_UBOOT_DIR empty (the
+    # intended, handled case a few lines down).
+    GM_UBOOT_DIR="$(ls -d /usr/lib/linux-u-boot-* 2>/dev/null | head -1 || true)"
+    if [[ -f "$GM_PLATFORM_INSTALL_SCRIPT" && -n "$GM_UBOOT_DIR" && -f "$GM_UBOOT_DIR/boot_package.fex" ]]; then
+        GM_BP_SEEK_K="$(grep -oP 'boot_package\.fex.*bs=1k seek=\K[0-9]+' "$GM_PLATFORM_INSTALL_SCRIPT" | head -1 || true)"
+        if [[ -z "$GM_BP_SEEK_K" ]]; then
+            GM_BP_SEEK_K=16400
+            echo "WARNING: could not parse boot_package.fex seek= from $GM_PLATFORM_INSTALL_SCRIPT - assuming 16400K (the value confirmed live on an Orange Pi 4 Pro+)." >&2
+        fi
+        GM_BP_SIZE_K=$(( ( $(stat -c%s "$GM_UBOOT_DIR/boot_package.fex") + 1023 ) / 1024 ))
+        GM_BP_END_K=$(( GM_BP_SEEK_K + GM_BP_SIZE_K ))
+
+        GM_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+        GM_ROOT_DISK_NAME="$(lsblk -no PKNAME "$GM_ROOT_SOURCE" 2>/dev/null || true)"
+        GM_ROOT_PART_NAME="$(basename "$GM_ROOT_SOURCE" 2>/dev/null || true)"
+        # device/type is read only for the recommendation text below - it
+        # never gates whether the size comparison itself runs.
+        GM_ROOT_DEVICE_TYPE=""
+        [[ -n "$GM_ROOT_DISK_NAME" && -f "/sys/block/${GM_ROOT_DISK_NAME}/device/type" ]] \
+            && GM_ROOT_DEVICE_TYPE="$(cat "/sys/block/${GM_ROOT_DISK_NAME}/device/type" 2>/dev/null || true)"
+        if [[ -n "$GM_ROOT_DISK_NAME" && -f "/sys/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" ]]; then
+            GM_ROOT_PART_START_SECTORS="$(cat "/sys/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" 2>/dev/null || echo 0)"
+            GM_ROOT_PART_START_K=$(( GM_ROOT_PART_START_SECTORS / 2 ))
+            if (( GM_BP_END_K >= GM_ROOT_PART_START_K )); then
+                echo "ERROR: the U-Boot bootloader write range (${GM_BP_SEEK_K}K-${GM_BP_END_K}K) overlaps this" >&2
+                echo "board's root partition, which starts at ${GM_ROOT_PART_START_K}K on /dev/${GM_ROOT_DISK_NAME} (device/type: ${GM_ROOT_DEVICE_TYPE:-unknown})." >&2
+                echo "Every future U-Boot write (including a routine 'apt upgrade' of linux-u-boot-*)" >&2
+                echo "would silently corrupt the root filesystem's superblock and brick this board at" >&2
+                echo "the next reboot. This is a known armbian-install partition-layout bug on this" >&2
+                echo "board (confirmed live on an Orange Pi 4 Pro+)." >&2
+                echo "This script will NOT modify partitions/bootloader automatically. Instead:" >&2
+                if [[ "$GM_ROOT_DEVICE_TYPE" == "MMC" ]]; then
+                    echo "Root is already on eMMC (/dev/${GM_ROOT_DISK_NAME}) with a bad partition layout." >&2
+                    echo "Boot this board from an SD card instead, then run" >&2
+                    echo "tools/emmc-install-opi4pro.sh from there to re-create the eMMC root partition" >&2
+                    echo "at the correct offset (32 MiB / sector 65536) and copy the system back onto it." >&2
+                else
+                    echo "  1. Boot this board from an SD card (if not already)." >&2
+                    echo "  2. Run tools/emmc-install-opi4pro.sh, which creates a correctly-placed root" >&2
+                    echo "     partition (32 MiB / sector 65536) on eMMC and copies the system there." >&2
+                    echo "  3. Remove the SD card and reboot from eMMC, then re-run this installer." >&2
+                fi
+                if [[ "${GM_DRY_RUN:-0}" == "1" ]]; then
+                    echo "GM_DRY_RUN=1: would have halted here instead of exiting." >&2
+                else
+                    exit 1
+                fi
+            else
+                echo "Verified: bootloader write range (${GM_BP_SEEK_K}K-${GM_BP_END_K}K) does not overlap the root partition (starts at ${GM_ROOT_PART_START_K}K) - safe to continue." >&2
+            fi
+        else
+            echo "WARNING: could not read the root partition's start offset from sysfs - skipping bootloader-overlap check. Verify manually before rebooting: compare 'cat /sys/block/${GM_ROOT_DISK_NAME:-<disk>}/${GM_ROOT_PART_NAME:-<part>}/start' against the seek= value in $GM_PLATFORM_INSTALL_SCRIPT." >&2
+        fi
+    fi
+fi
+
 echo "============================================================================"
 echo "STAGE 1/5: System Update & Prerequisites"
 echo "============================================================================"
 export DEBIAN_FRONTEND=noninteractive
+
+# --- Armbian-only: pin out Debian-origin kernel packages BEFORE any apt
+# upgrade, so a Debian/RT kernel can never get installed alongside this
+# board's vendor kernel. See tools/armbian_kernel_pin.sh for the full
+# "why" (confirmed-live boot-breaking bug) and why apt-mark hold alone is
+# not sufficient. Must run before `apt-get upgrade` on the next line.
+if [[ "${GM_PLATFORM:-}" == armbian* ]]; then
+    # shellcheck source=tools/armbian_kernel_pin.sh
+    source "$SCRIPT_DIR/tools/armbian_kernel_pin.sh"
+    geomaxima_apply_armbian_kernel_pin
+fi
+
 apt-get update -qq
 apt-get upgrade -y -qq
 
 # --- Defensive check: PREEMPT_RT kernel / boot-symlink consistency ---
-# Warning-only, never modifies anything. On Armbian (and other non-Raspberry-Pi-OS
-# boards using Debian's generic kernel package mechanism), installing a
-# linux-image-*-rt-arm64 package alongside the board's vendor kernel is a known
-# hazard: the RT kernel's postinst updates the /boot/uInitrd symlink to point at
-# itself, but does NOT update /boot/Image or /boot/dtb, which keep pointing at the
-# vendor kernel (the one with the correct SoC drivers/device-tree). The result is
-# U-Boot loading a vendor kernel with an RT initrd - an incompatible combination
-# that causes a full boot failure. Confirmed live on an Orange Pi 4 Pro station
-# (Allwinner A733, Armbian vendor kernel 6.6.98-vendor-sun60iw2) after
-# linux-image-6.12.107+deb13-rt-arm64 ended up installed alongside it.
-# RTKBase does not require PREEMPT_RT for GNSS processing - this check does not
-# assert why an RT kernel is present, only that if one is, /boot/Image, /boot/dtb,
-# and /boot/uInitrd must all resolve to the SAME kernel version before rebooting.
-if dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
-    echo "WARNING: a PREEMPT_RT (rt-arm64) kernel package is installed on this system." >&2
-    echo "On Armbian/non-Raspberry-Pi-OS boards this can desync the /boot/Image, /boot/dtb," >&2
-    echo "and /boot/uInitrd symlinks (each may end up pointing at a DIFFERENT kernel after" >&2
-    echo "the RT kernel's postinst runs), which causes a hard boot failure at next reboot." >&2
-    echo "RTKBase does not require PREEMPT_RT for GNSS processing." >&2
-    echo "Before rebooting, verify all three point at the SAME kernel version:" >&2
-    echo "  ls -la /boot/Image /boot/dtb /boot/uInitrd" >&2
-    echo "This script will NOT modify these symlinks automatically - fix manually if inconsistent." >&2
-fi
+# On Armbian (and other non-Raspberry-Pi-OS boards using Debian's generic
+# kernel package mechanism), installing a linux-image-*-rt-arm64 package
+# alongside the board's vendor kernel is a known hazard: the RT kernel's
+# postinst updates the /boot/uInitrd symlink to point at itself, but does
+# NOT update /boot/Image or /boot/dtb, which keep pointing at the vendor
+# kernel (the one with the correct SoC drivers/device-tree). The result is
+# U-Boot loading a vendor kernel with an RT initrd - an incompatible
+# combination that causes a full boot failure. Confirmed live on an Orange
+# Pi 4 Pro station (Allwinner A733, Armbian vendor kernel
+# 6.6.98-vendor-sun60iw2) after linux-image-6.12.107+deb13-rt-arm64 ended
+# up installed alongside it.
+# RTKBase does not require PREEMPT_RT for GNSS processing - this check does
+# not assert why an RT kernel is present, only that if one is, /boot/Image,
+# /boot/dtb, and /boot/uInitrd must all resolve to the SAME kernel version
+# before rebooting.
+#
+# GeoMaxima: factored into a function because it must run TWICE - once here
+# (early, before this script installs/upgrades anything further) and once
+# again at the very end of this script (STAGE 5), since tools/install.sh
+# and security_setup.sh both install packages that could themselves pull in
+# a kernel package. A mismatch caught only at the START would miss one
+# introduced by this script's OWN later steps - the end-of-script call is
+# the one that actually protects the next reboot.
+#
+# On Armbian these are symlinks to version-suffixed real files, e.g.
+# "uInitrd -> uInitrd-6.6.98-vendor-sun60iw2", "Image -> vmlinuz-<ver>",
+# "dtb -> dtb-<ver>" - comparing the version suffix via readlink is simple
+# and sufficient; no need to parse mkimage/FIT image headers. `readlink`
+# can return either a bare filename or an absolute path (e.g.
+# "/boot/vmlinuz-<ver>") depending on how the symlink target was written -
+# basename is applied FIRST, before stripping the "<prefix>-" via sed, so
+# an absolute-path target is never mistaken for a version mismatch purely
+# because of its leading directory component.
+# GM_DRY_RUN=1 prints the check's verdict without exiting, for CI.
+#
+# The three-way symlink comparison itself runs on ANY platform whenever
+# all three symlinks exist (not gated on an RT package being installed at
+# all - Armbian boards can end up with a kernel-symlink mismatch from other
+# causes too, e.g. an interrupted OTA of the vendor kernel package itself).
+# The RT-package-installed warning below is a SEPARATE, independent
+# message - it is not a precondition for running the symlink comparison,
+# it is just additional context printed alongside it when applicable. An
+# RT package being merely INSTALLED is not itself fatal (it may not be the
+# one actually pointed to by the boot symlinks yet). What DOES halt is an
+# ACTUAL mismatch between /boot/Image, /boot/dtb, and /boot/uInitrd right
+# now, since the very next reboot would then fail to boot.
+#
+# $1 (optional): a short label identifying which call site this is, used
+# only to phrase the halt message appropriately ("do not reboot" makes
+# sense at the end of the script; at the start, nothing has run yet so
+# there is nothing to warn against rebooting away from).
+geomaxima_check_kernel_symlink_consistency() {
+    local call_site="${1:-early}"
+
+    if dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
+        echo "WARNING: a PREEMPT_RT (rt-arm64) kernel package is installed on this system." >&2
+        echo "On Armbian/non-Raspberry-Pi-OS boards this can desync the /boot/Image, /boot/dtb," >&2
+        echo "and /boot/uInitrd symlinks (each may end up pointing at a DIFFERENT kernel after" >&2
+        echo "the RT kernel's postinst runs), which causes a hard boot failure at next reboot." >&2
+        echo "RTKBase does not require PREEMPT_RT for GNSS processing." >&2
+    fi
+
+    if [[ -L /boot/Image && -L /boot/dtb && -L /boot/uInitrd ]]; then
+        local img_ver dtb_ver initrd_ver
+        img_ver="$(basename "$(readlink /boot/Image 2>/dev/null)" | sed -E 's/^[a-zA-Z]+-//')"
+        dtb_ver="$(basename "$(readlink /boot/dtb 2>/dev/null)" | sed -E 's/^[a-zA-Z]+-//')"
+        initrd_ver="$(basename "$(readlink /boot/uInitrd 2>/dev/null)" | sed -E 's/^[a-zA-Z]+-//')"
+        if [[ -n "$img_ver" && -n "$dtb_ver" && -n "$initrd_ver" ]] \
+            && ! [[ "$img_ver" == "$dtb_ver" && "$dtb_ver" == "$initrd_ver" ]]; then
+            echo "ERROR: /boot/Image, /boot/dtb, and /boot/uInitrd point at DIFFERENT kernel versions:" >&2
+            echo "  /boot/Image   -> $(readlink /boot/Image)" >&2
+            echo "  /boot/dtb     -> $(readlink /boot/dtb)" >&2
+            echo "  /boot/uInitrd -> $(readlink /boot/uInitrd)" >&2
+            if [[ "$call_site" == "end" ]]; then
+                echo "DO NOT REBOOT this board in its current state - it would very likely fail to" >&2
+                echo "boot (confirmed live on an Orange Pi 4 Pro+ in exactly this state)." >&2
+            else
+                echo "Rebooting right now would very likely fail to boot (confirmed live on an" >&2
+                echo "Orange Pi 4 Pro+ in exactly this state)." >&2
+            fi
+            echo "This script will NOT repoint these symlinks automatically - fix manually (make" >&2
+            echo "all three point at the same, working kernel version) before rebooting." >&2
+            if [[ "${GM_DRY_RUN:-0}" == "1" ]]; then
+                echo "GM_DRY_RUN=1: would have halted here instead of exiting." >&2
+                return 0
+            fi
+            exit 1
+        else
+            echo "Verified /boot/Image, /boot/dtb, and /boot/uInitrd currently point at the same kernel version - safe to continue." >&2
+        fi
+    elif dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
+        echo "Before rebooting, verify all three point at the SAME kernel version:" >&2
+        echo "  ls -la /boot/Image /boot/dtb /boot/uInitrd" >&2
+        echo "This script will NOT modify these symlinks automatically - fix manually if inconsistent." >&2
+    fi
+}
+
+geomaxima_check_kernel_symlink_consistency early
 
 # --- Defensive check: root filesystem not resized to full disk capacity ---
 # Warning-only, never modifies anything. Armbian images can leave the root
@@ -190,57 +470,9 @@ else
 fi
 echo "System packages updated. curl, git, and ca-certificates confirmed installed."
 
-# Checks whether BASH_SOURCE[0] points at a real file on disk that is part of
-# an actual RPI-BS checkout. Under "curl | sudo bash", BASH_SOURCE[0] is
-# something like "bash" or "/dev/stdin" -- not a real path -- so this
-# correctly (and silently) fails in that case, it isn't an error condition.
-detect_existing_checkout() {
-    local src="${BASH_SOURCE[0]}"
-    [[ -f "$src" ]] || return 1
-    local dir
-    dir="$(cd "$(dirname "$src")" && pwd)"
-    [[ -f "$dir/tools/security_setup.sh" && -f "$dir/web_app/server.py" ]] || return 1
-    echo "$dir"
-}
-
-# Clones (or, if already present, fast-forward pulls) the repo into
-# INSTALL_DIR. Prints the resolved directory as the ONLY line on stdout so
-# callers can safely capture it with $(...); all progress/log messages are
-# sent to stderr via log() to avoid polluting that capture.
-bootstrap_repo() {
-    if ! command -v git &>/dev/null; then
-        log "git not found, installing..."
-        apt update -qq && apt install -y -qq git || { log "ERROR: failed to install git"; exit 1; }
-    fi
-
-    if [[ -d "$INSTALL_DIR/.git" ]]; then
-        log "Existing checkout found at $INSTALL_DIR, updating (git pull --ff-only)..."
-        git -C "$INSTALL_DIR" pull --ff-only || { log "ERROR: git pull --ff-only failed in $INSTALL_DIR"; exit 1; }
-    else
-        log "No existing checkout found. Cloning $REPO_URL into $INSTALL_DIR..."
-        git clone "$REPO_URL" "$INSTALL_DIR" || { log "ERROR: git clone failed"; exit 1; }
-    fi
-
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        chown -R "$SUDO_USER":"$SUDO_USER" "$INSTALL_DIR" || log "WARNING: chown to $SUDO_USER failed"
-    fi
-
-    if [[ ! -f "$INSTALL_DIR/web_app/server.py" || ! -f "$INSTALL_DIR/tools/security_setup.sh" ]]; then
-        log "ERROR: $INSTALL_DIR does not look like a valid RPI-BS checkout after bootstrap."
-        exit 1
-    fi
-
-    echo "$INSTALL_DIR"
-}
-
-if SCRIPT_DIR="$(detect_existing_checkout)"; then
-    log "Running from existing checkout: $SCRIPT_DIR"
-else
-    log "No local checkout detected (likely running via curl | sudo bash). Bootstrapping..."
-    SCRIPT_DIR="$(bootstrap_repo | tail -1)"
-fi
-
-cd "$SCRIPT_DIR"
+# GeoMaxima: bootstrap (clone-or-pull + cd, and the curl|bash re-exec) now
+# happens once, at the very top of this script - see the comment there.
+# SCRIPT_DIR is already set and we are already inside it.
 
 # --- 1. Banner ---
 echo "============================================================================"
@@ -482,6 +714,15 @@ echo "==========================================================================
 # geomaxima_watchdog.timer until this directory was created manually).
 mkdir -p /var/log/rtkbase
 chown root:root /var/log/rtkbase || log "WARNING: chown of /var/log/rtkbase to root failed"
+
+# --- Re-check kernel-symlink consistency at the very end ---
+# GeoMaxima: tools/install.sh and security_setup.sh (both run above, in
+# STAGE 2/3) install packages of their own and could themselves introduce a
+# kernel package - the EARLY check a few hundred lines up would miss a
+# mismatch caused by this script's own later steps. This is the check that
+# actually protects the upcoming reboot; halts (does not just warn) with a
+# "do NOT reboot" message if the symlinks disagree right now.
+geomaxima_check_kernel_symlink_consistency end
 
 echo ""
 echo "============================================================================"

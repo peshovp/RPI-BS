@@ -175,7 +175,48 @@ install_rtklib() {
     echo '################################'
     echo 'INSTALLING RTKLIB'
     echo '################################'
+    # GeoMaxima: tools/bin/RTKLIB-2.5.0/armv7l and armv6l (32-bit Raspberry
+    # Pi) have no rnx2rtkp binary at all - only str2str/rtkrcv/convbin were
+    # ever pre-built for those architectures. The --version check chain
+    # below therefore always fails on 32-bit Pi (the `&&` on the missing
+    # rnx2rtkp's --version check fails), so the `cp` branch a few lines down
+    # is never reached there and _compil_rtklib() (build from source) always
+    # runs instead. That is intentional/expected until a 32-bit rnx2rtkp
+    # binary is added here.
     arch_package=$(uname -m)
+    # GeoMaxima: `uname -m` reports the KERNEL architecture, not the
+    # userland one - Raspberry Pi OS 32-bit on a Pi 3B/4/5 runs a 64-bit
+    # kernel with an armhf userland, so `uname -m` would wrongly say
+    # "aarch64" here and select aarch64 binaries that cannot run on this
+    # userland. dpkg --print-architecture reports the actual
+    # userland/binary architecture that matters for picking the right
+    # tools/bin/RTKLIB-2.5.0/<arch>/ directory. Same mapping as
+    # tools/platform_detect.sh's GM_ARCH; falls back to the uname value
+    # above on any system without dpkg (none of the currently-supported
+    # boards hit that fallback).
+    if command -v dpkg &>/dev/null; then
+        case "$(dpkg --print-architecture 2>/dev/null)" in
+            arm64) arch_package='aarch64' ;;
+            armhf)
+                # GeoMaxima: dpkg reports "armhf" identically for a Pi
+                # Zero/1 (ARMv6) and a Pi 2/3/4 (ARMv7) running Raspberry
+                # Pi OS's 32-bit/armhf userland - dpkg's architecture name
+                # does not distinguish them, only `uname -m` does
+                # (confirmed: Pi OS armhf is built ARMv6-compatible, so
+                # `uname -m` still reports "armv6l" on that hardware even
+                # though the userland is the same "armhf" dpkg arch as a
+                # Pi 3/4). Use uname -m here to pick the right prebuilt
+                # binary directory instead of collapsing both onto armv7l.
+                if [[ "$(uname -m)" == "armv6l" ]]; then
+                    arch_package='armv6l'
+                else
+                    arch_package='armv7l'
+                fi
+                ;;
+            armel) arch_package='armv6l' ;;
+            amd64) arch_package='x86_64' ;;
+        esac
+    fi
     #[[ $arch_package == 'x86_64' ]] && arch_package='x86'
     [[ -f /sys/firmware/devicetree/base/model ]] && computer_model=$(tr -d '\0' < /sys/firmware/devicetree/base/model)
     # convert "Raspberry Pi 3 Model B plus rev 1.3" or other Raspi model to the variable "Raspberry Pi"
@@ -196,6 +237,17 @@ install_rtklib() {
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rtkrcv /usr/local/bin/
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/convbin /usr/local/bin/
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rnx2rtkp /usr/local/bin/
+      # GeoMaxima: belt-and-braces only, not the actual fix. `cp` preserves
+      # the source file's mode, and the --version checks above already
+      # require the tools/bin/... copies to be executable to reach this
+      # branch at all - so the real fix is the git-tracked exec bit on
+      # tools/bin/RTKLIB-2.5.0/armv7l and armv6l/{str2str,rtkrcv,convbin}
+      # (previously 644, unlike aarch64 which was already tracked
+      # executable; fixed via `git update-index --chmod=+x`, not here).
+      # This chmod just guards against some future re-vendor/re-tag of
+      # these binaries losing the executable bit again without anyone
+      # noticing until runtime. Harmless/idempotent either way.
+      chmod +x /usr/local/bin/str2str /usr/local/bin/rtkrcv /usr/local/bin/convbin /usr/local/bin/rnx2rtkp
     else
       echo 'No binary available for ' "${computer_model}" ' - ' "${arch_package}" '. We will build it from source'
       _compil_rtklib

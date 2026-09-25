@@ -8,7 +8,9 @@
 #  Exports, read-only, no side effects (safe to source repeatedly):
 #    GM_PLATFORM       one of: rpi | armbian-a733 | armbian | unknown
 #    GM_BOARD          human-readable board/model string (best effort)
-#    GM_ARCH           uname -m (aarch64 / armv7l / armv6l / x86_64 / ...)
+#    GM_ARCH           dpkg-architecture-derived userland arch (aarch64 /
+#                       armv7l / armv6l / x86_64 / ...) - NOT simply
+#                       `uname -m`; see the comment where GM_ARCH is set.
 #    GM_CONSOLE_TTYS   space-separated list of tty device names (no "/dev/"
 #                       prefix, e.g. "ttyS0 ttyAMA0") that the kernel is using
 #                       as a serial console - GNSS auto-detection must never
@@ -23,7 +25,38 @@
 # =============================================================================
 
 # GM_ARCH -------------------------------------------------------------------
-GM_ARCH="$(uname -m)"
+# NOT simply `uname -m`: Raspberry Pi OS 32-bit on a Pi 3B/4/5 runs a
+# 64-bit KERNEL with a 32-bit (armhf) USERLAND - `uname -m` reports
+# "aarch64" in that case even though every userspace binary (including any
+# RTKLIB build) must be armv7l/armhf, not aarch64. `dpkg --print-architecture`
+# reports the actual userland/dpkg architecture and is what determines
+# which prebuilt binaries (tools/bin/RTKLIB-2.5.0/<arch>/...) actually run.
+# Falls back to `uname -m` on non-Debian-based systems (no dpkg) - none of
+# the currently-supported boards hit that fallback, but it keeps this
+# script from hard-failing there instead of just guessing wrong.
+if command -v dpkg &>/dev/null; then
+    case "$(dpkg --print-architecture 2>/dev/null)" in
+        arm64)  GM_ARCH="aarch64" ;;
+        armhf)
+            # dpkg reports "armhf" identically for a Pi Zero/1 (ARMv6) and
+            # a Pi 2/3/4 (ARMv7) running Raspberry Pi OS's 32-bit/armhf
+            # userland - only `uname -m` distinguishes them (Pi OS armhf is
+            # built ARMv6-compatible, so `uname -m` still says "armv6l" on
+            # that hardware). Same disambiguation as tools/install.sh's
+            # arch_package.
+            if [[ "$(uname -m)" == "armv6l" ]]; then
+                GM_ARCH="armv6l"
+            else
+                GM_ARCH="armv7l"
+            fi
+            ;;
+        armel)  GM_ARCH="armv6l" ;;
+        amd64)  GM_ARCH="x86_64" ;;
+        *)      GM_ARCH="$(uname -m)" ;;
+    esac
+else
+    GM_ARCH="$(uname -m)"
+fi
 
 # GM_BOARD (best effort; device-tree model string, present on virtually all
 # aarch64 SBCs including Raspberry Pi and Armbian boards) -------------------
