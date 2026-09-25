@@ -4,6 +4,17 @@
 # =============================================================================
 # Idempotent security setup script with logging functions
 # SSH access MUST be configured BEFORE enabling UFW
+#
+# GeoMaxima: UFW is installed and SSH access is allowed here, but UFW is no
+# longer ENABLED by this script. settings.conf (which lists this station's
+# actual web/RTCM/NTRIP ports) does not exist yet at this point in the
+# install (this script runs BEFORE tools/install.sh, which is what creates
+# it) - enabling UFW here, with only SSH allowed, would lock the station's
+# own web UI and GNSS data ports out from behind its own firewall the
+# moment it comes up. UFW is now installed+SSH-allowed-but-left-disabled
+# here, and a separate step later in install.sh (after tools/install.sh has
+# written settings.conf) adds rules for every port the station actually
+# uses and only then enables it. See geomaxima_configure_firewall.sh.
 # =============================================================================
 
 set -euo pipefail
@@ -49,56 +60,41 @@ else
 fi
 
 # =============================================================================
-# Step 3: Configure SSH access BEFORE enabling UFW (CRITICAL!)
+# Step 3: Allow SSH access, but do NOT enable UFW yet (see header comment)
 # =============================================================================
 log_info "Configuring firewall rules for SSH access..."
 
-# Allow SSH on port 22 (or custom port if configured)
+# GeoMaxima: detect the SSH port from sshd's own effective configuration
+# instead of assuming 22 - `sshd -T` prints the fully-resolved config
+# (after Include files, Match blocks' unconditional directives, etc.) that
+# sshd itself would actually use, which is more reliable than grepping
+# sshd_config directly (a custom Port could be set via an Include'd file,
+# commented-then-overridden, etc.). Falls back to 22 (and to the
+# SSH_PORT env override, for anyone who still wants to force a value) if
+# sshd is missing or `-T` fails for any reason.
+if [[ -n "${SSH_PORT:-}" ]]; then
+    : # explicit override, use as-is
+elif command -v sshd &>/dev/null; then
+    SSH_PORT="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+fi
 SSH_PORT="${SSH_PORT:-22}"
+
 ufw allow "${SSH_PORT}/tcp" || {
     log_error "Failed to allow SSH port ${SSH_PORT}"
     exit 1
 }
 
 log_info "SSH access allowed on port ${SSH_PORT}"
+log_info "UFW installed and SSH-allowed, left DISABLED for now - a later install.sh step enables it once this station's actual service ports are known (see tools/geomaxima_configure_firewall.sh)."
 
 # =============================================================================
-# Step 4: Interactively enable UFW with confirmation
+# Step 4: Install and configure fail2ban
 # =============================================================================
-log_info "UFW configured. Enabling firewall (requires confirmation)..."
-
-echo ""
-echo "============================================================================"
-echo "  SECURITY WARNING: The following changes will be applied:"
-echo "    - UFW firewall will be ENABLED"
-echo "    - SSH access on port ${SSH_PORT} is ALLOWED"
-echo "    - All other incoming traffic will be BLOCKED by default"
-echo ""
-echo "  This is a CRITICAL security measure for your Raspberry Pi."
-echo "============================================================================"
-echo ""
-
-read -rp "Enable UFW firewall? [y/N]: " enable_ufw
-if [[ "${enable_ufw,,}" != "y" && "${enable_ufw,,}" != "yes" ]]; then
-    log_info "UFW enabled manually later (user declined auto-enable)"
-    ufw --force disable
-    echo ""
-    echo "============================================================================"
-    echo "  UFW is DISABLED. Please enable it manually when ready:"
-    echo "    sudo ufw enable"
-    echo "============================================================================"
-    exit 0
-fi
-
-log_info "Enabling UFW firewall..."
-ufw --force enable || {
-    log_error "Failed to enable UFW"
-    exit 1
-}
-log_info "UFW enabled successfully"
-
-# =============================================================================
-# Step 5: Install and configure fail2ban
+# GeoMaxima: this step must run regardless of the (now-removed) interactive
+# UFW-enable decision above - fail2ban protects SSH independently of UFW,
+# and previously this whole step was skipped whenever the user declined
+# UFW (the old Step 4 did `exit 0` before ever reaching fail2ban). Fixed by
+# removing that early exit entirely; fail2ban always runs now.
 # =============================================================================
 log_info "Installing fail2ban..."
 if ! command -v fail2ban &>/dev/null; then
@@ -158,9 +154,11 @@ echo "==========================================================================
 echo ""
 echo "Applied security measures:"
 echo "  ✓ System packages updated (apt full-upgrade)"
-echo "  ✓ UFW firewall installed and ENABLED"
-echo "  ✓ SSH access allowed on port ${SSH_PORT}"
+echo "  ✓ UFW firewall installed, SSH access allowed on port ${SSH_PORT} - NOT YET ENABLED"
 echo "  ✓ fail2ban configured with jail.local (maxretry=5, bantime=1h)"
+echo ""
+echo "UFW will be enabled automatically later in install.sh, once this station's"
+echo "actual service ports (web UI, RTCM, NTRIP, ...) are known from settings.conf."
 echo ""
 
 # Verify status immediately
@@ -169,7 +167,9 @@ ufw status verbose
 
 echo ""
 echo "============================================================================"
-echo "IMPORTANT: Never change SSH port without updating this script's SSH_PORT variable!"
+echo "IMPORTANT: SSH_PORT was auto-detected from sshd's effective config (sshd -T)."
+echo "If you change the SSH port later, re-run this script so both UFW and"
+echo "fail2ban's jail.local get updated to match."
 echo "============================================================================"
 
 exit 0

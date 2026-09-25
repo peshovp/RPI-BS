@@ -536,6 +536,14 @@ if [[ -n "${SUDO_USER:-}" ]]; then
     chown -R "${SUDO_USER}":"${SUDO_USER}" "${SCRIPT_DIR}/.git" 2>/dev/null || true
 fi
 
+# --- Firewall: allow this station's actual service ports, then enable UFW ---
+# GeoMaxima: moved here (after tools/install.sh has just created
+# settings.conf) rather than in tools/security_setup.sh (STAGE 2, which
+# runs BEFORE settings.conf exists) - see tools/security_setup.sh's header
+# comment and tools/geomaxima_configure_firewall.sh for the full "why".
+chmod +x tools/geomaxima_configure_firewall.sh 2>/dev/null || true
+./tools/geomaxima_configure_firewall.sh settings.conf || log "WARNING: firewall configuration step failed - UFW may still be disabled. Run tools/geomaxima_configure_firewall.sh manually once resolved."
+
 # --- 4. Final checklist ---
 echo ""
 echo "============================================================================"
