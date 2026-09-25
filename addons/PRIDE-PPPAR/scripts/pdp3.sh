@@ -2089,21 +2089,50 @@ PrepareRinexNav() { # purpose : prepare RINEX multi-systems broadcast ephemeride
 
         # Try downloading hourly navigation file when processing current day's data
         if [ $(TZ=UTC date -u +"%Y%j") -eq "$year$doy" ] && [ ! -f "$rinex_dir/$rinexnav" ]; then
+            # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR behavior -
+            # addons/PRIDE-PPPAR/ is vendored upstream source; keep this comment
+            # so this fix is never silently dropped on a future re-vendor).
+            # CONFIRMED LIVE ROOT CAUSE (BaseStation, 2026-09-24) of a garbage
+            # MJD-0/empty-output run: neither hourly download below had any
+            # retry (unlike WgetDownload()'s bdspride branch or the CLK/ERP/OSB/
+            # ANTEX hardening already applied elsewhere in this file), and when
+            # only one of GPS/GLONASS succeeded, the old code silently renamed
+            # that single-constellation file to be the final "brdm" nav file
+            # used for ALL satellites. tedit needs broadcast ephemeris to
+            # compute an expected range per satellite for its receiver-clock/
+            # range sanity check (DEL_BADRANGE) - a single-GNSS nav file makes
+            # every satellite of the missing constellation(s) fail that check,
+            # which was enough to make tedit reject effectively all
+            # observations and lsq process zero epochs. Now: (1) each download
+            # is retried up to 3x with a short backoff, and (2) a partial
+            # result (only one of the two constellations) is treated as a
+            # failure of this hourly-download attempt rather than an
+            # acceptable downgrade - it falls through to the existing
+            # brdm-from-RINEX-directory / brdc-download fallbacks below instead
+            # of overwriting $rinexnav with a single-GNSS file.
             local navgps="hour${doy}0.${year:2:2}n" && rm -f "$navgps"
             local urlnav="ftp://igs.gnsswhu.cn/pub/gps/data/hourly/${year}/${doy}/${navgps}.gz"
-            WgetDownload "$urlnav"
-            if [ $? -eq 0 ]; then
+            local _navgps_ok=1
+            for _hourly_attempt in 1 2 3; do
+                WgetDownload "$urlnav" && { _navgps_ok=0; break; }
+                [ "$_hourly_attempt" -lt 3 ] && sleep 2
+            done
+            if [ "$_navgps_ok" -eq 0 ]; then
                 gunzip -f ${navgps}.gz
             else
-                echo -e "$MSGWAR failed to download hourly GPS navigation file: $navgps"
+                echo -e "$MSGWAR failed to download hourly GPS navigation file after retries: $navgps"
             fi
             local navglo="hour${doy}0.${year:2:2}g" && rm -f "$navglo"
             local urlnav="ftp://igs.gnsswhu.cn/pub/gps/data/hourly/${year}/${doy}/${navglo}.gz"
-            WgetDownload "$urlnav"
-            if [ $? -eq 0 ]; then
+            local _navglo_ok=1
+            for _hourly_attempt in 1 2 3; do
+                WgetDownload "$urlnav" && { _navglo_ok=0; break; }
+                [ "$_hourly_attempt" -lt 3 ] && sleep 2
+            done
+            if [ "$_navglo_ok" -eq 0 ]; then
                 gunzip -f ${navglo}.gz
             else
-                echo -e "$MSGWAR failed to download hourly GLONASS navigation file: $navglo"
+                echo -e "$MSGWAR failed to download hourly GLONASS navigation file after retries: $navglo"
             fi
             if [ -f "$navgps" -a -f "$navglo" ]; then
                 echo -e "$MSGSTA Merging $rinexnav ..."
@@ -2113,13 +2142,20 @@ PrepareRinexNav() { # purpose : prepare RINEX multi-systems broadcast ephemeride
                     return 1
                 fi
             else
-                [ -f "$navglo" ] && mv -f "$navglo" "$rinex_dir/$rinexnav"
-                [ -f "$navgps" ] && mv -f "$navgps" "$rinex_dir/$rinexnav"
-                if [ ! -f "$rinex_dir/$rinexnav" ]; then
-                    echo -e "$MSGERR failed to download hourly RINEX navigation file: $rinex_dir/$rinexnav"
-                    echo -e "$MSGINF please download from $urlnav to $rinex_dir for processing"
-                    return 1
+                # Only one (or neither) constellation downloaded - do NOT rename
+                # the lone survivor to $rinexnav (that would silently pass a
+                # single-GNSS file off as the multi-GNSS brdm, see comment
+                # above). Prefer an already-cached multi-GNSS brdm for this
+                # same day if one exists from a previous successful run, before
+                # falling through to the brdm-from-RINEX-directory / brdc
+                # fallbacks further down.
+                echo -e "$MSGWAR incomplete hourly navigation download (GPS:$([ -f "$navgps" ] && echo ok || echo missing) GLONASS:$([ -f "$navglo" ] && echo ok || echo missing)) - refusing to use a single-GNSS file as $rinexnav"
+                if [ -f "$rinex_dir/$rinexnav" ]; then
+                    echo -e "$MSGWAR reusing existing cached multi-GNSS navigation file: $rinex_dir/$rinexnav"
+                else
+                    echo -e "$MSGINF will attempt brdm-from-directory / brdc fallback for: $rinex_dir/$rinexnav"
                 fi
+                rm -f "$navgps" "$navglo"
             fi
         fi
 
