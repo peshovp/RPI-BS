@@ -3026,8 +3026,29 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
                             rm -f "$fcb"* "$product_cmn_dir/$fcb"*
                         fi
                     fi
-                    CopyOrDownloadProduct "$product_cmn_dir/$fcb"
-                    [ $? -ne 0 ] && CopyOrDownloadProduct "$product_cmn_dir/$cmp" "$url"
+                    # LOCAL DOWNSTREAM PATCH (RPI-BS, not upstream PRIDE-PPPAR
+                    # behavior - addons/PRIDE-PPPAR/ is vendored upstream source;
+                    # keep this comment so this fix is never silently dropped on
+                    # a future re-vendor). CONFIRMED LIVE on BaseStation: even
+                    # after the SP3/CLK/ERP/ANTEX/nav hardening above, this OSB
+                    # RTS fallback still intermittently failed completely (both
+                    # RAP mirrors above and this single RTS attempt), leaving
+                    # the bias product as "NONE" and preventing ambiguity
+                    # resolution (pos file showed "NO AMB FIXING" / "SAT BIAS:
+                    # None") even though basic PPP positioning succeeded. Unlike
+                    # the ANTEX and hourly-nav downloads (commits 999f3d6,
+                    # b39a4ed), this RTS attempt had no outer retry - a single
+                    # transient failure of either CopyOrDownloadProduct call was
+                    # final. Now retries the whole RTS attempt up to 3x with a
+                    # 2s backoff before falling through to the existing
+                    # AR==Y (fatal) / AR!=Y ("NONE", non-fatal) handling below,
+                    # which is otherwise unchanged.
+                    local _osb_rts_ok=1
+                    for _osb_rts_attempt in 1 2 3; do
+                        CopyOrDownloadProduct "$product_cmn_dir/$fcb" && { _osb_rts_ok=0; break; }
+                        CopyOrDownloadProduct "$product_cmn_dir/$cmp" "$url" && { _osb_rts_ok=0; break; }
+                        [ "$_osb_rts_attempt" -lt 3 ] && sleep 2
+                    done
                 else
                     [ ${ydoy[0]} -ge 2020 ] && local url="${urls[1]}" || local url="${urls[${#urls[@]}-1]}"
                     local cmp=$(basename "$url")
