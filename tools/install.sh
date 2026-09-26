@@ -833,7 +833,17 @@ main() {
   fi
   
   # check if there is at least 300MB of free space on the root partition to install rtkbase
-  if [[ $(df "$HOME" | awk 'NR==2 { print $4 }') -lt 300000 ]]
+  # GeoMaxima: confirmed live that $HOME is unset when this script runs
+  # from a systemd service (geomaxima-firstboot.service, phase 2 of the
+  # A733 SD->eMMC unattended install) - `df ""` then fails with
+  # "df: '': No such file or directory" and the unquoted-in-arithmetic
+  # empty result made the install exit as if disk space were low, even
+  # though 26.9 GB was actually free. `${HOME:-/}` falls back to the root
+  # filesystem (always mounted, always a valid df target) when HOME is
+  # unset - this measures the wrong filesystem only on an exotic setup
+  # where / and $HOME are on different filesystems AND HOME is unset,
+  # which does not apply to any station this project targets.
+  if [[ $(df "${HOME:-/}" | awk 'NR==2 { print $4 }') -lt 300000 ]]
   then
     echo 'Available space is lower than 300MB.'
     echo 'Exiting...'

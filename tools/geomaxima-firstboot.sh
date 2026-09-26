@@ -33,6 +33,26 @@ NET_WAIT_SECONDS=300
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 INSTALL_DIR="${INSTALL_DIR:-/opt/RPI-BS}"
 
+# GeoMaxima: confirmed live that systemd services run with essentially no
+# login-session environment at all - $HOME, $USER, $LOGNAME, and $TERM are
+# all unset here (this is PHASE 2, launched by
+# geomaxima-firstboot.service, not an interactive shell). install.sh (and
+# scripts it calls) has at least one spot that assumes $HOME is set
+# (tools/install.sh's free-disk-space check, `df "$HOME"` -> `df ""` ->
+# "No such file or directory", which made the install exit as if disk
+# space were low even with 26.9 GB free) - fixed at that call site too
+# (`${HOME:-/}`), but setting a sane environment HERE, once, before
+# install.sh even starts, is the belt-and-braces fix: it also covers any
+# OTHER script phase 2 runs (tools/security_setup.sh, tools/copy_unit.sh,
+# the PRIDE-PPPAR build step, ...) that might assume a normal login
+# session's environment, present or future, without needing to audit and
+# patch every individual call site as new ones are found.
+export HOME="${HOME:-/root}"
+export USER="${USER:-root}"
+export LOGNAME="${LOGNAME:-root}"
+export TERM="${TERM:-dumb}"
+export LANG="${LANG:-C.UTF-8}"
+
 attempt=0
 [[ -f "$COUNTER_FILE" ]] && attempt="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
 attempt=$(( attempt + 1 ))

@@ -31,6 +31,15 @@ name: Loop-device eMMC migration test
 # is installed (chrony Conflicts: time-daemon, systemd-timesyncd Provides:
 # time-daemon) - the confirmed-live regression the repo-wide --no-remove
 # safety net (c8b6012) introduced on both Armbian and Raspberry Pi OS.
+#
+# Also runs tests/systemd_env_test.sh (same lightweight style, run under
+# `env -i` to simulate systemd's near-empty environment), which verifies
+# tools/geomaxima-firstboot.sh's HOME/USER/LOGNAME/TERM/LANG fallbacks
+# take effect, and that tools/install.sh's free-disk-space check
+# (`df "${HOME:-/}"`) does not itself fail when HOME is unset - the
+# confirmed-live regression where phase 2 failed with
+# "Available space is lower than 300MB" on a board with 26.9 GB free,
+# because `df "$HOME"` became `df ""` under systemd.
 
 on:
   push:
@@ -49,11 +58,13 @@ on:
       - 'tools/wireguard_setup.sh'
       - 'tools/dns_setup.sh'
       - 'tools/install.sh'
+      - 'tools/geomaxima-firstboot.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
       - 'tests/wireguard_setup_test.sh'
       - 'tests/dns_setup_test.sh'
       - 'tests/install_gpsd_chrony_test.sh'
+      - 'tests/systemd_env_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   pull_request:
     paths:
@@ -63,11 +74,13 @@ on:
       - 'tools/wireguard_setup.sh'
       - 'tools/dns_setup.sh'
       - 'tools/install.sh'
+      - 'tools/geomaxima-firstboot.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
       - 'tests/wireguard_setup_test.sh'
       - 'tests/dns_setup_test.sh'
       - 'tests/install_gpsd_chrony_test.sh'
+      - 'tests/systemd_env_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   workflow_dispatch: {}
 
@@ -108,3 +121,11 @@ jobs:
 
       - name: Run install_gpsd_chrony() ordering test
         run: bash tests/install_gpsd_chrony_test.sh
+
+  systemd-env-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run systemd-empty-environment test
+        run: bash tests/systemd_env_test.sh

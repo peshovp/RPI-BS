@@ -412,6 +412,15 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 TimeoutStartSec=infinity
+# GeoMaxima: belt-and-braces alongside tools/geomaxima-firstboot.sh's own
+# export HOME=... fallback - confirmed live that systemd services run
+# with no HOME/USER/LOGNAME/TERM at all, which broke a free-disk-space
+# check further down the install (df "\$HOME" -> df "" -> "No such file
+# or directory"). Setting it here too means any FUTURE systemd unit that
+# might run install.sh (or a similar script) directly, without going
+# through geomaxima-firstboot.sh's own environment setup, is protected as
+# well.
+Environment=HOME=/root
 ExecStart=${INSTALL_DIR}/tools/geomaxima-firstboot.sh
 RemainAfterExit=no
 
@@ -922,7 +931,19 @@ else
         # tests?") - piping empty answers via `yes ""` answers every prompt
         # with its default, matching this project's general
         # "install.sh must never block waiting for input" requirement.
-        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
+        # GeoMaxima: explicit `env HOME=... USER=... LOGNAME=...` rather
+        # than relying on `sudo -u`'s default environment-reset behavior
+        # (which normally does set $HOME to the target user's home on
+        # Debian, but is a sudoers-policy default, not a hard guarantee) -
+        # PRIDE-PPPAR's own install.sh writes its build output to
+        # ${HOME}/.PRIDE_PPPAR_BIN, so a wrong/unset HOME here would build
+        # successfully but leave PRIDE_PPPAR_BIN's path (derived from
+        # $PRIDE_PPPAR_USER_HOME above) pointing at a location the build
+        # never actually wrote to. Confirmed live in this same install
+        # flow that $HOME cannot be assumed present at all when running
+        # under systemd (phase 2) - explicit is safer than relying on
+        # sudo's default here too.
+        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" env HOME="$PRIDE_PPPAR_USER_HOME" USER="$PRIDE_PPPAR_USER" LOGNAME="$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
             if [ -x "$PRIDE_PPPAR_BIN" ]; then
                 echo "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
                 # No git tag is pinned upstream (PrideLab/PRIDE-PPPAR has no
