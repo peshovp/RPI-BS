@@ -644,7 +644,18 @@ if [[ -n "$ROOT_SOURCE" ]]; then
     fi
 fi
 
-apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv fonts-dejavu-core
+apt-get install -y -qq curl git ca-certificates openresolv fonts-dejavu-core
+
+# GeoMaxima: WireGuard is installed via the shared helper below, NEVER via
+# the Debian `wireguard` metapackage directly in this apt-get line above -
+# see tools/wireguard_setup.sh's header comment for the confirmed-live
+# root cause (that metapackage depends on wireguard-modules, which only
+# Debian's own linux-image-* kernel packages provide, pulling in a
+# Debian-origin kernel alongside this board's vendor kernel - the same
+# unbootable combination tools/armbian_kernel_pin.sh exists to prevent).
+# shellcheck source=tools/wireguard_setup.sh
+source "$SCRIPT_DIR/tools/wireguard_setup.sh"
+geomaxima_install_wireguard
 
 # --- DNS resolver resilience: DHCP-provided nameserver stays primary,
 # 8.8.8.8/1.1.1.1 added as fallback only ---

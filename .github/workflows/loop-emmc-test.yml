@@ -7,6 +7,13 @@ name: Loop-device eMMC migration test
 # GM_UBOOT_DIR/GM_EMMC_PLATFORM_SCRIPT test seams - no real hardware
 # involved, but real mount/mkfs.ext4/parted/dd operations on real (loop)
 # block devices, unlike a plain `bash -n` syntax check.
+#
+# Also runs tests/wireguard_setup_test.sh (a separate, lightweight job -
+# it needs no root/loop devices, only `ip`/`apt-get` stubbed via PATH),
+# which verifies tools/wireguard_setup.sh never requests the Debian
+# `wireguard` metapackage, a `linux-image-*` package, or a `*-dkms`
+# package - the confirmed-live root cause of a real Orange Pi 4 Pro+
+# station's boot brick (see that script's own header comment).
 
 on:
   push:
@@ -22,16 +29,20 @@ on:
       - 'tools/emmc-install-opi4pro.sh'
       - 'tools/armbian_kernel_pin.sh'
       - 'tools/platform_detect.sh'
+      - 'tools/wireguard_setup.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
+      - 'tests/wireguard_setup_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   pull_request:
     paths:
       - 'tools/emmc-install-opi4pro.sh'
       - 'tools/armbian_kernel_pin.sh'
       - 'tools/platform_detect.sh'
+      - 'tools/wireguard_setup.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
+      - 'tests/wireguard_setup_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   workflow_dispatch: {}
 
@@ -48,3 +59,11 @@ jobs:
 
       - name: Run loop-device eMMC migration test
         run: sudo bash tests/loop_emmc_test.sh
+
+  wireguard-setup-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run WireGuard setup helper test
+        run: bash tests/wireguard_setup_test.sh

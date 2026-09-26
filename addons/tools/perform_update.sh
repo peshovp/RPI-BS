@@ -149,6 +149,35 @@ sudo raspi-config nonint do_spi 0 2>&1 | tee -a /tmp/ota_update.log || log_statu
 log_status "info" "Ensuring fonts-dejavu-core is installed (idempotent, needed for optional LCD display feature)..."
 sudo apt-get install -y -qq fonts-dejavu-core 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ fonts-dejavu-core install failed - continuing anyway"
 
+log_status "info" "Ensuring WireGuard tooling is installed (idempotent - never the 'wireguard' metapackage, see tools/wireguard_setup.sh)..."
+# GeoMaxima: same shared helper install.sh uses - re-applied on every OTA
+# run so a station that never had WireGuard, or whose kernel changed
+# (e.g. a future Armbian vendor-kernel update that DOES add native
+# WireGuard support), converges on the right package set. NEVER installs
+# the Debian `wireguard` metapackage - see tools/wireguard_setup.sh's
+# header comment for the confirmed-live root cause (that metapackage
+# depends on wireguard-modules, only provided by Debian's own
+# linux-image-* kernel packages, which would pull in a Debian-origin
+# kernel alongside this board's vendor kernel).
+#
+# Sourced by ABSOLUTE path (built from $DEV_REPO_PATH, the repo path this
+# script already receives as $1) rather than the relative "tools/..." the
+# rest of this script's own cwd-relative calls use - `sudo bash -c '...'`
+# launches a NEW shell whose cwd, while normally inherited from the caller,
+# should not be relied on across a sudo boundary here.
+#
+# `${PIPESTATUS[0]}` (not `... | tee ... || log_status`) is required to
+# actually see the helper's own exit status - piping through `tee` means a
+# plain `||` after the pipeline sees tee's exit code (always 0), never the
+# helper's, silently masking a real failure. This file has no `pipefail`
+# set repo-wide (kept that way here rather than changing it globally,
+# since ~20 other pre-existing `| tee` lines in this file are unrelated to
+# this fix and untested against a pipefail change).
+sudo bash -c "source '${DEV_REPO_PATH}/tools/wireguard_setup.sh' && geomaxima_install_wireguard" 2>&1 | tee -a /tmp/ota_update.log
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    log_status "info" "⚠ WireGuard setup failed - continuing anyway (optional feature, does not affect RTCM/GNSS)"
+fi
+
 log_status "info" "Ensuring DNS fallback resolvers are configured (idempotent - DHCP nameserver stays primary)..."
 # Mirrors install.sh's own DNS resolver resilience step exactly (same
 # detection-and-degrade order: systemd-resolved, then NetworkManager,
