@@ -197,13 +197,24 @@ echo "Detected platform: ${GM_PLATFORM:-unknown} (board: ${GM_BOARD:-unknown}, a
 # own detection and was verified live on an Orange Pi 4 Pro+ (mmcblk0 =
 # MMC/eMMC, mmcblk1 = SD).
 # GM_DRY_RUN=1 prints the check's verdict without exiting, for CI.
+# GeoMaxima: GM_SYSFS overridable (default /sys) - same test seam as
+# tools/emmc-install-opi4pro.sh, so a test harness can point this whole
+# check at a fake sysfs tree without any "if test mode" branch in the
+# logic itself. GM_TEST_ROOT_PART overrides the "source root" partition
+# the same way.
+GM_SYSFS="${GM_SYSFS:-/sys}"
 if [[ "${GM_PLATFORM:-}" == "armbian-a733" ]]; then
-    GM_PLATFORM_INSTALL_SCRIPT="/usr/lib/u-boot/platform_install.sh"
+    GM_PLATFORM_INSTALL_SCRIPT="${GM_EMMC_PLATFORM_SCRIPT:-/usr/lib/u-boot/platform_install.sh}"
     # `|| true`: under set -euo pipefail, `ls -d ... | head -1` with no
     # match makes `ls` exit non-zero, which without this would exit the
     # WHOLE SCRIPT here rather than just leaving GM_UBOOT_DIR empty (the
-    # intended, handled case a few lines down).
-    GM_UBOOT_DIR="$(ls -d /usr/lib/linux-u-boot-* 2>/dev/null | head -1 || true)"
+    # intended, handled case a few lines down). GM_UBOOT_DIR itself is
+    # overridable for the same test-seam reason as above.
+    if [[ -n "${GM_UBOOT_DIR:-}" ]]; then
+        : # explicit override, use as-is
+    else
+        GM_UBOOT_DIR="$(ls -d /usr/lib/linux-u-boot-* 2>/dev/null | head -1 || true)"
+    fi
     if [[ -f "$GM_PLATFORM_INSTALL_SCRIPT" && -n "$GM_UBOOT_DIR" && -f "$GM_UBOOT_DIR/boot_package.fex" ]]; then
         GM_BP_SEEK_K="$(grep -oP 'boot_package\.fex.*bs=1k seek=\K[0-9]+' "$GM_PLATFORM_INSTALL_SCRIPT" | head -1 || true)"
         if [[ -z "$GM_BP_SEEK_K" ]]; then
@@ -213,16 +224,20 @@ if [[ "${GM_PLATFORM:-}" == "armbian-a733" ]]; then
         GM_BP_SIZE_K=$(( ( $(stat -c%s "$GM_UBOOT_DIR/boot_package.fex") + 1023 ) / 1024 ))
         GM_BP_END_K=$(( GM_BP_SEEK_K + GM_BP_SIZE_K ))
 
-        GM_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+        if [[ -n "${GM_TEST_ROOT_PART:-}" ]]; then
+            GM_ROOT_SOURCE="$GM_TEST_ROOT_PART"
+        else
+            GM_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+        fi
         GM_ROOT_DISK_NAME="$(lsblk -no PKNAME "$GM_ROOT_SOURCE" 2>/dev/null || true)"
         GM_ROOT_PART_NAME="$(basename "$GM_ROOT_SOURCE" 2>/dev/null || true)"
         # device/type is read only for the recommendation text below - it
         # never gates whether the size comparison itself runs.
         GM_ROOT_DEVICE_TYPE=""
-        [[ -n "$GM_ROOT_DISK_NAME" && -f "/sys/block/${GM_ROOT_DISK_NAME}/device/type" ]] \
-            && GM_ROOT_DEVICE_TYPE="$(cat "/sys/block/${GM_ROOT_DISK_NAME}/device/type" 2>/dev/null || true)"
-        if [[ -n "$GM_ROOT_DISK_NAME" && -f "/sys/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" ]]; then
-            GM_ROOT_PART_START_SECTORS="$(cat "/sys/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" 2>/dev/null || echo 0)"
+        [[ -n "$GM_ROOT_DISK_NAME" && -f "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/device/type" ]] \
+            && GM_ROOT_DEVICE_TYPE="$(cat "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/device/type" 2>/dev/null || true)"
+        if [[ -n "$GM_ROOT_DISK_NAME" && -f "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" ]]; then
+            GM_ROOT_PART_START_SECTORS="$(cat "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" 2>/dev/null || echo 0)"
             GM_ROOT_PART_START_K=$(( GM_ROOT_PART_START_SECTORS / 2 ))
             if (( GM_BP_END_K >= GM_ROOT_PART_START_K )); then
                 echo "ERROR: the U-Boot bootloader write range (${GM_BP_SEEK_K}K-${GM_BP_END_K}K) overlaps this" >&2
@@ -252,7 +267,7 @@ if [[ "${GM_PLATFORM:-}" == "armbian-a733" ]]; then
                 echo "Verified: bootloader write range (${GM_BP_SEEK_K}K-${GM_BP_END_K}K) does not overlap the root partition (starts at ${GM_ROOT_PART_START_K}K) - safe to continue." >&2
             fi
         else
-            echo "WARNING: could not read the root partition's start offset from sysfs - skipping bootloader-overlap check. Verify manually before rebooting: compare 'cat /sys/block/${GM_ROOT_DISK_NAME:-<disk>}/${GM_ROOT_PART_NAME:-<part>}/start' against the seek= value in $GM_PLATFORM_INSTALL_SCRIPT." >&2
+            echo "WARNING: could not read the root partition's start offset from sysfs - skipping bootloader-overlap check. Verify manually before rebooting: compare 'cat $GM_SYSFS/block/${GM_ROOT_DISK_NAME:-<disk>}/${GM_ROOT_PART_NAME:-<part>}/start' against the seek= value in $GM_PLATFORM_INSTALL_SCRIPT." >&2
         fi
     fi
 fi
@@ -270,15 +285,19 @@ fi
 # still protected by the bootloader-overlap check above).
 GM_EMMC="${GM_EMMC:-auto}"
 if [[ "${GM_PLATFORM:-}" == "armbian-a733" && "${GM_PHASE:-1}" == "1" && "$GM_EMMC" != "no" ]]; then
-    GM_A733_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    if [[ -n "${GM_TEST_ROOT_PART:-}" ]]; then
+        GM_A733_ROOT_SOURCE="$GM_TEST_ROOT_PART"
+    else
+        GM_A733_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    fi
     GM_A733_ROOT_DISK="$(lsblk -no PKNAME "$GM_A733_ROOT_SOURCE" 2>/dev/null || true)"
     GM_A733_ROOT_IS_SD=0
-    [[ -n "$GM_A733_ROOT_DISK" && -f "/sys/block/${GM_A733_ROOT_DISK}/device/type" ]] \
-        && [[ "$(cat "/sys/block/${GM_A733_ROOT_DISK}/device/type" 2>/dev/null)" == "SD" ]] \
+    [[ -n "$GM_A733_ROOT_DISK" && -f "$GM_SYSFS/block/${GM_A733_ROOT_DISK}/device/type" ]] \
+        && [[ "$(cat "$GM_SYSFS/block/${GM_A733_ROOT_DISK}/device/type" 2>/dev/null)" == "SD" ]] \
         && GM_A733_ROOT_IS_SD=1
 
     GM_A733_EMMC_PRESENT=0
-    for GM_A733_B in /sys/block/mmcblk*; do
+    for GM_A733_B in "$GM_SYSFS"/block/mmcblk*; do
         GM_A733_N="$(basename "$GM_A733_B")"
         [[ "$GM_A733_N" =~ ^mmcblk[0-9]+$ ]] || continue
         if [[ "$(cat "$GM_A733_B/device/type" 2>/dev/null)" == "MMC" ]]; then

@@ -1,0 +1,43 @@
+name: Loop-device eMMC migration test
+
+# Exercises tools/emmc-install-opi4pro.sh end-to-end (partitioning, bootloader
+# write, kernel pin, rsync, UUID rewrite, re-migration guard, overlap guard,
+# SD bootloader wipe) against loop devices standing in for the SD card and
+# eMMC, using this project's own GM_SYSFS/GM_TEST_ROOT_PART/GM_ROOT_SRC/
+# GM_UBOOT_DIR/GM_EMMC_PLATFORM_SCRIPT test seams - no real hardware
+# involved, but real mount/mkfs.ext4/parted/dd operations on real (loop)
+# block devices, unlike a plain `bash -n` syntax check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/emmc-install-opi4pro.sh'
+      - 'tools/armbian_kernel_pin.sh'
+      - 'tools/platform_detect.sh'
+      - 'install.sh'
+      - 'tests/loop_emmc_test.sh'
+      - '.github/workflows/loop-emmc-test.yml'
+  pull_request:
+    paths:
+      - 'tools/emmc-install-opi4pro.sh'
+      - 'tools/armbian_kernel_pin.sh'
+      - 'tools/platform_detect.sh'
+      - 'install.sh'
+      - 'tests/loop_emmc_test.sh'
+      - '.github/workflows/loop-emmc-test.yml'
+  workflow_dispatch: {}
+
+jobs:
+  loop-emmc-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq parted rsync util-linux e2fsprogs
+
+      - name: Run loop-device eMMC migration test
+        run: sudo bash tests/loop_emmc_test.sh

@@ -67,8 +67,17 @@ if [[ -r /sys/firmware/devicetree/base/model ]]; then
 fi
 
 # GM_PLATFORM -----------------------------------------------------------------
+# GeoMaxima: GM_TEST_FORCE_PLATFORM is a test-only seam (real boards never
+# set it) - lets a test harness (e.g. a generic Ubuntu CI runner faking an
+# A733 board via loop devices/fake sysfs) force GM_PLATFORM without needing
+# a real device-tree model string or /etc/armbian-release. Only the
+# detection ITSELF is skipped when set - GM_CONSOLE_TTYS/gm_has_tty() below
+# still run normally either way, unlike an early `return` which would have
+# skipped those too.
 GM_PLATFORM="unknown"
-if [[ "$GM_BOARD" == *"Raspberry Pi"* ]]; then
+if [[ -n "${GM_TEST_FORCE_PLATFORM:-}" ]]; then
+    GM_PLATFORM="$GM_TEST_FORCE_PLATFORM"
+elif [[ "$GM_BOARD" == *"Raspberry Pi"* ]]; then
     GM_PLATFORM="rpi"
 elif [[ -r /etc/armbian-release ]]; then
     # /etc/armbian-release is a simple KEY=VALUE file (BOARD, BOARDFAMILY,

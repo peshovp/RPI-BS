@@ -38,8 +38,18 @@ geomaxima_apply_armbian_kernel_pin() {
     local pin_dir="${target_root}/etc/apt/preferences.d"
     local pin_file="$pin_dir/geomaxima-no-debian-kernel"
 
-    mkdir -p "$pin_dir"
-    cat > "$pin_file" <<'EOF'
+    # GeoMaxima: both of these previously had no error check at all, so
+    # this function always fell through to the success echo/return 0 even
+    # if mkdir or the pin-file write failed (e.g. a read-only or full
+    # filesystem, or a bad $target_root under an alternate-root/eMMC-target
+    # call) - a caller doing `geomaxima_apply_armbian_kernel_pin || die`
+    # (as install.sh and tools/emmc-install-opi4pro.sh both do) could never
+    # actually detect that failure. Now explicit `|| return 1` on both.
+    mkdir -p "$pin_dir" || {
+        echo "ERROR: geomaxima_apply_armbian_kernel_pin: could not create $pin_dir" >&2
+        return 1
+    }
+    cat > "$pin_file" <<'EOF' || {
 # Added by RPI-BS (GeoMaxima) - see tools/armbian_kernel_pin.sh.
 # Blocks apt from ever installing a Debian-origin kernel package alongside
 # an Armbian board's vendor kernel (confirmed live: this combination is
@@ -50,6 +60,9 @@ Package: linux-image-* linux-headers-* linux-kbuild-*
 Pin: origin "deb.debian.org"
 Pin-Priority: -1
 EOF
+        echo "ERROR: geomaxima_apply_armbian_kernel_pin: could not write $pin_file" >&2
+        return 1
+    }
 
     # Belt-and-suspenders: also hold any matching kernel packages that are
     # ALREADY installed on the running system (not meaningful under an
