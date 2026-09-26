@@ -429,10 +429,34 @@ EOF
         # tools/geomaxima-firstboot.sh itself is ALREADY present on the
         # eMMC copy - geomaxima_emmc_migrate()'s rsync copied this entire
         # checkout (this script IS running from $SCRIPT_DIR, inside
-        # $INSTALL_DIR, which rsync -aAXHx / copies in full) - just ensure
-        # it's executable.
-        chmod +x "$GM_EMMC_MNT${INSTALL_DIR}/tools/geomaxima-firstboot.sh" 2>/dev/null \
-            || echo "WARNING: could not chmod +x tools/geomaxima-firstboot.sh on the eMMC target - the firstboot service may fail to start (Permission denied)." >&2
+        # $INSTALL_DIR, which rsync -aAXHx / copies in full).
+        #
+        # GeoMaxima: FATAL, not a warning, if this file is missing on the
+        # eMMC target - the just-written geomaxima-firstboot.service's
+        # ExecStart points directly at it, so without it phase 2 can NEVER
+        # run automatically after reboot, exactly like every other
+        # handoff-write failure above (install.env, the unit file, its
+        # enable symlink). A missing file here means either $INSTALL_DIR
+        # doesn't match where the checkout actually lives on the eMMC
+        # copy, or the rsync copy was incomplete - both are conditions the
+        # operator needs to see and fix while still booted from SD, not
+        # discover after removing the SD card and rebooting into a board
+        # that never completes its own install.
+        if [[ ! -f "$GM_EMMC_MNT${INSTALL_DIR}/tools/geomaxima-firstboot.sh" ]]; then
+            echo "ERROR: tools/geomaxima-firstboot.sh not found on the eMMC target at" >&2
+            echo "  ${GM_EMMC_MNT}${INSTALL_DIR}/tools/geomaxima-firstboot.sh" >&2
+            echo "geomaxima-firstboot.service's ExecStart points there - without it, phase 2" >&2
+            echo "can never run automatically after reboot. NOT powering off, NOT wiping the" >&2
+            echo "SD bootloader area - fix this (check INSTALL_DIR / the rsync copy) and" >&2
+            echo "re-run install.sh." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        fi
+        chmod +x "$GM_EMMC_MNT${INSTALL_DIR}/tools/geomaxima-firstboot.sh" || {
+            echo "ERROR: could not chmod +x tools/geomaxima-firstboot.sh on the eMMC target - the firstboot service would fail to start (Permission denied)." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        }
 
         sync
         umount "$GM_EMMC_MNT" || echo "WARNING: umount of $GM_EMMC_MNT reported an error after writing phase-2 files (may already be unmounted)." >&2

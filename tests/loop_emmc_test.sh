@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Loop-device integration test for tools/emmc-install-opi4pro.sh
 # Fakes an A733 board: SD (loop, sysfs type=SD) + eMMC (loop, exposed as /dev/mmcblk90, type=MMC).
+#
+# NOTE: T6 (install.sh's phase-1 flow) calls geomaxima_apply_armbian_kernel_pin
+# once WITHOUT a target root (the "belt-and-braces pin on the SD-booted
+# system too" call inside install.sh itself, separate from the one it also
+# writes onto the eMMC target) - this writes
+# /etc/apt/preferences.d/geomaxima-no-debian-kernel onto THIS TEST HOST's
+# real filesystem, not a fixture. Harmless on an ephemeral CI runner (it
+# only blocks installing a Debian-origin kernel package, which nothing in
+# this test does), but worth knowing before running this outside CI.
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 W=/tmp/gmtest; rm -rf "$W"; mkdir -p "$W"
@@ -12,6 +21,11 @@ chk()  { if eval "$1"; then ok "$2"; else bad "$2"; fi; }
 cleanup_all() {
   umount /mnt/emmc-target 2>/dev/null; umount "$W/sdroot" 2>/dev/null; umount "$W/sdroot2" 2>/dev/null
   umount "$W/chk" 2>/dev/null; umount "$W/chk2" 2>/dev/null
+  # /home/peshovp/RPI-BS is a bind mount used only by T6 (install.sh needs
+  # a REALISTIC absolute INSTALL_DIR that matches what the firstboot
+  # unit's ExecStart will actually be on the eMMC - see T6's own comment) -
+  # unmount it here too in case the test exits mid-T6.
+  umount /home/peshovp/RPI-BS 2>/dev/null; umount /home/peshovp/RPI-BS 2>/dev/null
   [[ -n "${WATCH_PID:-}" ]] && kill "$WATCH_PID" 2>/dev/null
   [[ -n "${WATCH2_PID:-}" ]] && kill "$WATCH2_PID" 2>/dev/null
   rm -f /dev/mmcblk90 /dev/mmcblk90p1 /dev/mmcblk91p1 /dev/mmcblk92 /dev/mmcblk92p1 /dev/mmcblk93p1 /dev/loop[0-9]p1
@@ -238,8 +252,18 @@ run_install_phase1() {
   ( export PATH="$W/bin:$PATH" GM_SYSFS="$FS2" GM_TEST_ROOT_PART=/dev/mmcblk93p1 GM_ROOT_SRC="$W/sdroot2/" \
            GM_UBOOT_DIR="$UB" GM_EMMC_PLATFORM_SCRIPT="$W/platform_install.sh" \
            GM_TEST_FORCE_PLATFORM=armbian-a733 GM_PHASE=1 GM_EMMC=yes GM_DRY_RUN=0 \
-           SUDO_USER=peshovp INSTALL_DIR="$W/sdroot2/home/peshovp/RPI-BS" GM_REEXECD=1
-    cd "$W/sdroot2/home/peshovp/RPI-BS"
+           SUDO_USER=peshovp INSTALL_DIR=/home/peshovp/RPI-BS GM_REEXECD=1
+    # GeoMaxima: INSTALL_DIR must be the REALISTIC absolute path
+    # (/home/peshovp/RPI-BS), not this fixture's own $W-prefixed staging
+    # path - the eMMC copy install.sh writes the firstboot unit/handoff
+    # files into uses $INSTALL_DIR verbatim as the ExecStart path, and
+    # that path must actually resolve to the checkout ON THE eMMC after a
+    # real boot (where it lives at /home/peshovp/RPI-BS, not under $W).
+    # Bind-mounting the staged checkout there makes both "cd and run
+    # install.sh" and "what install.sh writes into the unit file" agree,
+    # exactly as they would on a real board.
+    mkdir -p /home/peshovp/RPI-BS; mount --bind "$W/sdroot2/home/peshovp/RPI-BS" /home/peshovp/RPI-BS
+    cd /home/peshovp/RPI-BS
     bash install.sh > "$W/out_install_phase1.log" 2>&1
     echo "rc=$?" )
 }
@@ -255,9 +279,19 @@ chk '[[ -f $W/chk2/etc/systemd/system/geomaxima-firstboot.service ]]' "geomaxima
 chk 'grep -q "ExecStart=.*/tools/geomaxima-firstboot.sh" $W/chk2/etc/systemd/system/geomaxima-firstboot.service' "unit ExecStart points at tools/geomaxima-firstboot.sh"
 chk '[[ -L $W/chk2/etc/systemd/system/multi-user.target.wants/geomaxima-firstboot.service ]]' "geomaxima-firstboot.service enabled (symlink present)"
 chk '[[ -f $W/chk2/etc/apt/preferences.d/geomaxima-no-debian-kernel ]]' "kernel pin present on eMMC (phase-1 path)"
+# The critical check the earlier version of this test missed: does the
+# ExecStart path actually EXIST (and is it executable) on the eMMC copy
+# itself, not just syntactically present in the unit file? With a
+# non-realistic INSTALL_DIR this silently pointed at a path that only
+# existed on the SD staging fixture, not the eMMC - install.sh logged
+# "could not chmod +x tools/geomaxima-firstboot.sh" while this test still
+# passed.
+EXEC=$(sed -n "s/^ExecStart=//p" "$W/chk2/etc/systemd/system/geomaxima-firstboot.service")
+chk '[[ -x "$W/chk2$EXEC" ]]' "ExecStart target exists and is executable ON THE eMMC [$EXEC]"
 umount "$W/chk2"
 chk '! mountpoint -q /mnt/emmc-target' "target unmounted after install.sh phase-1"
 
+umount /home/peshovp/RPI-BS 2>/dev/null; umount /home/peshovp/RPI-BS 2>/dev/null
 kill "$WATCH2_PID" 2>/dev/null
 umount "$W/sdroot2" 2>/dev/null
 rm -f /dev/mmcblk92 /dev/mmcblk92p1 /dev/mmcblk93p1

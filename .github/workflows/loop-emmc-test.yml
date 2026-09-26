@@ -10,7 +10,14 @@ name: Loop-device eMMC migration test
 
 on:
   push:
-    branches: [main]
+    # GeoMaxima: feature/armbian-opi4pro-support included explicitly - the
+    # push-to-main-only trigger meant every push while this work was still
+    # on its own feature branch (not yet merged) never ran this job at
+    # all, even though the corresponding pull_request trigger below only
+    # fires once an actual PR exists. Remove this branch name once merged
+    # to main (or once no other long-lived Armbian/eMMC feature branch is
+    # active) to avoid this list growing stale.
+    branches: [main, feature/armbian-opi4pro-support]
     paths:
       - 'tools/emmc-install-opi4pro.sh'
       - 'tools/armbian_kernel_pin.sh'
