@@ -288,6 +288,51 @@ def _parse_fix_rate_line(stdout: str) -> Dict[str, Optional[float]]:
     }
 
 
+# Matches any pdp3 output line that starts with "error:" or "warning:"
+# (case-insensitive, allowing leading whitespace) - pdp3's own
+# self-reported diagnostic lines, e.g. "error: PrepareProducts failed" or
+# "error: from 2026 268 to 2026 268 processing failed" (both confirmed
+# live on BaseStation as the actual cause behind a run that exited 0 with
+# no pos_* file - see process_ppp_ar()'s comment on that failure class).
+_PDP3_ERROR_LINE_RE = re.compile(r'^\s*(error|warning)\s*:', re.IGNORECASE)
+
+
+def _log_pdp3_error_lines(stdout: str, stderr: str, level: int = logging.WARNING) -> None:
+    """
+    Extract and log, at the given level (default WARNING - visible in
+    normal production logging, unlike the full stdout/stderr dump which
+    stays at debug), every line from pdp3's stdout/stderr that looks like
+    one of pdp3's own self-reported "error:"/"warning:" diagnostics.
+
+    This is what makes a failed slot's ACTUAL cause (e.g. "failed to
+    download satellite clock product") visible in normal production logs
+    without needing to enable debug logging or manually reproduce the run
+    - confirmed live: pdp3 can exit 0 while having actually failed (see
+    process_ppp_ar()'s comment), so its own printed error lines are often
+    the ONLY signal of what actually went wrong.
+
+    Logs nothing (silently) if no such lines are found - not itself an
+    error condition, since some pdp3 failure modes (e.g. a genuine crash
+    with no self-diagnostic output at all) have none to extract; the
+    caller's own log line (exit code, or "no pos_* file found") already
+    covers that case.
+    """
+    matched_lines = []
+    for stream_name, stream_text in (("stdout", stdout), ("stderr", stderr)):
+        if not stream_text:
+            continue
+        for line in stream_text.splitlines():
+            if _PDP3_ERROR_LINE_RE.match(line):
+                matched_lines.append(f"[pdp3 {stream_name}] {line.strip()}")
+
+    if matched_lines:
+        logger.log(
+            level,
+            "process_ppp_ar: pdp3 reported the following error/warning line(s), "
+            "likely the actual cause of this failed run:\n" + "\n".join(matched_lines)
+        )
+
+
 class PridePpparProcessor:
     """
     Process RINEX for PPP-AR positioning using PRIDE-PPPAR's pdp3.
@@ -429,12 +474,29 @@ class PridePpparProcessor:
         # Full stdout/stderr at debug level (not truncated) - volume
         # concern noted, but a malformed/failed pdp3 run is otherwise
         # undiagnosable from logs alone, per this session's explicit
-        # requirement.
+        # requirement. Kept at debug (not shown in default production
+        # logging) since it's often large and mostly noise on a SUCCESSFUL
+        # run; the warning/error-level summary below (for failed runs
+        # specifically) is what makes a failure diagnosable without
+        # needing to enable debug logging or reproduce by hand.
         logger.debug(f"process_ppp_ar: FULL stdout:\n{result.stdout}")
         logger.debug(f"process_ppp_ar: FULL stderr:\n{result.stderr}")
 
+        # CONFIRMED LIVE (BaseStation): pdp3 can exit 0 while having
+        # actually FAILED (e.g. a product-download failure such as
+        # "error: PrepareProducts failed" / "error: from 2026 268 to 2026
+        # 268 processing failed") and produced no pos_* file at all - pdp3
+        # never signals this failure class via a non-zero exit code. Both
+        # failure paths (non-zero exit, and zero-exit-but-no-pos-file,
+        # checked further below) therefore need the SAME diagnostic
+        # surfacing: pdp3's own "error:"/"warning:" lines, at
+        # logger.warning/error (visible in default production logging),
+        # not logger.debug - previously an operator had to manually
+        # reproduce a failed run by hand to see this same information,
+        # since it was only ever logged at debug level.
         if result.returncode != 0:
             logger.error(f"process_ppp_ar: pdp3 failed (exit {result.returncode}): {result.stderr}")
+            _log_pdp3_error_lines(result.stdout, result.stderr, level=logging.ERROR)
             return None
 
         # Output location was not pinned down to a single confirmed path
@@ -465,6 +527,12 @@ class PridePpparProcessor:
                 f"work_dir/results contents: "
                 f"{results_dir_contents if results_dir_contents is not None else '(directory does not exist)'}"
             )
+            # Zero-exit-code-but-actually-failed case (see the comment
+            # above the exit-code check) - same diagnostic surfacing as
+            # the non-zero-exit path, since this is exactly the class of
+            # failure that exit code alone cannot distinguish from
+            # success.
+            _log_pdp3_error_lines(result.stdout, result.stderr, level=logging.ERROR)
             return None
 
         if len(pos_files) > 1:
