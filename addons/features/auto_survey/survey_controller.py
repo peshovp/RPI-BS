@@ -25,6 +25,8 @@ decision, already established for ppp_downloader.py's own error handling.
 """
 
 import logging
+import re
+import shutil
 import time
 import subprocess
 from pathlib import Path
@@ -686,9 +688,41 @@ class SurveyController:
                                 f"newer positioning data with older"
                             )
                             self.state.mark_ppp_ar_slot_attempted(stale_slot)
-                        self._run_ppp_ar_interim(elapsed_hours, latest_due)
-                        # Marked attempted regardless of success/failure -
-                        # see _run_ppp_ar_interim()'s docstring.
+                        # Bounded retry-soon-on-failure for THIS slot only
+                        # (see PPP_AR_SLOT_RETRY_MAX_ATTEMPTS's comment) -
+                        # a transient failure (e.g. a network blip during
+                        # product download) gets a few short-spaced
+                        # attempts before this slot is given up on and
+                        # marked attempted, rather than only ever trying
+                        # once per 4h slot. Does not affect which slot is
+                        # selected (still always latest_due) or the
+                        # "mark attempted regardless of eventual outcome"
+                        # rule - only the SAME slot is retried, never a
+                        # different/older one.
+                        slot_ok = False
+                        for attempt_num in range(1, self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS + 1):
+                            slot_ok = self._run_ppp_ar_interim(elapsed_hours, latest_due)
+                            if slot_ok:
+                                break
+                            if attempt_num < self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS:
+                                logger.warning(
+                                    f"PPP-AR slot={latest_due}h attempt {attempt_num}/"
+                                    f"{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS} failed - "
+                                    f"retrying in {self.PPP_AR_SLOT_RETRY_DELAY_SECONDS}s "
+                                    f"(still within this same slot, not waiting for the "
+                                    f"next fixed slot)"
+                                )
+                                time.sleep(self.PPP_AR_SLOT_RETRY_DELAY_SECONDS)
+                            else:
+                                logger.warning(
+                                    f"PPP-AR slot={latest_due}h: all "
+                                    f"{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS} attempts failed - "
+                                    f"giving up on this slot, will wait for the next fixed slot"
+                                )
+                        # Marked attempted regardless of success/failure,
+                        # only after all retries above are exhausted (or
+                        # one succeeded) - see _run_ppp_ar_interim()'s
+                        # docstring.
                         self.state.mark_ppp_ar_slot_attempted(latest_due)
                 else:
                     # Check if update due
@@ -794,6 +828,34 @@ class SurveyController:
     # ones) trip it. UNCALIBRATED - a round "2 slot intervals + margin"
     # choice, not derived from any live PPP-AR failure-rate data.
     PPP_AR_UPDATE_TIMEOUT_MINUTES = int(PPP_AR_SLOT_INTERVAL_HOURS * 2 * 60) + 60
+
+    # Bounded, short-window retry-on-failure for the CURRENT due slot -
+    # confirmed live on BaseStation: a single transient network/DNS blip
+    # during one slot's product download (pdp3 exits 0 but produces no
+    # pos_* file - see pride_pppar_processor.py's process_ppp_ar()) meant
+    # that slot was marked "attempted" and not retried until the NEXT
+    # fixed 4h slot; two such transient failures in a row (4h then 8h)
+    # consumed nearly the entire PPP_AR_UPDATE_TIMEOUT_MINUTES (540min/9h)
+    # budget before a 3rd slot even had a chance to run, aborting an
+    # otherwise-recoverable 14h survey over what was, in the end, just a
+    # transient mirror/DNS issue - not a real station or data problem.
+    #
+    # Fix: when the CURRENT (latest-due) slot's attempt fails, retry it up
+    # to PPP_AR_SLOT_RETRY_MAX_ATTEMPTS times with
+    # PPP_AR_SLOT_RETRY_DELAY_SECONDS between attempts, all still within
+    # the SAME slot (never marked "attempted" until every retry is
+    # exhausted or one succeeds) - this does NOT change the "only the
+    # latest due slot ever runs, older due-but-unattempted slots are
+    # skipped without running" invariant (see _survey_loop()'s comment):
+    # retries only ever apply to the slot that was already selected to
+    # run, they never cause an older slot to run or re-run. Deliberately
+    # small/bounded (3 attempts, 2 minutes apart = at most ~6 extra
+    # minutes per slot) rather than an open-ended retry loop, so a
+    # persistent (non-transient) failure still gives up promptly and lets
+    # the survey continue waiting for the next slot rather than blocking
+    # the survey loop for an extended period.
+    PPP_AR_SLOT_RETRY_MAX_ATTEMPTS = 3
+    PPP_AR_SLOT_RETRY_DELAY_SECONDS = 120
 
     def _apply_geodetic_position(self,
                                   lat: float, lon: float, height: float,
@@ -1184,7 +1246,52 @@ class SurveyController:
                 pass
             return False
     
-    def _run_ppp_ar(self) -> Optional[Dict]:
+    # Number of past per-slot PRIDE-PPPAR work directories to retain (see
+    # _run_ppp_ar()'s isolated-work_dir scheme) - kept around for
+    # postmortem debugging of a failed slot (obs file, downloaded
+    # products, full pdp3 output if ever dumped to disk), pruned beyond
+    # this count so a long-running survey (or repeated surveys on the same
+    # station) doesn't accumulate unbounded disk usage. Deliberately NOT 1
+    # - a single retained slot would be overwritten/deleted before an
+    # operator has a chance to look at it if a NEW slot starts running
+    # (e.g. investigating slot N's failure while slot N+1 is already in
+    # progress); keeping several days' worth of slots (at 4h cadence, 10
+    # slots ~= 40h ~= the common failure-investigation window) costs only
+    # a few RINEX/product files each, not the multi-day accumulation this
+    # fix is replacing.
+    PPP_AR_SLOT_DIRS_TO_KEEP = 10
+
+    def _cleanup_old_ppp_ar_slot_dirs(self, ppp_ar_root: Path, keep_dir: Path) -> None:
+        """
+        Prune old per-slot PRIDE-PPPAR work directories under ppp_ar_root,
+        keeping the PPP_AR_SLOT_DIRS_TO_KEEP most-recently-created ones
+        (by directory mtime) plus keep_dir itself (the one about to be
+        used for the current attempt, so it's never pruned even if it
+        happens to already exist and be older than others - shouldn't
+        normally happen given the run-id suffix, but kept defensive).
+
+        Best-effort only: any failure to list/remove a stale directory is
+        logged and otherwise ignored - a pruning failure must never abort
+        or fail the PPP-AR run itself.
+        """
+        try:
+            if not ppp_ar_root.is_dir():
+                return
+            slot_dirs = [
+                p for p in ppp_ar_root.iterdir()
+                if p.is_dir() and p.name.startswith("slot_") and p != keep_dir
+            ]
+            slot_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for stale_dir in slot_dirs[self.PPP_AR_SLOT_DIRS_TO_KEEP:]:
+                try:
+                    shutil.rmtree(stale_dir)
+                    logger.debug(f"_cleanup_old_ppp_ar_slot_dirs: removed stale slot dir {stale_dir}")
+                except Exception as e:
+                    logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: failed to remove stale slot dir {stale_dir}: {e}")
+        except Exception as e:
+            logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: pruning failed (non-fatal): {e}")
+
+    def _run_ppp_ar(self, slot_label: str = "unknown") -> Optional[Dict]:
         """
         Run PRIDE-PPPAR (pdp3) for ambiguity-resolved PPP-static
         positioning - the shared worker behind BOTH:
@@ -1204,6 +1311,31 @@ class SurveyController:
         needed since, with ppp_ar_enabled=True, _perform_update() never
         runs at all - see _finalize_survey()/_run_ppp_ar_interim()).
 
+        Args:
+            slot_label: identifies which slot/attempt this is ("0h", "4h",
+                "final", ...) - used ONLY to build this run's isolated
+                PRIDE-PPPAR work directory (see below) and for logging;
+                has no effect on the actual PPP-AR computation.
+
+        ISOLATED WORK DIRECTORY (fix for a confirmed-live hazard):
+        each call gets its OWN pdp3 work directory
+        (work_dir/pride_pppar/slot_<slot_label>_<run_id>/), instead of the
+        single shared work_dir/pride_pppar/ directory previously reused
+        for an entire survey AND across separate survey runs on different
+        calendar days. Confirmed live on BaseStation: that shared
+        directory accumulated .obs files from 4 different dates plus TWO
+        different brdm*.p broadcast nav files simultaneously, with a MIX
+        of root-owned files (current run) and non-root-owned leftovers
+        from an earlier/different-context run (a prior run's obs/product
+        files that the current, root-run pdp3 invocation could not even
+        overwrite - "touch: Permission denied" confirmed live) sitting in
+        the exact directory every 4h slot's pdp3 invocation runs from.
+        Giving each attempt a fresh, uniquely-named directory means no
+        stale multi-day state or ownership mismatch can ever be present
+        when pdp3 starts, and _cleanup_old_ppp_ar_slot_dirs() prunes old
+        ones (keeping PPP_AR_SLOT_DIRS_TO_KEEP for postmortem debugging)
+        so this doesn't grow unbounded.
+
         Returns:
             Dict from PridePpparProcessor.parse_ppp_ar_result()
             (lat/lon/height/sig0/nobs/wl_fix_rate/nl_fix_rate/...), PLUS
@@ -1214,7 +1346,7 @@ class SurveyController:
             or no usable result could be parsed - NEVER raises; callers
             must treat None as "skip this run", not as a fatal error.
         """
-        logger.info("_run_ppp_ar: starting PRIDE-PPPAR run")
+        logger.info(f"_run_ppp_ar: starting PRIDE-PPPAR run (slot={slot_label})")
 
         try:
             pride = PridePpparProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
@@ -1253,8 +1385,28 @@ class SurveyController:
             else f"_run_ppp_ar: obs_file={obs_file}, obs_duration=unknown (could not read RINEX header epochs)"
         )
 
-        ppp_ar_dir = self.work_dir / "pride_pppar"
+        # Isolated per-attempt work directory - see this method's docstring
+        # for why the old single shared work_dir/pride_pppar/ directory
+        # was a confirmed-live hazard (stale multi-day obs/product files,
+        # root/non-root ownership mismatches). run_id combines a UTC
+        # timestamp with the process id so two attempts started in the
+        # same second (shouldn't happen given the 4h/final schedule, but
+        # cheap insurance) never collide.
+        ppp_ar_root = self.work_dir / "pride_pppar"
+        safe_slot_label = re.sub(r'[^A-Za-z0-9_.-]', '_', str(slot_label))
+        run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
+        ppp_ar_dir = ppp_ar_root / f"slot_{safe_slot_label}_{run_id}"
+        logger.info(f"_run_ppp_ar: isolated work_dir for this attempt: {ppp_ar_dir}")
+
         pos_file = pride.process_ppp_ar(obs_file, work_dir=ppp_ar_dir)
+
+        # Prune old slot directories AFTER this attempt (whether it
+        # succeeded or failed) - never before, so a failed attempt's own
+        # directory is never at risk of being pruned by its own cleanup
+        # pass, and always runs regardless of outcome so failed-attempt
+        # directories don't escape the retention limit either.
+        self._cleanup_old_ppp_ar_slot_dirs(ppp_ar_root, keep_dir=ppp_ar_dir)
+
         if not pos_file:
             logger.warning(
                 f"_run_ppp_ar: pdp3 run failed or produced no result - skipping this run "
@@ -1371,13 +1523,19 @@ class SurveyController:
         but using _run_ppp_ar() instead of rnx2rtkp/CDDIS, and applied only
         if the fix rate clears PPP_AR_MIN_FIX_RATE_PERCENT.
 
-        Never raises, never triggers a retry-sooner reschedule in the
-        caller - per Pesho's explicit "skip this slot entirely, wait for
-        the next fixed slot" instruction (unlike the rnx2rtkp interim
-        path's "retry in 60s on failure" behavior). The caller
-        (_survey_loop()) marks slot_hours as attempted regardless of this
-        method's return value, so a failed/skipped run is never retried
-        before the next fixed slot.
+        Never raises. This method itself does not retry - _survey_loop()
+        (the caller) wraps this call in a small, bounded retry loop
+        (PPP_AR_SLOT_RETRY_MAX_ATTEMPTS, short-spaced) so a transient
+        failure (e.g. a product-download network blip) gets a few more
+        tries within the SAME slot before being given up on, rather than
+        every failure automatically waiting a full PPP_AR_SLOT_INTERVAL_HOURS
+        for the next fixed slot (fixed after a real 14h survey was aborted
+        by the survey-wide watchdog over what was, in the end, just two
+        consecutive transient network failures - see
+        PPP_AR_SLOT_RETRY_MAX_ATTEMPTS's own comment for the full story).
+        _survey_loop() marks slot_hours as attempted only once its retry
+        loop is exhausted (or a retry succeeds), so a failed/skipped run
+        is still never retried past that point until the next fixed slot.
 
         Args:
             elapsed_hours: hours elapsed since survey start (for logging).
@@ -1395,10 +1553,10 @@ class SurveyController:
         slot_label = f"{slot_hours}h"
         logger.info(f"=== PPP-AR Interim Update (slot={slot_hours}h, elapsed={elapsed_hours:.2f}h) ===")
 
-        ppp_ar_result = self._run_ppp_ar()
+        ppp_ar_result = self._run_ppp_ar(slot_label=slot_label)
         if ppp_ar_result is None:
             logger.warning(f"PPP-AR interim slot={slot_hours}h: no result - "
-                            f"skipping this slot, will retry at the next fixed slot")
+                            f"this attempt failed (caller may retry within this same slot)")
             self._log_ppp_ar_attempt(slot_label, "FAILED", "no result from _run_ppp_ar (pdp3 unavailable/no raw file/RINEX conversion failed/run failed/parse failed)")
             return False
 
@@ -1506,7 +1664,7 @@ class SurveyController:
                 # invoked when ppp_ar_enabled is True (see docstring).
                 logger.info("PPP-AR enabled: running PRIDE-PPPAR-only final update (rnx2rtkp/CDDIS skipped)")
                 try:
-                    ppp_ar_result = self._run_ppp_ar()
+                    ppp_ar_result = self._run_ppp_ar(slot_label="final")
                     if ppp_ar_result is None:
                         logger.warning(
                             "PPP-AR final run produced no result - no final update this run "
