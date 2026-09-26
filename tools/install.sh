@@ -131,6 +131,24 @@ install_gpsd_chrony() {
     echo '################################'
     echo 'CONFIGURING FOR USING GPSD + CHRONY'
     echo '################################'
+      # GeoMaxima: confirmed live (both Armbian and Raspberry Pi OS ship
+      # systemd-timesyncd by default) that `apt-get install --no-remove
+      # chrony gpsd` ABORTS with "Packages need to be removed but remove
+      # is disabled" - chrony Conflicts: time-daemon, and
+      # systemd-timesyncd Provides: time-daemon, so apt must remove
+      # systemd-timesyncd to install chrony, which --no-remove correctly
+      # forbids by default. This removal is a KNOWN, INTENDED replacement
+      # (this function immediately stops/disables/masks
+      # systemd-timesyncd below anyway, since chrony is meant to fully
+      # replace it as the time source), so it is done explicitly and
+      # visibly here, BEFORE the --no-remove install - not via `--no-remove`
+      # being dropped for this one install, which would silently re-open
+      # the door to any OTHER unexpected removal alongside this expected
+      # one.
+      if dpkg -l systemd-timesyncd 2>/dev/null | grep -q '^ii'; then
+          echo 'Replacing systemd-timesyncd with chrony (GNSS/PPS time source) - chrony Conflicts: time-daemon, which systemd-timesyncd Provides.'
+          apt-get "${APT_TIMEOUT}" remove -y systemd-timesyncd || exit 1
+      fi
       apt-get "${APT_TIMEOUT}" install --no-remove chrony gpsd -y || exit 1
       #Disabling and masking systemd-timesyncd
       systemctl stop systemd-timesyncd > /dev/null 2>&1

@@ -22,6 +22,15 @@ name: Loop-device eMMC migration test
 # resolvconf mechanism (openresolv's append_nameservers vs. the Debian
 # resolvconf package's tail file) is ACTUALLY installed - the confirmed-live
 # root cause of that same station's DNS breaking during phase 2.
+#
+# Also runs tests/install_gpsd_chrony_test.sh (same lightweight style,
+# `dpkg`/`apt-get`/`systemctl` stubbed via PATH, tools/install.sh's
+# install_gpsd_chrony() function body extracted via sed rather than
+# sourcing that whole upstream script), which verifies systemd-timesyncd is
+# explicitly removed BEFORE the --no-remove chrony/gpsd install whenever it
+# is installed (chrony Conflicts: time-daemon, systemd-timesyncd Provides:
+# time-daemon) - the confirmed-live regression the repo-wide --no-remove
+# safety net (c8b6012) introduced on both Armbian and Raspberry Pi OS.
 
 on:
   push:
@@ -39,10 +48,12 @@ on:
       - 'tools/platform_detect.sh'
       - 'tools/wireguard_setup.sh'
       - 'tools/dns_setup.sh'
+      - 'tools/install.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
       - 'tests/wireguard_setup_test.sh'
       - 'tests/dns_setup_test.sh'
+      - 'tests/install_gpsd_chrony_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   pull_request:
     paths:
@@ -51,10 +62,12 @@ on:
       - 'tools/platform_detect.sh'
       - 'tools/wireguard_setup.sh'
       - 'tools/dns_setup.sh'
+      - 'tools/install.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
       - 'tests/wireguard_setup_test.sh'
       - 'tests/dns_setup_test.sh'
+      - 'tests/install_gpsd_chrony_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   workflow_dispatch: {}
 
@@ -87,3 +100,11 @@ jobs:
 
       - name: Run DNS setup helper test
         run: bash tests/dns_setup_test.sh
+
+  install-gpsd-chrony-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install_gpsd_chrony() ordering test
+        run: bash tests/install_gpsd_chrony_test.sh
