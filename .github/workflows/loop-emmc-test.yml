@@ -1,0 +1,131 @@
+name: Loop-device eMMC migration test
+
+# Exercises tools/emmc-install-opi4pro.sh end-to-end (partitioning, bootloader
+# write, kernel pin, rsync, UUID rewrite, re-migration guard, overlap guard,
+# SD bootloader wipe) against loop devices standing in for the SD card and
+# eMMC, using this project's own GM_SYSFS/GM_TEST_ROOT_PART/GM_ROOT_SRC/
+# GM_UBOOT_DIR/GM_EMMC_PLATFORM_SCRIPT test seams - no real hardware
+# involved, but real mount/mkfs.ext4/parted/dd operations on real (loop)
+# block devices, unlike a plain `bash -n` syntax check.
+#
+# Also runs tests/wireguard_setup_test.sh (a separate, lightweight job -
+# it needs no root/loop devices, only `ip`/`apt-get` stubbed via PATH),
+# which verifies tools/wireguard_setup.sh never requests the Debian
+# `wireguard` metapackage, a `linux-image-*` package, or a `*-dkms`
+# package - the confirmed-live root cause of a real Orange Pi 4 Pro+
+# station's boot brick (see that script's own header comment).
+#
+# Also runs tests/dns_setup_test.sh (same lightweight style, `systemctl`/
+# `apt-get`/`nmcli`/`dpkg`/`resolvconf` stubbed via PATH), which verifies
+# tools/dns_setup.sh never installs openresolv when systemd-resolved or
+# NetworkManager is active, and writes the DNS-fallback config to whichever
+# resolvconf mechanism (openresolv's append_nameservers vs. the Debian
+# resolvconf package's tail file) is ACTUALLY installed - the confirmed-live
+# root cause of that same station's DNS breaking during phase 2.
+#
+# Also runs tests/install_gpsd_chrony_test.sh (same lightweight style,
+# `dpkg`/`apt-get`/`systemctl` stubbed via PATH, tools/install.sh's
+# install_gpsd_chrony() function body extracted via sed rather than
+# sourcing that whole upstream script), which verifies systemd-timesyncd is
+# explicitly removed BEFORE the --no-remove chrony/gpsd install whenever it
+# is installed (chrony Conflicts: time-daemon, systemd-timesyncd Provides:
+# time-daemon) - the confirmed-live regression the repo-wide --no-remove
+# safety net (c8b6012) introduced on both Armbian and Raspberry Pi OS.
+#
+# Also runs tests/systemd_env_test.sh (same lightweight style, run under
+# `env -i` to simulate systemd's near-empty environment), which verifies
+# tools/geomaxima-firstboot.sh's HOME/USER/LOGNAME/TERM/LANG fallbacks
+# take effect, and that tools/install.sh's free-disk-space check
+# (`df "${HOME:-/}"`) does not itself fail when HOME is unset - the
+# confirmed-live regression where phase 2 failed with
+# "Available space is lower than 300MB" on a board with 26.9 GB free,
+# because `df "$HOME"` became `df ""` under systemd.
+
+on:
+  push:
+    # GeoMaxima: feature/armbian-opi4pro-support included explicitly - the
+    # push-to-main-only trigger meant every push while this work was still
+    # on its own feature branch (not yet merged) never ran this job at
+    # all, even though the corresponding pull_request trigger below only
+    # fires once an actual PR exists. Remove this branch name once merged
+    # to main (or once no other long-lived Armbian/eMMC feature branch is
+    # active) to avoid this list growing stale.
+    branches: [main, feature/armbian-opi4pro-support]
+    paths:
+      - 'tools/emmc-install-opi4pro.sh'
+      - 'tools/armbian_kernel_pin.sh'
+      - 'tools/platform_detect.sh'
+      - 'tools/wireguard_setup.sh'
+      - 'tools/dns_setup.sh'
+      - 'tools/install.sh'
+      - 'tools/geomaxima-firstboot.sh'
+      - 'install.sh'
+      - 'tests/loop_emmc_test.sh'
+      - 'tests/wireguard_setup_test.sh'
+      - 'tests/dns_setup_test.sh'
+      - 'tests/install_gpsd_chrony_test.sh'
+      - 'tests/systemd_env_test.sh'
+      - '.github/workflows/loop-emmc-test.yml'
+  pull_request:
+    paths:
+      - 'tools/emmc-install-opi4pro.sh'
+      - 'tools/armbian_kernel_pin.sh'
+      - 'tools/platform_detect.sh'
+      - 'tools/wireguard_setup.sh'
+      - 'tools/dns_setup.sh'
+      - 'tools/install.sh'
+      - 'tools/geomaxima-firstboot.sh'
+      - 'install.sh'
+      - 'tests/loop_emmc_test.sh'
+      - 'tests/wireguard_setup_test.sh'
+      - 'tests/dns_setup_test.sh'
+      - 'tests/install_gpsd_chrony_test.sh'
+      - 'tests/systemd_env_test.sh'
+      - '.github/workflows/loop-emmc-test.yml'
+  workflow_dispatch: {}
+
+jobs:
+  loop-emmc-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq parted rsync util-linux e2fsprogs
+
+      - name: Run loop-device eMMC migration test
+        run: sudo bash tests/loop_emmc_test.sh
+
+  wireguard-setup-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run WireGuard setup helper test
+        run: bash tests/wireguard_setup_test.sh
+
+  dns-setup-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run DNS setup helper test
+        run: bash tests/dns_setup_test.sh
+
+  install-gpsd-chrony-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install_gpsd_chrony() ordering test
+        run: bash tests/install_gpsd_chrony_test.sh
+
+  systemd-env-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run systemd-empty-environment test
+        run: bash tests/systemd_env_test.sh

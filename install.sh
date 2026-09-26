@@ -13,6 +13,31 @@ set -euo pipefail
 
 REPO_URL="https://github.com/peshovp/RPI-BS.git"
 
+# --- Phase-2 handoff env file (A733 SD->eMMC migration, Plan B) ---
+# GeoMaxima: read THIS FIRST, before INSTALL_DIR/SUDO_USER are resolved
+# below - phase 2 runs from a systemd oneshot service with no SUDO_USER at
+# all, so without this INSTALL_DIR would silently resolve to /root/RPI-BS
+# and every "${SUDO_USER:-$USER}" call throughout this script would
+# install everything as root instead of the real installing user. Never
+# overrides an explicit SUDO_USER/INSTALL_DIR/GM_PHASE/GM_EMMC the caller's
+# environment already set (e.g. a normal interactive sudo run) - only
+# fills in what's missing.
+if [[ -f /etc/geomaxima/install.env ]]; then
+    GM_ENV_SUDO_USER="${SUDO_USER:-}"
+    GM_ENV_INSTALL_DIR="${INSTALL_DIR:-}"
+    GM_ENV_PHASE="${GM_PHASE:-}"
+    # shellcheck source=/dev/null
+    source /etc/geomaxima/install.env
+    # Re-apply anything the CALLER's environment already had, so the env
+    # file only fills in gaps rather than overriding an explicit override.
+    [[ -n "$GM_ENV_SUDO_USER" ]] && SUDO_USER="$GM_ENV_SUDO_USER"
+    [[ -n "$GM_ENV_INSTALL_DIR" ]] && INSTALL_DIR="$GM_ENV_INSTALL_DIR"
+    [[ -n "$GM_ENV_PHASE" ]] && GM_PHASE="$GM_ENV_PHASE"
+    export SUDO_USER="${SUDO_USER:-${GM_INSTALL_USER:-}}"
+    export GM_PHASE="${GM_PHASE:-2}"
+    unset GM_ENV_SUDO_USER GM_ENV_INSTALL_DIR GM_ENV_PHASE
+fi
+
 if [[ -n "${INSTALL_DIR:-}" ]]; then
     : # explicit override, use as-is
 elif [[ -n "${SUDO_USER:-}" ]]; then
@@ -29,37 +54,576 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# --- Bootstrap: get a real, single, consistent checkout on disk FIRST ---
+# GeoMaxima: previously, `curl | sudo bash` fetched a couple of small helper
+# files individually (platform_detect.sh, armbian_kernel_pin.sh) by raw URL
+# before the actual clone happened later in the script, then read the rest
+# of the helpers from that later clone. That risks version skew between
+# "main" at the time of the curl-fetched helpers vs. "main" at the time of
+# the later git clone (a push landing in between), and duplicates the
+# clone/fetch logic. Fixed by moving the clone to the very first thing this
+# script does, then re-exec'ing the SAME install.sh from inside that single
+# checkout - everything from this point on (this process and its children)
+# reads from one consistent, already-on-disk revision, and there is no more
+# curl-by-raw-URL fetching of individual helper files anywhere in this
+# script. Under a local checkout (`cd RPI-BS && sudo ./install.sh`), the
+# checkout already exists and no clone/exec/re-launch happens at all.
+#
+# detect_existing_checkout(): true if BASH_SOURCE[0] is a real file that is
+# part of an actual RPI-BS checkout. Under `curl | sudo bash`, BASH_SOURCE[0]
+# is something like "bash" or "/dev/stdin" - not a real path - so this
+# correctly (and silently) fails in that case; it isn't an error condition.
+detect_existing_checkout() {
+    local src="${BASH_SOURCE[0]}"
+    [[ -f "$src" ]] || return 1
+    local dir
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    [[ -f "$dir/tools/security_setup.sh" && -f "$dir/web_app/server.py" ]] || return 1
+    echo "$dir"
+}
+
+# Clones (or, if already present, fast-forward pulls) the repo into
+# INSTALL_DIR. Prints the resolved directory as the ONLY line on stdout so
+# callers can safely capture it with $(...); all progress/log messages are
+# sent to stderr via log() to avoid polluting that capture.
+bootstrap_repo() {
+    if ! command -v git &>/dev/null; then
+        log "git not found, installing..."
+        apt update -qq && apt install -y -qq --no-remove git || { log "ERROR: failed to install git"; exit 1; }
+    fi
+
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        log "Existing checkout found at $INSTALL_DIR, updating (git pull --ff-only)..."
+        # GeoMaxima: warn-and-continue-with-what's-already-there, not exit.
+        # Re-running the curl|bash one-liner on a station that has local
+        # changes (or a non-ff-only-able history, e.g. after a rebase
+        # upstream) must not brick an otherwise-working, already-cloned
+        # install just because this particular pull couldn't fast-forward.
+        git -C "$INSTALL_DIR" pull --ff-only \
+            || log "WARNING: git pull --ff-only failed in $INSTALL_DIR - continuing with the existing checkout as-is (not re-cloning, not exiting)."
+    else
+        log "No existing checkout found. Cloning $REPO_URL into $INSTALL_DIR..."
+        git clone "$REPO_URL" "$INSTALL_DIR" || { log "ERROR: git clone failed"; exit 1; }
+    fi
+
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown -R "$SUDO_USER":"$SUDO_USER" "$INSTALL_DIR" || log "WARNING: chown to $SUDO_USER failed"
+    fi
+
+    if [[ ! -f "$INSTALL_DIR/web_app/server.py" || ! -f "$INSTALL_DIR/tools/security_setup.sh" ]]; then
+        log "ERROR: $INSTALL_DIR does not look like a valid RPI-BS checkout after bootstrap."
+        exit 1
+    fi
+
+    echo "$INSTALL_DIR"
+}
+
+if SCRIPT_DIR="$(detect_existing_checkout)"; then
+    log "Running from existing checkout: $SCRIPT_DIR"
+else
+    log "No local checkout detected (likely running via curl | sudo bash). Bootstrapping..."
+    SCRIPT_DIR="$(bootstrap_repo | tail -1)"
+    # Re-exec THIS SAME install.sh, but now as a real file inside the
+    # checkout we just cloned, instead of continuing to run as the
+    # curl-piped copy. GM_REEXECD guards against a re-exec loop if
+    # $SCRIPT_DIR/install.sh were somehow still not a real, detectable
+    # checkout (defensive; bootstrap_repo already validates this above).
+    if [[ -z "${GM_REEXECD:-}" && -f "$SCRIPT_DIR/install.sh" ]]; then
+        log "Re-launching install.sh from the cloned checkout at $SCRIPT_DIR ..."
+        export GM_REEXECD=1
+        # GeoMaxima: under `curl | sudo bash`, this process's stdin IS the
+        # curl-piped script text - whatever of it bash hasn't consumed yet
+        # is still sitting there. Without redirecting it, the re-exec'd
+        # child would inherit that same stdin and could read leftover
+        # script text as if it were interactive input (e.g. into a `read`
+        # somewhere downstream). Redirect from /dev/tty when one exists (a
+        # real interactive terminal further down the line, e.g. someone
+        # running `bash <(curl ...)` at a real console), otherwise
+        # /dev/null - never the inherited pipe.
+        #
+        # `[[ -r /dev/tty ]]` is NOT a TTY check - /dev/tty is always mode
+        # 0666, readable by permission whether or not a controlling
+        # terminal exists; OPENING it without one (systemd, cron,
+        # cloud-init, this project's own geomaxima-firstboot.service) fails
+        # with ENXIO, which would abort this script under `set -e`. Source
+        # platform_detect.sh's gm_has_tty() helper (SCRIPT_DIR is already
+        # resolved at this point) and use that instead.
+        # shellcheck source=tools/platform_detect.sh
+        source "$SCRIPT_DIR/tools/platform_detect.sh"
+        if gm_has_tty; then
+            exec bash "$SCRIPT_DIR/install.sh" "$@" </dev/tty
+        else
+            exec bash "$SCRIPT_DIR/install.sh" "$@" </dev/null
+        fi
+    fi
+fi
+
+cd "$SCRIPT_DIR"
+
+# --- Platform detection (Raspberry Pi vs Armbian/A733 vs other) ---
+# Now always read locally - SCRIPT_DIR is guaranteed to be a real checkout
+# on disk at this point (either pre-existing, or just cloned+re-exec'd into
+# above), so there is never a need to fetch this by raw URL.
+# shellcheck source=tools/platform_detect.sh
+source "$SCRIPT_DIR/tools/platform_detect.sh"
+echo "Detected platform: ${GM_PLATFORM:-unknown} (board: ${GM_BOARD:-unknown}, arch: ${GM_ARCH:-$(uname -m)})"
+
+# --- Defensive check: A733 (Orange Pi 4 Pro+ and future same-SoC boards)
+# bootloader-write vs. root-partition overlap ---
+# GeoMaxima: moved here, BEFORE `apt-get update/upgrade` and the kernel pin
+# below - if this ran after the upgrade (as an earlier version of this
+# check did) and a linux-u-boot-* package slipped through despite the pin,
+# the superblock corruption would already have happened by the time this
+# check ran. This check itself never installs/upgrades anything, so
+# running it this early has no downside.
+#
+# HALTS (does not just warn) when it detects an overlap, since every U-Boot
+# write from this point on - including a routine `apt upgrade` of
+# linux-u-boot-* - would silently overwrite the ext4 superblock and brick
+# the board at next reboot. Confirmed live on an Orange Pi 4 Pro+: armbian-
+# install had created the root partition starting at 16 MiB (sector 32768)
+# instead of the official image's 32 MiB (sector 65536), which
+# /usr/lib/u-boot/platform_install.sh's boot_package.fex write (at
+# seek=16400K) overlaps.
+#
+# The check itself runs for the root partition regardless of whether it is
+# on SD or eMMC - the overlap is purely a matter of partition geometry vs.
+# the bootloader's fixed write offset, and applies identically either way.
+# /sys/block/mmcblkN/device/type ("MMC" vs "SD") is used ONLY to phrase the
+# message/recommendation below (root already on eMMC gets a different fix
+# than root still on SD), never to decide whether to run the check - NOT
+# /sys/block/*/removable, which is unreliable on mmc hosts (SD cards often
+# report 0/non-removable there too). This matches tools/emmc-install-opi4pro.sh's
+# own detection and was verified live on an Orange Pi 4 Pro+ (mmcblk0 =
+# MMC/eMMC, mmcblk1 = SD).
+# GM_DRY_RUN=1 prints the check's verdict without exiting, for CI.
+# GeoMaxima: GM_SYSFS overridable (default /sys) - same test seam as
+# tools/emmc-install-opi4pro.sh, so a test harness can point this whole
+# check at a fake sysfs tree without any "if test mode" branch in the
+# logic itself. GM_TEST_ROOT_PART overrides the "source root" partition
+# the same way.
+GM_SYSFS="${GM_SYSFS:-/sys}"
+if [[ "${GM_PLATFORM:-}" == "armbian-a733" ]]; then
+    GM_PLATFORM_INSTALL_SCRIPT="${GM_EMMC_PLATFORM_SCRIPT:-/usr/lib/u-boot/platform_install.sh}"
+    # `|| true`: under set -euo pipefail, `ls -d ... | head -1` with no
+    # match makes `ls` exit non-zero, which without this would exit the
+    # WHOLE SCRIPT here rather than just leaving GM_UBOOT_DIR empty (the
+    # intended, handled case a few lines down). GM_UBOOT_DIR itself is
+    # overridable for the same test-seam reason as above.
+    if [[ -n "${GM_UBOOT_DIR:-}" ]]; then
+        : # explicit override, use as-is
+    else
+        GM_UBOOT_DIR="$(ls -d /usr/lib/linux-u-boot-* 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -f "$GM_PLATFORM_INSTALL_SCRIPT" && -n "$GM_UBOOT_DIR" && -f "$GM_UBOOT_DIR/boot_package.fex" ]]; then
+        GM_BP_SEEK_K="$(grep -oP 'boot_package\.fex.*bs=1k seek=\K[0-9]+' "$GM_PLATFORM_INSTALL_SCRIPT" | head -1 || true)"
+        if [[ -z "$GM_BP_SEEK_K" ]]; then
+            GM_BP_SEEK_K=16400
+            echo "WARNING: could not parse boot_package.fex seek= from $GM_PLATFORM_INSTALL_SCRIPT - assuming 16400K (the value confirmed live on an Orange Pi 4 Pro+)." >&2
+        fi
+        GM_BP_SIZE_K=$(( ( $(stat -c%s "$GM_UBOOT_DIR/boot_package.fex") + 1023 ) / 1024 ))
+        GM_BP_END_K=$(( GM_BP_SEEK_K + GM_BP_SIZE_K ))
+
+        if [[ -n "${GM_TEST_ROOT_PART:-}" ]]; then
+            GM_ROOT_SOURCE="$GM_TEST_ROOT_PART"
+        else
+            GM_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+        fi
+        GM_ROOT_DISK_NAME="$(lsblk -no PKNAME "$GM_ROOT_SOURCE" 2>/dev/null || true)"
+        GM_ROOT_PART_NAME="$(basename "$GM_ROOT_SOURCE" 2>/dev/null || true)"
+        # device/type is read only for the recommendation text below - it
+        # never gates whether the size comparison itself runs.
+        GM_ROOT_DEVICE_TYPE=""
+        [[ -n "$GM_ROOT_DISK_NAME" && -f "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/device/type" ]] \
+            && GM_ROOT_DEVICE_TYPE="$(cat "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/device/type" 2>/dev/null || true)"
+        if [[ -n "$GM_ROOT_DISK_NAME" && -f "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" ]]; then
+            GM_ROOT_PART_START_SECTORS="$(cat "$GM_SYSFS/block/${GM_ROOT_DISK_NAME}/${GM_ROOT_PART_NAME}/start" 2>/dev/null || echo 0)"
+            GM_ROOT_PART_START_K=$(( GM_ROOT_PART_START_SECTORS / 2 ))
+            if (( GM_BP_END_K >= GM_ROOT_PART_START_K )); then
+                echo "ERROR: the U-Boot bootloader write range (${GM_BP_SEEK_K}K-${GM_BP_END_K}K) overlaps this" >&2
+                echo "board's root partition, which starts at ${GM_ROOT_PART_START_K}K on /dev/${GM_ROOT_DISK_NAME} (device/type: ${GM_ROOT_DEVICE_TYPE:-unknown})." >&2
+                echo "Every future U-Boot write (including a routine 'apt upgrade' of linux-u-boot-*)" >&2
+                echo "would silently corrupt the root filesystem's superblock and brick this board at" >&2
+                echo "the next reboot. This is a known armbian-install partition-layout bug on this" >&2
+                echo "board (confirmed live on an Orange Pi 4 Pro+)." >&2
+                echo "This script will NOT modify partitions/bootloader automatically. Instead:" >&2
+                if [[ "$GM_ROOT_DEVICE_TYPE" == "MMC" ]]; then
+                    echo "Root is already on eMMC (/dev/${GM_ROOT_DISK_NAME}) with a bad partition layout." >&2
+                    echo "Boot this board from an SD card instead, then run" >&2
+                    echo "tools/emmc-install-opi4pro.sh from there to re-create the eMMC root partition" >&2
+                    echo "at the correct offset (32 MiB / sector 65536) and copy the system back onto it." >&2
+                else
+                    echo "  1. Boot this board from an SD card (if not already)." >&2
+                    echo "  2. Run tools/emmc-install-opi4pro.sh, which creates a correctly-placed root" >&2
+                    echo "     partition (32 MiB / sector 65536) on eMMC and copies the system there." >&2
+                    echo "  3. Remove the SD card and reboot from eMMC, then re-run this installer." >&2
+                fi
+                if [[ "${GM_DRY_RUN:-0}" == "1" ]]; then
+                    echo "GM_DRY_RUN=1: would have halted here instead of exiting." >&2
+                else
+                    exit 1
+                fi
+            else
+                echo "Verified: bootloader write range (${GM_BP_SEEK_K}K-${GM_BP_END_K}K) does not overlap the root partition (starts at ${GM_ROOT_PART_START_K}K) - safe to continue." >&2
+            fi
+        else
+            echo "WARNING: could not read the root partition's start offset from sysfs - skipping bootloader-overlap check. Verify manually before rebooting: compare 'cat $GM_SYSFS/block/${GM_ROOT_DISK_NAME:-<disk>}/${GM_ROOT_PART_NAME:-<part>}/start' against the seek= value in $GM_PLATFORM_INSTALL_SCRIPT." >&2
+        fi
+    fi
+fi
+
+# --- A733: unattended SD-to-eMMC migration (Plan B) ------------------------
+# GeoMaxima: makes `curl | sudo bash` a single unattended command on this
+# board too, when it's booted from SD with an eMMC present. This whole
+# block is PHASE 1 - it does ONLY the kernel pin/hold and the eMMC
+# migration itself, nothing else (no apt upgrade, no RTKBase install -
+# that happens once, in PHASE 2, running from eMMC). GM_EMMC controls it:
+# "auto" (default) migrates only if booted from SD with an eMMC actually
+# present; "yes" forces attempting it (still safely no-ops via the
+# re-migration guard if eMMC is already prepared, or fails loudly if no
+# eMMC is present at all); "no" skips it entirely (install proceeds on SD,
+# still protected by the bootloader-overlap check above).
+GM_EMMC="${GM_EMMC:-auto}"
+if [[ "${GM_PLATFORM:-}" == "armbian-a733" && "${GM_PHASE:-1}" == "1" && "$GM_EMMC" != "no" ]]; then
+    if [[ -n "${GM_TEST_ROOT_PART:-}" ]]; then
+        GM_A733_ROOT_SOURCE="$GM_TEST_ROOT_PART"
+    else
+        GM_A733_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    fi
+    GM_A733_ROOT_DISK="$(lsblk -no PKNAME "$GM_A733_ROOT_SOURCE" 2>/dev/null || true)"
+    GM_A733_ROOT_IS_SD=0
+    [[ -n "$GM_A733_ROOT_DISK" && -f "$GM_SYSFS/block/${GM_A733_ROOT_DISK}/device/type" ]] \
+        && [[ "$(cat "$GM_SYSFS/block/${GM_A733_ROOT_DISK}/device/type" 2>/dev/null)" == "SD" ]] \
+        && GM_A733_ROOT_IS_SD=1
+
+    GM_A733_EMMC_PRESENT=0
+    for GM_A733_B in "$GM_SYSFS"/block/mmcblk*; do
+        GM_A733_N="$(basename "$GM_A733_B")"
+        [[ "$GM_A733_N" =~ ^mmcblk[0-9]+$ ]] || continue
+        if [[ "$(cat "$GM_A733_B/device/type" 2>/dev/null)" == "MMC" ]]; then
+            GM_A733_EMMC_PRESENT=1
+            break
+        fi
+    done
+
+    # Migrate iff root is on SD AND (an eMMC was actually detected, OR the
+    # caller forced it with GM_EMMC=yes - geomaxima_emmc_migrate() itself
+    # still fails loudly if GM_EMMC=yes is forced but no eMMC exists at all).
+    if [[ "$GM_A733_ROOT_IS_SD" == "1" ]] && { [[ "$GM_A733_EMMC_PRESENT" == "1" ]] || [[ "$GM_EMMC" == "yes" ]]; }; then
+        echo "============================================================================"
+        echo "A733 detected, booted from SD, eMMC present - migrating to eMMC (GM_EMMC=$GM_EMMC)"
+        echo "============================================================================"
+
+        # Kernel pin/hold on the SD-booted system too (belt-and-braces: the
+        # migration function also writes the pin into the eMMC copy itself).
+        # shellcheck source=tools/armbian_kernel_pin.sh
+        source "$SCRIPT_DIR/tools/armbian_kernel_pin.sh"
+        geomaxima_apply_armbian_kernel_pin
+
+        # shellcheck source=tools/emmc-install-opi4pro.sh
+        source "$SCRIPT_DIR/tools/emmc-install-opi4pro.sh"
+
+        # GeoMaxima: geomaxima_emmc_migrate() does NOT use `set -e` inside
+        # itself (bash disables errexit for a function called as an `if`
+        # condition anyway - see that file's header comment), and its
+        # return-code contract is 3-way, not just success/fail: 0 =
+        # migrated, 2 = eMMC already prepared (no changes made), anything
+        # else = FAILED. `set +e`/`set -e` bracket the call so a non-zero
+        # return here never triggers this script's own `set -e` before we
+        # get a chance to inspect $rc and decide what to do - a failed
+        # migration must NEVER be treated as "safe to poweroff assuming
+        # success" or "safe to wipe the SD bootloader".
+        set +e
+        geomaxima_emmc_migrate 1 1
+        GM_EMMC_MIGRATE_RC=$?
+        set -e
+
+        if [[ "$GM_EMMC_MIGRATE_RC" == "2" ]]; then
+            echo "============================================================================"
+            echo "eMMC already prepared (previous migration's marker found) - nothing to do."
+            echo "REMOVE THE SD CARD and power the board back on to boot from eMMC."
+            echo "============================================================================"
+            poweroff
+            exit 0
+        elif [[ "$GM_EMMC_MIGRATE_RC" != "0" ]]; then
+            echo "ERROR: eMMC migration FAILED (exit $GM_EMMC_MIGRATE_RC). See $GM_EMMC_LOG for details." >&2
+            echo "The SD card has NOT been touched and remains bootable. NOT powering off," >&2
+            echo "NOT wiping the SD bootloader area. Fix the issue above and re-run install.sh." >&2
+            exit 1
+        fi
+
+        # --- Migration succeeded (rc=0). Write the phase-2 handoff files.
+        # GeoMaxima: from here on, ANY failure to write these files onto
+        # the eMMC copy is treated as FATAL (exit 1, no poweroff, no SD
+        # wipe) - a half-configured eMMC that can never actually run phase
+        # 2 automatically is worse than stopping here with a clear error,
+        # since the operator can still fix it while still booted from SD.
+        #
+        # GM_EMMC_RESULT_DISK/GM_EMMC_RESULT_PART are set BY
+        # geomaxima_emmc_migrate() itself on success (rc=0) - reusing them
+        # here instead of re-scanning /sys/block/mmcblk* a second time
+        # avoids ever disagreeing with what the migration function itself
+        # actually used.
+        GM_A733_EMMC_ROOT_PART="$GM_EMMC_RESULT_PART"
+        mkdir -p "$GM_EMMC_MNT"
+        mount "$GM_A733_EMMC_ROOT_PART" "$GM_EMMC_MNT" || {
+            echo "ERROR: could not mount $GM_A733_EMMC_ROOT_PART to write the phase-2 handoff files." >&2
+            echo "The eMMC copy exists but phase 2 will NOT run automatically. Boot from eMMC" >&2
+            echo "and run install.sh manually, or fix the mount issue and re-run this script." >&2
+            exit 1
+        }
+
+        # PHASE 2 runs from a systemd oneshot service, which has no
+        # SUDO_USER - without this handoff file, INSTALL_DIR/the installing
+        # user would silently become root, and every "${SUDO_USER:-$USER}"
+        # call throughout this script (tools/copy_unit.sh --user, chown,
+        # PRIDE-PPPAR's install-user resolution, ...) would install
+        # everything as root instead of the real user. `printf '%s=%q\n'`
+        # shell-quotes each value so a path containing spaces or special
+        # characters round-trips safely through `source` in phase 2.
+        mkdir -p "$GM_EMMC_MNT/etc/geomaxima" || { echo "ERROR: could not create /etc/geomaxima on the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+        {
+            printf 'GM_INSTALL_USER=%q\n' "${SUDO_USER:-$USER}"
+            printf 'INSTALL_DIR=%q\n' "${INSTALL_DIR}"
+            printf 'GM_PHASE=%q\n' "2"
+            printf 'GM_EMMC=%q\n' "no"
+        } > "$GM_EMMC_MNT/etc/geomaxima/install.env" || {
+            echo "ERROR: could not write the phase-2 handoff env file onto the eMMC target." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        }
+
+        # --- Firstboot oneshot service, installed directly into the eMMC
+        # copy, enabled via a symlink written directly into it (no chroot
+        # needed for a plain unit-file symlink enable). ExecStart points at
+        # the REAL, tracked tools/geomaxima-firstboot.sh (copied below via
+        # rsync as part of the eMMC copy already made by
+        # geomaxima_emmc_migrate() - not regenerated here), which
+        # self-disables this unit on SUCCESS, or after 3 failed attempts
+        # (see that script's own header comment) - never loops
+        # indefinitely across reboots.
+        mkdir -p "$GM_EMMC_MNT/etc/systemd/system" || { echo "ERROR: could not create /etc/systemd/system on the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+        cat > "$GM_EMMC_MNT/etc/systemd/system/geomaxima-firstboot.service" <<EOF || { echo "ERROR: could not write geomaxima-firstboot.service onto the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+[Unit]
+Description=GeoMaxima RPI-BS first-boot install (phase 2, on eMMC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+# GeoMaxima: belt-and-braces alongside tools/geomaxima-firstboot.sh's own
+# export HOME=... fallback - confirmed live that systemd services run
+# with no HOME/USER/LOGNAME/TERM at all, which broke a free-disk-space
+# check further down the install (df "\$HOME" -> df "" -> "No such file
+# or directory"). Setting it here too means any FUTURE systemd unit that
+# might run install.sh (or a similar script) directly, without going
+# through geomaxima-firstboot.sh's own environment setup, is protected as
+# well.
+Environment=HOME=/root
+ExecStart=${INSTALL_DIR}/tools/geomaxima-firstboot.sh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        mkdir -p "$GM_EMMC_MNT/etc/systemd/system/multi-user.target.wants" || { echo "ERROR: could not create multi-user.target.wants on the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+        ln -sf "/etc/systemd/system/geomaxima-firstboot.service" \
+            "$GM_EMMC_MNT/etc/systemd/system/multi-user.target.wants/geomaxima-firstboot.service" || {
+            echo "ERROR: could not enable geomaxima-firstboot.service on the eMMC target." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        }
+
+        # tools/geomaxima-firstboot.sh itself is ALREADY present on the
+        # eMMC copy - geomaxima_emmc_migrate()'s rsync copied this entire
+        # checkout (this script IS running from $SCRIPT_DIR, inside
+        # $INSTALL_DIR, which rsync -aAXHx / copies in full).
+        #
+        # GeoMaxima: FATAL, not a warning, if this file is missing on the
+        # eMMC target - the just-written geomaxima-firstboot.service's
+        # ExecStart points directly at it, so without it phase 2 can NEVER
+        # run automatically after reboot, exactly like every other
+        # handoff-write failure above (install.env, the unit file, its
+        # enable symlink). A missing file here means either $INSTALL_DIR
+        # doesn't match where the checkout actually lives on the eMMC
+        # copy, or the rsync copy was incomplete - both are conditions the
+        # operator needs to see and fix while still booted from SD, not
+        # discover after removing the SD card and rebooting into a board
+        # that never completes its own install.
+        if [[ ! -f "$GM_EMMC_MNT${INSTALL_DIR}/tools/geomaxima-firstboot.sh" ]]; then
+            echo "ERROR: tools/geomaxima-firstboot.sh not found on the eMMC target at" >&2
+            echo "  ${GM_EMMC_MNT}${INSTALL_DIR}/tools/geomaxima-firstboot.sh" >&2
+            echo "geomaxima-firstboot.service's ExecStart points there - without it, phase 2" >&2
+            echo "can never run automatically after reboot. NOT powering off, NOT wiping the" >&2
+            echo "SD bootloader area - fix this (check INSTALL_DIR / the rsync copy) and" >&2
+            echo "re-run install.sh." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        fi
+        chmod +x "$GM_EMMC_MNT${INSTALL_DIR}/tools/geomaxima-firstboot.sh" || {
+            echo "ERROR: could not chmod +x tools/geomaxima-firstboot.sh on the eMMC target - the firstboot service would fail to start (Permission denied)." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        }
+
+        sync
+        umount "$GM_EMMC_MNT" || echo "WARNING: umount of $GM_EMMC_MNT reported an error after writing phase-2 files (may already be unmounted)." >&2
+
+        echo "Firstboot service installed on eMMC. Follow progress after boot with:"
+        echo "  journalctl -fu geomaxima-firstboot"
+        echo "(also logged to /var/log/geomaxima-install.log on the eMMC system)"
+
+        # --- Optionally erase only the SD's bootloader area (opt-in,
+        # unverified on hardware - see tools/emmc-install-opi4pro.sh). A
+        # FAILED wipe always powers off (never reboots) - rebooting with a
+        # partially-erased SD bootloader area in an unknown state, while
+        # still expecting it to either fully boot SD or fall through to
+        # eMMC, is not a safe assumption to make.
+        if [[ "${GM_WIPE_SD_BOOT:-no}" == "yes" ]]; then
+            if geomaxima_wipe_sd_bootloader; then
+                if [[ "${GM_REBOOT:-yes}" == "yes" ]]; then
+                    echo "Rebooting now (GM_WIPE_SD_BOOT=yes, GM_REBOOT=yes) - the board should fall through to eMMC..."
+                    reboot
+                fi
+            else
+                echo "ERROR: SD bootloader wipe failed - powering off instead of rebooting." >&2
+                echo "REMOVE THE SD CARD manually, then power the board back on." >&2
+                poweroff
+            fi
+        else
+            echo "============================================================================"
+            echo "eMMC migration complete. REMOVE THE SD CARD, then power the board back on"
+            echo "to continue the install automatically from eMMC (phase 2)."
+            echo "============================================================================"
+            poweroff
+        fi
+        exit 0
+    fi
+fi
+
+# GeoMaxima: /etc/geomaxima/install.env (if present) was already sourced at
+# the very top of this script, before INSTALL_DIR/SUDO_USER were resolved -
+# see the comment there. Nothing further to do here.
+
 echo "============================================================================"
 echo "STAGE 1/5: System Update & Prerequisites"
 echo "============================================================================"
 export DEBIAN_FRONTEND=noninteractive
+
+# --- Armbian-only: pin out Debian-origin kernel packages BEFORE any apt
+# upgrade, so a Debian/RT kernel can never get installed alongside this
+# board's vendor kernel. See tools/armbian_kernel_pin.sh for the full
+# "why" (confirmed-live boot-breaking bug) and why apt-mark hold alone is
+# not sufficient. Must run before `apt-get upgrade` on the next line.
+if [[ "${GM_PLATFORM:-}" == armbian* ]]; then
+    # shellcheck source=tools/armbian_kernel_pin.sh
+    source "$SCRIPT_DIR/tools/armbian_kernel_pin.sh"
+    geomaxima_apply_armbian_kernel_pin
+fi
+
 apt-get update -qq
 apt-get upgrade -y -qq
 
 # --- Defensive check: PREEMPT_RT kernel / boot-symlink consistency ---
-# Warning-only, never modifies anything. On Armbian (and other non-Raspberry-Pi-OS
-# boards using Debian's generic kernel package mechanism), installing a
-# linux-image-*-rt-arm64 package alongside the board's vendor kernel is a known
-# hazard: the RT kernel's postinst updates the /boot/uInitrd symlink to point at
-# itself, but does NOT update /boot/Image or /boot/dtb, which keep pointing at the
-# vendor kernel (the one with the correct SoC drivers/device-tree). The result is
-# U-Boot loading a vendor kernel with an RT initrd - an incompatible combination
-# that causes a full boot failure. Confirmed live on an Orange Pi 4 Pro station
-# (Allwinner A733, Armbian vendor kernel 6.6.98-vendor-sun60iw2) after
-# linux-image-6.12.107+deb13-rt-arm64 ended up installed alongside it.
-# RTKBase does not require PREEMPT_RT for GNSS processing - this check does not
-# assert why an RT kernel is present, only that if one is, /boot/Image, /boot/dtb,
-# and /boot/uInitrd must all resolve to the SAME kernel version before rebooting.
-if dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
-    echo "WARNING: a PREEMPT_RT (rt-arm64) kernel package is installed on this system." >&2
-    echo "On Armbian/non-Raspberry-Pi-OS boards this can desync the /boot/Image, /boot/dtb," >&2
-    echo "and /boot/uInitrd symlinks (each may end up pointing at a DIFFERENT kernel after" >&2
-    echo "the RT kernel's postinst runs), which causes a hard boot failure at next reboot." >&2
-    echo "RTKBase does not require PREEMPT_RT for GNSS processing." >&2
-    echo "Before rebooting, verify all three point at the SAME kernel version:" >&2
-    echo "  ls -la /boot/Image /boot/dtb /boot/uInitrd" >&2
-    echo "This script will NOT modify these symlinks automatically - fix manually if inconsistent." >&2
-fi
+# On Armbian (and other non-Raspberry-Pi-OS boards using Debian's generic
+# kernel package mechanism), installing a linux-image-*-rt-arm64 package
+# alongside the board's vendor kernel is a known hazard: the RT kernel's
+# postinst updates the /boot/uInitrd symlink to point at itself, but does
+# NOT update /boot/Image or /boot/dtb, which keep pointing at the vendor
+# kernel (the one with the correct SoC drivers/device-tree). The result is
+# U-Boot loading a vendor kernel with an RT initrd - an incompatible
+# combination that causes a full boot failure. Confirmed live on an Orange
+# Pi 4 Pro station (Allwinner A733, Armbian vendor kernel
+# 6.6.98-vendor-sun60iw2) after linux-image-6.12.107+deb13-rt-arm64 ended
+# up installed alongside it.
+# RTKBase does not require PREEMPT_RT for GNSS processing - this check does
+# not assert why an RT kernel is present, only that if one is, /boot/Image,
+# /boot/dtb, and /boot/uInitrd must all resolve to the SAME kernel version
+# before rebooting.
+#
+# GeoMaxima: factored into a function because it must run TWICE - once here
+# (early, before this script installs/upgrades anything further) and once
+# again at the very end of this script (STAGE 5), since tools/install.sh
+# and security_setup.sh both install packages that could themselves pull in
+# a kernel package. A mismatch caught only at the START would miss one
+# introduced by this script's OWN later steps - the end-of-script call is
+# the one that actually protects the next reboot.
+#
+# On Armbian these are symlinks to version-suffixed real files, e.g.
+# "uInitrd -> uInitrd-6.6.98-vendor-sun60iw2", "Image -> vmlinuz-<ver>",
+# "dtb -> dtb-<ver>" - comparing the version suffix via readlink is simple
+# and sufficient; no need to parse mkimage/FIT image headers. `readlink`
+# can return either a bare filename or an absolute path (e.g.
+# "/boot/vmlinuz-<ver>") depending on how the symlink target was written -
+# basename is applied FIRST, before stripping the "<prefix>-" via sed, so
+# an absolute-path target is never mistaken for a version mismatch purely
+# because of its leading directory component.
+# GM_DRY_RUN=1 prints the check's verdict without exiting, for CI.
+#
+# The three-way symlink comparison itself runs on ANY platform whenever
+# all three symlinks exist (not gated on an RT package being installed at
+# all - Armbian boards can end up with a kernel-symlink mismatch from other
+# causes too, e.g. an interrupted OTA of the vendor kernel package itself).
+# The RT-package-installed warning below is a SEPARATE, independent
+# message - it is not a precondition for running the symlink comparison,
+# it is just additional context printed alongside it when applicable. An
+# RT package being merely INSTALLED is not itself fatal (it may not be the
+# one actually pointed to by the boot symlinks yet). What DOES halt is an
+# ACTUAL mismatch between /boot/Image, /boot/dtb, and /boot/uInitrd right
+# now, since the very next reboot would then fail to boot.
+#
+# $1 (optional): a short label identifying which call site this is, used
+# only to phrase the halt message appropriately ("do not reboot" makes
+# sense at the end of the script; at the start, nothing has run yet so
+# there is nothing to warn against rebooting away from).
+geomaxima_check_kernel_symlink_consistency() {
+    local call_site="${1:-early}"
+
+    if dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
+        echo "WARNING: a PREEMPT_RT (rt-arm64) kernel package is installed on this system." >&2
+        echo "On Armbian/non-Raspberry-Pi-OS boards this can desync the /boot/Image, /boot/dtb," >&2
+        echo "and /boot/uInitrd symlinks (each may end up pointing at a DIFFERENT kernel after" >&2
+        echo "the RT kernel's postinst runs), which causes a hard boot failure at next reboot." >&2
+        echo "RTKBase does not require PREEMPT_RT for GNSS processing." >&2
+    fi
+
+    if [[ -L /boot/Image && -L /boot/dtb && -L /boot/uInitrd ]]; then
+        local img_ver dtb_ver initrd_ver
+        img_ver="$(basename "$(readlink /boot/Image 2>/dev/null)" | sed -E 's/^[a-zA-Z]+-//')"
+        dtb_ver="$(basename "$(readlink /boot/dtb 2>/dev/null)" | sed -E 's/^[a-zA-Z]+-//')"
+        initrd_ver="$(basename "$(readlink /boot/uInitrd 2>/dev/null)" | sed -E 's/^[a-zA-Z]+-//')"
+        if [[ -n "$img_ver" && -n "$dtb_ver" && -n "$initrd_ver" ]] \
+            && ! [[ "$img_ver" == "$dtb_ver" && "$dtb_ver" == "$initrd_ver" ]]; then
+            echo "ERROR: /boot/Image, /boot/dtb, and /boot/uInitrd point at DIFFERENT kernel versions:" >&2
+            echo "  /boot/Image   -> $(readlink /boot/Image)" >&2
+            echo "  /boot/dtb     -> $(readlink /boot/dtb)" >&2
+            echo "  /boot/uInitrd -> $(readlink /boot/uInitrd)" >&2
+            if [[ "$call_site" == "end" ]]; then
+                echo "DO NOT REBOOT this board in its current state - it would very likely fail to" >&2
+                echo "boot (confirmed live on an Orange Pi 4 Pro+ in exactly this state)." >&2
+            else
+                echo "Rebooting right now would very likely fail to boot (confirmed live on an" >&2
+                echo "Orange Pi 4 Pro+ in exactly this state)." >&2
+            fi
+            echo "This script will NOT repoint these symlinks automatically - fix manually (make" >&2
+            echo "all three point at the same, working kernel version) before rebooting." >&2
+            if [[ "${GM_DRY_RUN:-0}" == "1" ]]; then
+                echo "GM_DRY_RUN=1: would have halted here instead of exiting." >&2
+                return 0
+            fi
+            exit 1
+        else
+            echo "Verified /boot/Image, /boot/dtb, and /boot/uInitrd currently point at the same kernel version - safe to continue." >&2
+        fi
+    elif dpkg -l 2>/dev/null | grep -q -- '-rt-arm64'; then
+        echo "Before rebooting, verify all three point at the SAME kernel version:" >&2
+        echo "  ls -la /boot/Image /boot/dtb /boot/uInitrd" >&2
+        echo "This script will NOT modify these symlinks automatically - fix manually if inconsistent." >&2
+    fi
+}
+
+geomaxima_check_kernel_symlink_consistency early
 
 # --- Defensive check: root filesystem not resized to full disk capacity ---
 # Warning-only, never modifies anything. Armbian images can leave the root
@@ -89,7 +653,43 @@ if [[ -n "$ROOT_SOURCE" ]]; then
     fi
 fi
 
-apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openresolv fonts-dejavu-core
+# GeoMaxima: --no-remove is a safety net on EVERY apt install from here
+# on - confirmed live on an Orange Pi 4 Pro+ that a plain `apt-get
+# install openresolv` silently REMOVED the active systemd-resolved
+# package (they conflict on Debian trixie), breaking DNS entirely with no
+# warning. --no-remove makes apt ABORT instead of silently removing
+# anything to satisfy an install, so a conflict like that is caught here
+# with a clear apt error instead of resurfacing later as a mysterious DNS
+# failure. This is the same class of protection tools/armbian_kernel_pin.sh
+# provides against apt silently pulling in a Debian kernel via the
+# `wireguard` metapackage's dependency chain - see tools/wireguard_setup.sh.
+apt-get install -y -qq --no-remove curl git ca-certificates fonts-dejavu-core
+
+# GeoMaxima: openresolv is now installed ONLY when actually safe/necessary
+# (never when it would conflict with an already-active systemd-resolved or
+# NetworkManager) - see tools/dns_setup.sh's header comment for the full
+# confirmed-live "why" this moved out of the unconditional apt-get line
+# above. Sourced before the wireguard/DNS-fallback steps below, since both
+# of those also need to know the current resolver stack.
+# shellcheck source=tools/dns_setup.sh
+source "$SCRIPT_DIR/tools/dns_setup.sh"
+geomaxima_maybe_install_openresolv
+geomaxima_dns_health_check || {
+    echo "ERROR: DNS resolution is broken after the package-install/openresolv step above - aborting rather than continuing into a cascade of apt/network failures." >&2
+    echo "See the diagnostic state logged above. This must be fixed manually before re-running install.sh." >&2
+    exit 1
+}
+
+# GeoMaxima: WireGuard is installed via the shared helper below, NEVER via
+# the Debian `wireguard` metapackage directly in an apt-get line - see
+# tools/wireguard_setup.sh's header comment for the confirmed-live root
+# cause (that metapackage depends on wireguard-modules, which only
+# Debian's own linux-image-* kernel packages provide, pulling in a
+# Debian-origin kernel alongside this board's vendor kernel - the same
+# unbootable combination tools/armbian_kernel_pin.sh exists to prevent).
+# shellcheck source=tools/wireguard_setup.sh
+source "$SCRIPT_DIR/tools/wireguard_setup.sh"
+geomaxima_install_wireguard
 
 # --- DNS resolver resilience: DHCP-provided nameserver stays primary,
 # 8.8.8.8/1.1.1.1 added as fallback only ---
@@ -100,85 +700,24 @@ apt-get install -y -qq curl git ca-certificates wireguard wireguard-tools openre
 # resolvconf - a single resolver is not resilient enough for either
 # lookup). Idempotent and warning-only: detects whichever resolver stack
 # is actually active (systemd-resolved, then NetworkManager, then
-# dhcpcd/resolvconf, in that priority order, matching this script's
-# raspi-config/armbian-config detect-and-degrade pattern above) and adds
-# 8.8.8.8/1.1.1.1 as FALLBACK entries only - it never removes or reorders
-# the DHCP-provided nameserver, which always stays first/primary. Skips
-# (with a warning, not a hard failure) if no supported stack is found,
-# since this station's GNSS/RTCM functions do not depend on it.
+# resolvconf - distinguishing openresolv from the Debian resolvconf
+# package, since they use different, non-interoperable fallback-nameserver
+# mechanisms - see tools/dns_setup.sh) and adds 8.8.8.8/1.1.1.1 as FALLBACK
+# entries only - it never removes or reorders the DHCP-provided
+# nameserver, which always stays first/primary. Skips (with a warning, not
+# a hard failure) if no supported stack is found, since this station's
+# GNSS/RTCM functions do not depend on it.
 #
 # Verification on a live station after this runs:
 #   resolvectl status   (systemd-resolved: shows DNS Servers incl. fallback)
-#   cat /etc/resolv.conf (dhcpcd/resolvconf: shows all nameserver lines in order)
+#   cat /etc/resolv.conf (resolvconf/openresolv: shows all nameserver lines)
 #   nmcli dev show <iface> | grep DNS   (NetworkManager)
-if command -v resolvectl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-    RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
-    RESOLVED_DROPIN="$RESOLVED_DROPIN_DIR/90-geomaxima-fallback-dns.conf"
-    if [ -f "$RESOLVED_DROPIN" ]; then
-        echo "✓ systemd-resolved fallback DNS drop-in already present at $RESOLVED_DROPIN - skipping."
-    else
-        mkdir -p "$RESOLVED_DROPIN_DIR"
-        cat > "$RESOLVED_DROPIN" <<'EOF'
-# Added by RPI-BS install.sh - DNS resilience fallback.
-# DHCP-provided DNS (from the router) remains primary automatically -
-# this only ADDS fallback resolvers, used when the primary one is
-# unreachable/times out, per systemd-resolved's own FallbackDNS semantics.
-[Resolve]
-FallbackDNS=8.8.8.8 1.1.1.1
-EOF
-        systemctl reload-or-restart systemd-resolved 2>/dev/null \
-            || echo "WARNING: failed to reload systemd-resolved after writing $RESOLVED_DROPIN - fallback DNS will apply after next restart/reboot." >&2
-        echo "✓ systemd-resolved fallback DNS (8.8.8.8, 1.1.1.1) configured via $RESOLVED_DROPIN."
-    fi
-elif command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager 2>/dev/null; then
-    NM_ACTIVE_CONN="$(nmcli -t -f NAME connection show --active 2>/dev/null | head -1)"
-    if [ -z "$NM_ACTIVE_CONN" ]; then
-        echo "WARNING: NetworkManager is active but no active connection was found - skipping fallback DNS setup." >&2
-    else
-        NM_CURRENT_DNS="$(nmcli -g ipv4.dns connection show "$NM_ACTIVE_CONN" 2>/dev/null)"
-        if [[ "$NM_CURRENT_DNS" == *"8.8.8.8"* && "$NM_CURRENT_DNS" == *"1.1.1.1"* ]]; then
-            echo "✓ NetworkManager connection '$NM_ACTIVE_CONN' already has fallback DNS configured - skipping."
-        else
-            # ipv4.dns REPLACES the DHCP-supplied resolver list unless
-            # ipv4.ignore-auto-dns stays "no" (default) - with that default,
-            # NetworkManager appends these to (not instead of) the
-            # DHCP-provided servers, which is exactly the desired
-            # primary-then-fallback behavior.
-            if nmcli connection modify "$NM_ACTIVE_CONN" +ipv4.dns "8.8.8.8" +ipv4.dns "1.1.1.1" 2>/dev/null \
-                && nmcli connection up "$NM_ACTIVE_CONN" &>/dev/null; then
-                echo "✓ NetworkManager fallback DNS (8.8.8.8, 1.1.1.1) added to connection '$NM_ACTIVE_CONN'."
-            else
-                echo "WARNING: failed to configure NetworkManager fallback DNS on '$NM_ACTIVE_CONN' - continuing anyway." >&2
-            fi
-        fi
-    fi
-elif command -v resolvconf &>/dev/null; then
-    # openresolv (already installed above for wg-quick) - its own
-    # documented mechanism for adding permanent extra nameserver lines is
-    # /etc/resolvconf/resolv.conf.d/tail, appended to the END of the
-    # generated /etc/resolv.conf regardless of which interface supplied
-    # the DHCP nameserver, which glibc's resolver tries first/primary
-    # since it appears earlier in the file.
-    RESOLVCONF_TAIL_DIR="/etc/resolvconf/resolv.conf.d"
-    RESOLVCONF_TAIL="$RESOLVCONF_TAIL_DIR/tail"
-    if [ -f "$RESOLVCONF_TAIL" ] && grep -q "8.8.8.8" "$RESOLVCONF_TAIL" && grep -q "1.1.1.1" "$RESOLVCONF_TAIL"; then
-        echo "✓ resolvconf fallback DNS tail already present at $RESOLVCONF_TAIL - skipping."
-    else
-        mkdir -p "$RESOLVCONF_TAIL_DIR"
-        {
-            echo "# Added by RPI-BS install.sh - DNS resilience fallback."
-            echo "# DHCP-provided nameserver lines (added by resolvconf ABOVE this tail"
-            echo "# file's content) remain primary; these are fallback only."
-            echo "nameserver 8.8.8.8"
-            echo "nameserver 1.1.1.1"
-        } > "$RESOLVCONF_TAIL"
-        resolvconf -u 2>/dev/null \
-            || echo "WARNING: 'resolvconf -u' failed after writing $RESOLVCONF_TAIL - fallback DNS will apply after next network restart/reboot." >&2
-        echo "✓ resolvconf fallback DNS (8.8.8.8, 1.1.1.1) configured via $RESOLVCONF_TAIL."
-    fi
-else
-    echo "WARNING: no supported DNS resolver stack found (systemd-resolved/NetworkManager/resolvconf) - skipping fallback DNS setup. This does not affect RTKBase's own RTCM/GNSS functions." >&2
-fi
+geomaxima_configure_dns_fallback
+geomaxima_dns_health_check || {
+    echo "ERROR: DNS resolution is broken after the DNS-fallback step above - aborting rather than continuing into a cascade of apt/network failures." >&2
+    echo "See the diagnostic state logged above. This must be fixed manually before re-running install.sh." >&2
+    exit 1
+}
 
 if command -v raspi-config &>/dev/null; then
     raspi-config nonint do_spi 0
@@ -190,57 +729,9 @@ else
 fi
 echo "System packages updated. curl, git, and ca-certificates confirmed installed."
 
-# Checks whether BASH_SOURCE[0] points at a real file on disk that is part of
-# an actual RPI-BS checkout. Under "curl | sudo bash", BASH_SOURCE[0] is
-# something like "bash" or "/dev/stdin" -- not a real path -- so this
-# correctly (and silently) fails in that case, it isn't an error condition.
-detect_existing_checkout() {
-    local src="${BASH_SOURCE[0]}"
-    [[ -f "$src" ]] || return 1
-    local dir
-    dir="$(cd "$(dirname "$src")" && pwd)"
-    [[ -f "$dir/tools/security_setup.sh" && -f "$dir/web_app/server.py" ]] || return 1
-    echo "$dir"
-}
-
-# Clones (or, if already present, fast-forward pulls) the repo into
-# INSTALL_DIR. Prints the resolved directory as the ONLY line on stdout so
-# callers can safely capture it with $(...); all progress/log messages are
-# sent to stderr via log() to avoid polluting that capture.
-bootstrap_repo() {
-    if ! command -v git &>/dev/null; then
-        log "git not found, installing..."
-        apt update -qq && apt install -y -qq git || { log "ERROR: failed to install git"; exit 1; }
-    fi
-
-    if [[ -d "$INSTALL_DIR/.git" ]]; then
-        log "Existing checkout found at $INSTALL_DIR, updating (git pull --ff-only)..."
-        git -C "$INSTALL_DIR" pull --ff-only || { log "ERROR: git pull --ff-only failed in $INSTALL_DIR"; exit 1; }
-    else
-        log "No existing checkout found. Cloning $REPO_URL into $INSTALL_DIR..."
-        git clone "$REPO_URL" "$INSTALL_DIR" || { log "ERROR: git clone failed"; exit 1; }
-    fi
-
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        chown -R "$SUDO_USER":"$SUDO_USER" "$INSTALL_DIR" || log "WARNING: chown to $SUDO_USER failed"
-    fi
-
-    if [[ ! -f "$INSTALL_DIR/web_app/server.py" || ! -f "$INSTALL_DIR/tools/security_setup.sh" ]]; then
-        log "ERROR: $INSTALL_DIR does not look like a valid RPI-BS checkout after bootstrap."
-        exit 1
-    fi
-
-    echo "$INSTALL_DIR"
-}
-
-if SCRIPT_DIR="$(detect_existing_checkout)"; then
-    log "Running from existing checkout: $SCRIPT_DIR"
-else
-    log "No local checkout detected (likely running via curl | sudo bash). Bootstrapping..."
-    SCRIPT_DIR="$(bootstrap_repo | tail -1)"
-fi
-
-cd "$SCRIPT_DIR"
+# GeoMaxima: bootstrap (clone-or-pull + cd, and the curl|bash re-exec) now
+# happens once, at the very top of this script - see the comment there.
+# SCRIPT_DIR is already set and we are already inside it.
 
 # --- 1. Banner ---
 echo "============================================================================"
@@ -303,6 +794,14 @@ chmod +x tools/bin/RTKLIB-2.5.0/aarch64/str2str tools/bin/RTKLIB-2.5.0/aarch64/r
 if [[ -n "${SUDO_USER:-}" ]]; then
     chown -R "${SUDO_USER}":"${SUDO_USER}" "${SCRIPT_DIR}/.git" 2>/dev/null || true
 fi
+
+# --- Firewall: allow this station's actual service ports, then enable UFW ---
+# GeoMaxima: moved here (after tools/install.sh has just created
+# settings.conf) rather than in tools/security_setup.sh (STAGE 2, which
+# runs BEFORE settings.conf exists) - see tools/security_setup.sh's header
+# comment and tools/geomaxima_configure_firewall.sh for the full "why".
+chmod +x tools/geomaxima_configure_firewall.sh 2>/dev/null || true
+./tools/geomaxima_configure_firewall.sh settings.conf || log "WARNING: firewall configuration step failed - UFW may still be disabled. Run tools/geomaxima_configure_firewall.sh manually once resolved."
 
 # --- 4. Final checklist ---
 echo ""
@@ -432,7 +931,19 @@ else
         # tests?") - piping empty answers via `yes ""` answers every prompt
         # with its default, matching this project's general
         # "install.sh must never block waiting for input" requirement.
-        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
+        # GeoMaxima: explicit `env HOME=... USER=... LOGNAME=...` rather
+        # than relying on `sudo -u`'s default environment-reset behavior
+        # (which normally does set $HOME to the target user's home on
+        # Debian, but is a sudoers-policy default, not a hard guarantee) -
+        # PRIDE-PPPAR's own install.sh writes its build output to
+        # ${HOME}/.PRIDE_PPPAR_BIN, so a wrong/unset HOME here would build
+        # successfully but leave PRIDE_PPPAR_BIN's path (derived from
+        # $PRIDE_PPPAR_USER_HOME above) pointing at a location the build
+        # never actually wrote to. Confirmed live in this same install
+        # flow that $HOME cannot be assumed present at all when running
+        # under systemd (phase 2) - explicit is safer than relying on
+        # sudo's default here too.
+        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" env HOME="$PRIDE_PPPAR_USER_HOME" USER="$PRIDE_PPPAR_USER" LOGNAME="$PRIDE_PPPAR_USER" bash -c 'yes "" | ./install.sh'); then
             if [ -x "$PRIDE_PPPAR_BIN" ]; then
                 echo "✓ PRIDE-PPPAR built successfully: $PRIDE_PPPAR_BIN"
                 # No git tag is pinned upstream (PrideLab/PRIDE-PPPAR has no
@@ -482,6 +993,15 @@ echo "==========================================================================
 # geomaxima_watchdog.timer until this directory was created manually).
 mkdir -p /var/log/rtkbase
 chown root:root /var/log/rtkbase || log "WARNING: chown of /var/log/rtkbase to root failed"
+
+# --- Re-check kernel-symlink consistency at the very end ---
+# GeoMaxima: tools/install.sh and security_setup.sh (both run above, in
+# STAGE 2/3) install packages of their own and could themselves introduce a
+# kernel package - the EARLY check a few hundred lines up would miss a
+# mismatch caused by this script's own later steps. This is the check that
+# actually protects the upcoming reboot; halts (does not just warn) with a
+# "do NOT reboot" message if the symlinks disagree right now.
+geomaxima_check_kernel_symlink_consistency end
 
 echo ""
 echo "============================================================================"

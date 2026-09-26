@@ -250,29 +250,47 @@ def register_routes(app, gm_blueprint):
                     "status": "ok",
                     "message": "WireGuard is already installed"
                 })
-            
-            # Install WireGuard
+
             result = subprocess.run(
                 ['apt-get', 'update'],
                 capture_output=True, text=True, timeout=60
             )
-            
+
+            # GeoMaxima: NEVER install the Debian `wireguard` metapackage
+            # directly - it depends on wireguard-modules, which only
+            # Debian's own linux-image-* kernel packages provide, which
+            # would pull in a Debian-origin kernel alongside a board's own
+            # vendor kernel (confirmed live on an Orange Pi 4 Pro+: this is
+            # almost certainly what originally bricked that station, the
+            # same unbootable combination tools/armbian_kernel_pin.sh
+            # exists to prevent). Delegates to the single shared helper,
+            # tools/wireguard_setup.sh's geomaxima_install_wireguard(),
+            # which installs only wireguard-tools, plus wireguard-go if the
+            # running kernel lacks native WireGuard support - see that
+            # file's header comment for the full "why". Not
+            # re-implemented here in Python so install.sh/perform_update.sh/
+            # this route can never drift out of sync on which packages are
+            # actually installed.
+            wireguard_setup_sh = os.path.abspath(os.path.join(
+                os.path.dirname(__file__), "..", "..", "tools", "wireguard_setup.sh"
+            ))
             result = subprocess.run(
-                ['apt-get', 'install', '-y', 'wireguard', 'wireguard-tools'],
+                ['bash', '-c', f'source {wireguard_setup_sh!r} && geomaxima_install_wireguard'],
                 capture_output=True, text=True, timeout=120
             )
-            
-            if result.returncode == 0:
+
+            if result.returncode == 0 and check_wireguard_installed():
                 return jsonify({
                     "status": "ok",
-                    "message": "WireGuard installed successfully"
+                    "message": "WireGuard installed successfully",
+                    "details": result.stdout
                 })
             else:
                 return jsonify({
                     "status": "error",
-                    "message": f"Installation failed: {result.stderr}"
+                    "message": f"Installation failed: {result.stderr or result.stdout}"
                 }), 500
-                
+
         except Exception as e:
             logger.error(f"Error installing WireGuard: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
