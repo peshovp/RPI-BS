@@ -13,6 +13,31 @@ set -euo pipefail
 
 REPO_URL="https://github.com/peshovp/RPI-BS.git"
 
+# --- Phase-2 handoff env file (A733 SD->eMMC migration, Plan B) ---
+# GeoMaxima: read THIS FIRST, before INSTALL_DIR/SUDO_USER are resolved
+# below - phase 2 runs from a systemd oneshot service with no SUDO_USER at
+# all, so without this INSTALL_DIR would silently resolve to /root/RPI-BS
+# and every "${SUDO_USER:-$USER}" call throughout this script would
+# install everything as root instead of the real installing user. Never
+# overrides an explicit SUDO_USER/INSTALL_DIR/GM_PHASE/GM_EMMC the caller's
+# environment already set (e.g. a normal interactive sudo run) - only
+# fills in what's missing.
+if [[ -f /etc/geomaxima/install.env ]]; then
+    GM_ENV_SUDO_USER="${SUDO_USER:-}"
+    GM_ENV_INSTALL_DIR="${INSTALL_DIR:-}"
+    GM_ENV_PHASE="${GM_PHASE:-}"
+    # shellcheck source=/dev/null
+    source /etc/geomaxima/install.env
+    # Re-apply anything the CALLER's environment already had, so the env
+    # file only fills in gaps rather than overriding an explicit override.
+    [[ -n "$GM_ENV_SUDO_USER" ]] && SUDO_USER="$GM_ENV_SUDO_USER"
+    [[ -n "$GM_ENV_INSTALL_DIR" ]] && INSTALL_DIR="$GM_ENV_INSTALL_DIR"
+    [[ -n "$GM_ENV_PHASE" ]] && GM_PHASE="$GM_ENV_PHASE"
+    export SUDO_USER="${SUDO_USER:-${GM_INSTALL_USER:-}}"
+    export GM_PHASE="${GM_PHASE:-2}"
+    unset GM_ENV_SUDO_USER GM_ENV_INSTALL_DIR GM_ENV_PHASE
+fi
+
 if [[ -n "${INSTALL_DIR:-}" ]]; then
     : # explicit override, use as-is
 elif [[ -n "${SUDO_USER:-}" ]]; then
@@ -115,7 +140,17 @@ else
         # real interactive terminal further down the line, e.g. someone
         # running `bash <(curl ...)` at a real console), otherwise
         # /dev/null - never the inherited pipe.
-        if [[ -r /dev/tty ]]; then
+        #
+        # `[[ -r /dev/tty ]]` is NOT a TTY check - /dev/tty is always mode
+        # 0666, readable by permission whether or not a controlling
+        # terminal exists; OPENING it without one (systemd, cron,
+        # cloud-init, this project's own geomaxima-firstboot.service) fails
+        # with ENXIO, which would abort this script under `set -e`. Source
+        # platform_detect.sh's gm_has_tty() helper (SCRIPT_DIR is already
+        # resolved at this point) and use that instead.
+        # shellcheck source=tools/platform_detect.sh
+        source "$SCRIPT_DIR/tools/platform_detect.sh"
+        if gm_has_tty; then
             exec bash "$SCRIPT_DIR/install.sh" "$@" </dev/tty
         else
             exec bash "$SCRIPT_DIR/install.sh" "$@" </dev/null
@@ -221,6 +256,203 @@ if [[ "${GM_PLATFORM:-}" == "armbian-a733" ]]; then
         fi
     fi
 fi
+
+# --- A733: unattended SD-to-eMMC migration (Plan B) ------------------------
+# GeoMaxima: makes `curl | sudo bash` a single unattended command on this
+# board too, when it's booted from SD with an eMMC present. This whole
+# block is PHASE 1 - it does ONLY the kernel pin/hold and the eMMC
+# migration itself, nothing else (no apt upgrade, no RTKBase install -
+# that happens once, in PHASE 2, running from eMMC). GM_EMMC controls it:
+# "auto" (default) migrates only if booted from SD with an eMMC actually
+# present; "yes" forces attempting it (still safely no-ops via the
+# re-migration guard if eMMC is already prepared, or fails loudly if no
+# eMMC is present at all); "no" skips it entirely (install proceeds on SD,
+# still protected by the bootloader-overlap check above).
+GM_EMMC="${GM_EMMC:-auto}"
+if [[ "${GM_PLATFORM:-}" == "armbian-a733" && "${GM_PHASE:-1}" == "1" && "$GM_EMMC" != "no" ]]; then
+    GM_A733_ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    GM_A733_ROOT_DISK="$(lsblk -no PKNAME "$GM_A733_ROOT_SOURCE" 2>/dev/null || true)"
+    GM_A733_ROOT_IS_SD=0
+    [[ -n "$GM_A733_ROOT_DISK" && -f "/sys/block/${GM_A733_ROOT_DISK}/device/type" ]] \
+        && [[ "$(cat "/sys/block/${GM_A733_ROOT_DISK}/device/type" 2>/dev/null)" == "SD" ]] \
+        && GM_A733_ROOT_IS_SD=1
+
+    GM_A733_EMMC_PRESENT=0
+    for GM_A733_B in /sys/block/mmcblk*; do
+        GM_A733_N="$(basename "$GM_A733_B")"
+        [[ "$GM_A733_N" =~ ^mmcblk[0-9]+$ ]] || continue
+        if [[ "$(cat "$GM_A733_B/device/type" 2>/dev/null)" == "MMC" ]]; then
+            GM_A733_EMMC_PRESENT=1
+            break
+        fi
+    done
+
+    # Migrate iff root is on SD AND (an eMMC was actually detected, OR the
+    # caller forced it with GM_EMMC=yes - geomaxima_emmc_migrate() itself
+    # still fails loudly if GM_EMMC=yes is forced but no eMMC exists at all).
+    if [[ "$GM_A733_ROOT_IS_SD" == "1" ]] && { [[ "$GM_A733_EMMC_PRESENT" == "1" ]] || [[ "$GM_EMMC" == "yes" ]]; }; then
+        echo "============================================================================"
+        echo "A733 detected, booted from SD, eMMC present - migrating to eMMC (GM_EMMC=$GM_EMMC)"
+        echo "============================================================================"
+
+        # Kernel pin/hold on the SD-booted system too (belt-and-braces: the
+        # migration function also writes the pin into the eMMC copy itself).
+        # shellcheck source=tools/armbian_kernel_pin.sh
+        source "$SCRIPT_DIR/tools/armbian_kernel_pin.sh"
+        geomaxima_apply_armbian_kernel_pin
+
+        # shellcheck source=tools/emmc-install-opi4pro.sh
+        source "$SCRIPT_DIR/tools/emmc-install-opi4pro.sh"
+
+        # GeoMaxima: geomaxima_emmc_migrate() does NOT use `set -e` inside
+        # itself (bash disables errexit for a function called as an `if`
+        # condition anyway - see that file's header comment), and its
+        # return-code contract is 3-way, not just success/fail: 0 =
+        # migrated, 2 = eMMC already prepared (no changes made), anything
+        # else = FAILED. `set +e`/`set -e` bracket the call so a non-zero
+        # return here never triggers this script's own `set -e` before we
+        # get a chance to inspect $rc and decide what to do - a failed
+        # migration must NEVER be treated as "safe to poweroff assuming
+        # success" or "safe to wipe the SD bootloader".
+        set +e
+        geomaxima_emmc_migrate 1 1
+        GM_EMMC_MIGRATE_RC=$?
+        set -e
+
+        if [[ "$GM_EMMC_MIGRATE_RC" == "2" ]]; then
+            echo "============================================================================"
+            echo "eMMC already prepared (previous migration's marker found) - nothing to do."
+            echo "REMOVE THE SD CARD and power the board back on to boot from eMMC."
+            echo "============================================================================"
+            poweroff
+            exit 0
+        elif [[ "$GM_EMMC_MIGRATE_RC" != "0" ]]; then
+            echo "ERROR: eMMC migration FAILED (exit $GM_EMMC_MIGRATE_RC). See $GM_EMMC_LOG for details." >&2
+            echo "The SD card has NOT been touched and remains bootable. NOT powering off," >&2
+            echo "NOT wiping the SD bootloader area. Fix the issue above and re-run install.sh." >&2
+            exit 1
+        fi
+
+        # --- Migration succeeded (rc=0). Write the phase-2 handoff files.
+        # GeoMaxima: from here on, ANY failure to write these files onto
+        # the eMMC copy is treated as FATAL (exit 1, no poweroff, no SD
+        # wipe) - a half-configured eMMC that can never actually run phase
+        # 2 automatically is worse than stopping here with a clear error,
+        # since the operator can still fix it while still booted from SD.
+        #
+        # GM_EMMC_RESULT_DISK/GM_EMMC_RESULT_PART are set BY
+        # geomaxima_emmc_migrate() itself on success (rc=0) - reusing them
+        # here instead of re-scanning /sys/block/mmcblk* a second time
+        # avoids ever disagreeing with what the migration function itself
+        # actually used.
+        GM_A733_EMMC_ROOT_PART="$GM_EMMC_RESULT_PART"
+        mkdir -p "$GM_EMMC_MNT"
+        mount "$GM_A733_EMMC_ROOT_PART" "$GM_EMMC_MNT" || {
+            echo "ERROR: could not mount $GM_A733_EMMC_ROOT_PART to write the phase-2 handoff files." >&2
+            echo "The eMMC copy exists but phase 2 will NOT run automatically. Boot from eMMC" >&2
+            echo "and run install.sh manually, or fix the mount issue and re-run this script." >&2
+            exit 1
+        }
+
+        # PHASE 2 runs from a systemd oneshot service, which has no
+        # SUDO_USER - without this handoff file, INSTALL_DIR/the installing
+        # user would silently become root, and every "${SUDO_USER:-$USER}"
+        # call throughout this script (tools/copy_unit.sh --user, chown,
+        # PRIDE-PPPAR's install-user resolution, ...) would install
+        # everything as root instead of the real user. `printf '%s=%q\n'`
+        # shell-quotes each value so a path containing spaces or special
+        # characters round-trips safely through `source` in phase 2.
+        mkdir -p "$GM_EMMC_MNT/etc/geomaxima" || { echo "ERROR: could not create /etc/geomaxima on the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+        {
+            printf 'GM_INSTALL_USER=%q\n' "${SUDO_USER:-$USER}"
+            printf 'INSTALL_DIR=%q\n' "${INSTALL_DIR}"
+            printf 'GM_PHASE=%q\n' "2"
+            printf 'GM_EMMC=%q\n' "no"
+        } > "$GM_EMMC_MNT/etc/geomaxima/install.env" || {
+            echo "ERROR: could not write the phase-2 handoff env file onto the eMMC target." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        }
+
+        # --- Firstboot oneshot service, installed directly into the eMMC
+        # copy, enabled via a symlink written directly into it (no chroot
+        # needed for a plain unit-file symlink enable). ExecStart points at
+        # the REAL, tracked tools/geomaxima-firstboot.sh (copied below via
+        # rsync as part of the eMMC copy already made by
+        # geomaxima_emmc_migrate() - not regenerated here), which
+        # self-disables this unit on SUCCESS, or after 3 failed attempts
+        # (see that script's own header comment) - never loops
+        # indefinitely across reboots.
+        mkdir -p "$GM_EMMC_MNT/etc/systemd/system" || { echo "ERROR: could not create /etc/systemd/system on the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+        cat > "$GM_EMMC_MNT/etc/systemd/system/geomaxima-firstboot.service" <<EOF || { echo "ERROR: could not write geomaxima-firstboot.service onto the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+[Unit]
+Description=GeoMaxima RPI-BS first-boot install (phase 2, on eMMC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=${INSTALL_DIR}/tools/geomaxima-firstboot.sh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        mkdir -p "$GM_EMMC_MNT/etc/systemd/system/multi-user.target.wants" || { echo "ERROR: could not create multi-user.target.wants on the eMMC target." >&2; umount "$GM_EMMC_MNT" 2>/dev/null || true; exit 1; }
+        ln -sf "/etc/systemd/system/geomaxima-firstboot.service" \
+            "$GM_EMMC_MNT/etc/systemd/system/multi-user.target.wants/geomaxima-firstboot.service" || {
+            echo "ERROR: could not enable geomaxima-firstboot.service on the eMMC target." >&2
+            umount "$GM_EMMC_MNT" 2>/dev/null || true
+            exit 1
+        }
+
+        # tools/geomaxima-firstboot.sh itself is ALREADY present on the
+        # eMMC copy - geomaxima_emmc_migrate()'s rsync copied this entire
+        # checkout (this script IS running from $SCRIPT_DIR, inside
+        # $INSTALL_DIR, which rsync -aAXHx / copies in full) - just ensure
+        # it's executable.
+        chmod +x "$GM_EMMC_MNT${INSTALL_DIR}/tools/geomaxima-firstboot.sh" 2>/dev/null \
+            || echo "WARNING: could not chmod +x tools/geomaxima-firstboot.sh on the eMMC target - the firstboot service may fail to start (Permission denied)." >&2
+
+        sync
+        umount "$GM_EMMC_MNT" || echo "WARNING: umount of $GM_EMMC_MNT reported an error after writing phase-2 files (may already be unmounted)." >&2
+
+        echo "Firstboot service installed on eMMC. Follow progress after boot with:"
+        echo "  journalctl -fu geomaxima-firstboot"
+        echo "(also logged to /var/log/geomaxima-install.log on the eMMC system)"
+
+        # --- Optionally erase only the SD's bootloader area (opt-in,
+        # unverified on hardware - see tools/emmc-install-opi4pro.sh). A
+        # FAILED wipe always powers off (never reboots) - rebooting with a
+        # partially-erased SD bootloader area in an unknown state, while
+        # still expecting it to either fully boot SD or fall through to
+        # eMMC, is not a safe assumption to make.
+        if [[ "${GM_WIPE_SD_BOOT:-no}" == "yes" ]]; then
+            if geomaxima_wipe_sd_bootloader; then
+                if [[ "${GM_REBOOT:-yes}" == "yes" ]]; then
+                    echo "Rebooting now (GM_WIPE_SD_BOOT=yes, GM_REBOOT=yes) - the board should fall through to eMMC..."
+                    reboot
+                fi
+            else
+                echo "ERROR: SD bootloader wipe failed - powering off instead of rebooting." >&2
+                echo "REMOVE THE SD CARD manually, then power the board back on." >&2
+                poweroff
+            fi
+        else
+            echo "============================================================================"
+            echo "eMMC migration complete. REMOVE THE SD CARD, then power the board back on"
+            echo "to continue the install automatically from eMMC (phase 2)."
+            echo "============================================================================"
+            poweroff
+        fi
+        exit 0
+    fi
+fi
+
+# GeoMaxima: /etc/geomaxima/install.env (if present) was already sourced at
+# the very top of this script, before INSTALL_DIR/SUDO_USER were resolved -
+# see the comment there. Nothing further to do here.
 
 echo "============================================================================"
 echo "STAGE 1/5: System Update & Prerequisites"

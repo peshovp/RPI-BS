@@ -116,3 +116,19 @@ export GM_PLATFORM GM_BOARD GM_ARCH GM_CONSOLE_TTYS
 # such as install.sh's bootloader-overlap and kernel-symlink checks, which
 # use it to skip HALTing and instead print what they would have done. It
 # defaults to unset/"0" (real run) unless the caller's environment sets it.
+
+# gm_has_tty(): true if a controlling terminal is actually usable right
+# now. GeoMaxima: `[[ -r /dev/tty ]]` is NOT a TTY check - /dev/tty is
+# always mode 0666 and readable-by-permission whether or not a controlling
+# terminal exists, but OPENING it without one (e.g. under systemd, cron,
+# cloud-init, or this project's own geomaxima-firstboot.service) fails
+# with ENXIO. Anything that would otherwise `read </dev/tty` or
+# `exec ... </dev/tty` must gate on this function first, not on
+# `-r /dev/tty`, or it aborts under `set -e` in exactly the non-interactive
+# contexts (phase 2 firstboot, OTA) that most need it to degrade
+# gracefully instead. Used by install.sh's curl|bash re-exec; available
+# for any future interactive prompt anywhere in this project's shell
+# scripts (none remain as of this comment - tools/security_setup.sh's
+# former UFW enable/disable prompt was removed entirely, see its own
+# header comment for why).
+gm_has_tty() { ( exec </dev/tty ) 2>/dev/null; }
