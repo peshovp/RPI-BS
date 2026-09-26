@@ -368,6 +368,20 @@ class SurveyController:
             logger.warning("Survey already running")
             return False
 
+        # GeoMaxima: one-time cleanup of stray top-level clutter in the
+        # PRIDE-PPPAR work directory ROOT, predating the per-slot isolation
+        # fix (commit d12e8c6) - that fix only isolates and prunes
+        # slot_*/ subdirectories created FROM NOW ON; it does nothing
+        # about leftover files that were already sitting directly in
+        # work_dir/pride_pppar/ from before that fix existed. Confirmed
+        # live on BaseStation: stray .obs files from multiple different
+        # calendar days and multiple brdm*.p broadcast nav files, some
+        # root-owned and some not, sitting directly in that root
+        # directory. Run automatically at every survey start (not a
+        # manual step to remember) so this can never silently recur.
+        if ppp_ar_enabled:
+            self._cleanup_ppp_ar_root_stray_files()
+
         # Ensure file logging is enabled
         if self.auto_mode:
             if not self._ensure_file_logging():
@@ -1290,6 +1304,81 @@ class SurveyController:
                     logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: failed to remove stale slot dir {stale_dir}: {e}")
         except Exception as e:
             logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: pruning failed (non-fatal): {e}")
+
+    def _cleanup_ppp_ar_root_stray_files(self) -> None:
+        """
+        Remove stray top-level clutter sitting directly in
+        work_dir/pride_pppar/ (the ROOT, not a slot_* subdirectory) -
+        one-time cleanup for anything left over from BEFORE the per-slot
+        isolation fix (_run_ppp_ar()/_cleanup_old_ppp_ar_slot_dirs())
+        existed. Confirmed live on BaseStation: stray .obs files from
+        multiple different calendar days and multiple brdm*.p broadcast
+        nav files, some root-owned and some not, sitting directly in that
+        root directory - accumulated back when every attempt shared that
+        one directory directly, before slot_*/ subdirectories existed at
+        all.
+
+        Called once at the START of every PPP-AR-enabled survey
+        (start_survey()) rather than left as a manual step to remember -
+        removes:
+          - any FILE sitting directly in the root (.obs, brdm*.p/.n,
+            or anything else that isn't a directory)
+          - any DIRECTORY in the root that is NOT named "slot_*" (an
+            unrecognized/pre-fix subdirectory layout, if any)
+        Existing slot_*/ subdirectories are left alone - those are
+        already covered by _cleanup_old_ppp_ar_slot_dirs()'s own
+        keep-most-recent-N pruning (called per-attempt, not here), so a
+        new survey starting must not itself force-delete recent slot_*
+        directories that might belong to a just-finished previous survey
+        and could still be useful for postmortem debugging.
+
+        Best-effort and NON-FATAL: any failure (permissions, directory
+        doesn't exist yet, individual file/dir removal failing) is logged
+        as a warning and otherwise ignored - cleanup failing must never
+        block a survey from starting.
+        """
+        ppp_ar_root = self.work_dir / "pride_pppar"
+        try:
+            if not ppp_ar_root.is_dir():
+                logger.info(f"_cleanup_ppp_ar_root_stray_files: {ppp_ar_root} does not exist yet - nothing to clean.")
+                return
+
+            removed = []
+            failed = []
+            for entry in ppp_ar_root.iterdir():
+                if entry.is_dir() and entry.name.startswith("slot_"):
+                    # Already-isolated slot directory - leave it alone,
+                    # covered by _cleanup_old_ppp_ar_slot_dirs() instead.
+                    continue
+                try:
+                    if entry.is_dir():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink()
+                    removed.append(entry.name)
+                except Exception as e:
+                    failed.append((entry.name, str(e)))
+
+            if removed:
+                logger.warning(
+                    f"_cleanup_ppp_ar_root_stray_files: removed {len(removed)} stray "
+                    f"pre-existing item(s) from {ppp_ar_root} (leftover from before "
+                    f"per-slot isolation existed): {sorted(removed)}"
+                )
+            else:
+                logger.info(f"_cleanup_ppp_ar_root_stray_files: {ppp_ar_root} has no stray top-level clutter - nothing to clean.")
+
+            if failed:
+                logger.warning(
+                    f"_cleanup_ppp_ar_root_stray_files: failed to remove "
+                    f"{len(failed)} item(s) from {ppp_ar_root} (non-fatal, "
+                    f"survey will start anyway): {failed}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"_cleanup_ppp_ar_root_stray_files: cleanup of {ppp_ar_root} failed "
+                f"(non-fatal, survey will start anyway): {e}"
+            )
 
     def _run_ppp_ar(self, slot_label: str = "unknown") -> Optional[Dict]:
         """
