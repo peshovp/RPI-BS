@@ -51,7 +51,7 @@
 geomaxima_install_wireguard() {
     echo "Installing WireGuard tooling (wireguard-tools only - never the 'wireguard' metapackage, see tools/wireguard_setup.sh)..."
 
-    if ! apt-get install -y -qq wireguard-tools; then
+    if ! apt-get install -y -qq --no-remove wireguard-tools; then
         echo "WARNING: failed to install wireguard-tools - WireGuard will not be available. This does not affect RTCM/GNSS functions." >&2
         return 0
     fi
@@ -68,7 +68,7 @@ geomaxima_install_wireguard() {
     fi
 
     echo "Kernel has no native WireGuard support (confirmed via 'ip link add type wireguard' failing) - installing userspace wireguard-go fallback..."
-    if apt-get install -y -qq wireguard-go; then
+    if apt-get install -y -qq --no-remove wireguard-go; then
         echo "✓ Kernel has no WireGuard, using userspace wireguard-go."
     else
         echo "WARNING: kernel has no native WireGuard support AND wireguard-go install failed - WireGuard will not be usable on this station. This does not affect RTCM/GNSS functions." >&2

@@ -48,3 +48,17 @@ cd RPI-BS && sudo ./addons/tools/perform_update.sh "$(pwd)" "$(pwd)/.update_stat
   - Long-term fix: ask Armbian to enable `CONFIG_WIREGUARD` in the
     sun60iw2 vendor kernel config, which would make this station-side
     workaround unnecessary.
+- **The `openresolv` package is never installed on boards where
+  systemd-resolved or NetworkManager is already managing DNS** (this
+  includes the Orange Pi 4 Pro+'s Armbian image, which uses
+  systemd-networkd + systemd-resolved). Confirmed live: `openresolv` and
+  `systemd-resolved` conflict with each other on Debian trixie, so a plain
+  `apt-get install openresolv` silently REMOVED the active
+  systemd-resolved package, leaving the board with no working DNS at all.
+  The installer now installs `openresolv` only when no resolver manager is
+  already active and no `resolvconf` implementation is already present. On
+  a board that already has an `openresolv` or Debian-`resolvconf`
+  installation, the DNS-fallback step (adding 8.8.8.8/1.1.1.1 as
+  secondary resolvers) writes to whichever mechanism that specific
+  implementation actually reads - the two are not interoperable. See
+  `tools/dns_setup.sh` for the full technical detail.

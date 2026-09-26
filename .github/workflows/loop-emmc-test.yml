@@ -14,6 +14,14 @@ name: Loop-device eMMC migration test
 # `wireguard` metapackage, a `linux-image-*` package, or a `*-dkms`
 # package - the confirmed-live root cause of a real Orange Pi 4 Pro+
 # station's boot brick (see that script's own header comment).
+#
+# Also runs tests/dns_setup_test.sh (same lightweight style, `systemctl`/
+# `apt-get`/`nmcli`/`dpkg`/`resolvconf` stubbed via PATH), which verifies
+# tools/dns_setup.sh never installs openresolv when systemd-resolved or
+# NetworkManager is active, and writes the DNS-fallback config to whichever
+# resolvconf mechanism (openresolv's append_nameservers vs. the Debian
+# resolvconf package's tail file) is ACTUALLY installed - the confirmed-live
+# root cause of that same station's DNS breaking during phase 2.
 
 on:
   push:
@@ -30,9 +38,11 @@ on:
       - 'tools/armbian_kernel_pin.sh'
       - 'tools/platform_detect.sh'
       - 'tools/wireguard_setup.sh'
+      - 'tools/dns_setup.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
       - 'tests/wireguard_setup_test.sh'
+      - 'tests/dns_setup_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   pull_request:
     paths:
@@ -40,9 +50,11 @@ on:
       - 'tools/armbian_kernel_pin.sh'
       - 'tools/platform_detect.sh'
       - 'tools/wireguard_setup.sh'
+      - 'tools/dns_setup.sh'
       - 'install.sh'
       - 'tests/loop_emmc_test.sh'
       - 'tests/wireguard_setup_test.sh'
+      - 'tests/dns_setup_test.sh'
       - '.github/workflows/loop-emmc-test.yml'
   workflow_dispatch: {}
 
@@ -67,3 +79,11 @@ jobs:
 
       - name: Run WireGuard setup helper test
         run: bash tests/wireguard_setup_test.sh
+
+  dns-setup-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run DNS setup helper test
+        run: bash tests/dns_setup_test.sh

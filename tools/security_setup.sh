@@ -48,12 +48,31 @@ apt update -qq
 apt full-upgrade -y -qq
 log_info "System packages updated successfully"
 
+# GeoMaxima: sanity-check DNS right after the first apt operations of this
+# script - confirmed live on an Orange Pi 4 Pro+ that a later, unrelated
+# apt-get install (openresolv, in install.sh's own STAGE 1) silently
+# removed the active systemd-resolved package, breaking DNS with no
+# warning; --no-remove (added below to this script's own apt installs) is
+# the primary defense against that class of bug, this health check is a
+# secondary tripwire specifically for DNS. Script dir resolved via
+# BASH_SOURCE since this script is also runnable standalone, not only from
+# inside install.sh's already-established $SCRIPT_DIR.
+SECURITY_SETUP_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "$SECURITY_SETUP_SCRIPT_DIR/tools/dns_setup.sh" ]]; then
+    # shellcheck source=tools/dns_setup.sh
+    source "$SECURITY_SETUP_SCRIPT_DIR/tools/dns_setup.sh"
+    if ! geomaxima_dns_health_check; then
+        log_error "DNS resolution check failed after 'apt full-upgrade' - see diagnostic output above. Aborting rather than continuing into a cascade of apt/network failures."
+        exit 1
+    fi
+fi
+
 # =============================================================================
 # Step 2: Install UFW firewall
 # =============================================================================
 log_info "Installing UFW firewall..."
 if ! command -v ufw &>/dev/null; then
-    apt install -y -qq ufw
+    apt install -y -qq --no-remove ufw
     log_info "UFW installed successfully"
 else
     log_info "UFW already installed, skipping installation"
@@ -98,7 +117,7 @@ log_info "UFW installed and SSH-allowed, left DISABLED for now - a later install
 # =============================================================================
 log_info "Installing fail2ban..."
 if ! command -v fail2ban &>/dev/null; then
-    apt install -y -qq fail2ban
+    apt install -y -qq --no-remove fail2ban
     log_info "fail2ban installed successfully"
 else
     log_info "fail2ban already installed, skipping installation"

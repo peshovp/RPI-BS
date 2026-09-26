@@ -116,8 +116,14 @@ install_dependencies() {
     echo 'INSTALLING DEPENDENCIES'
     echo '################################'
       apt-get "${APT_TIMEOUT}" update -y || exit 1
-      apt-get "${APT_TIMEOUT}" install -y git build-essential gfortran pps-tools python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-serial libsystemd-dev bc dos2unix socat zip unzip pkg-config psmisc proj-bin nftables || exit 1
-      apt-get "${APT_TIMEOUT}" install -y libxml2-dev libxslt-dev || exit 1 # needed for lxml (for pystemd)
+      # GeoMaxima: --no-remove is a safety net - confirmed live that an
+      # unrelated apt-get install (openresolv, on a board where it
+      # conflicts with the active systemd-resolved) silently removed a
+      # running system service with no warning at all. --no-remove makes
+      # apt abort with a clear error instead, on every install in this
+      # script.
+      apt-get "${APT_TIMEOUT}" install -y --no-remove git build-essential gfortran pps-tools python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-serial libsystemd-dev bc dos2unix socat zip unzip pkg-config psmisc proj-bin nftables || exit 1
+      apt-get "${APT_TIMEOUT}" install -y --no-remove libxml2-dev libxslt-dev || exit 1 # needed for lxml (for pystemd)
       #apt-get "${APT_TIMEOUT}" upgrade -y
 }
 
@@ -125,7 +131,7 @@ install_gpsd_chrony() {
     echo '################################'
     echo 'CONFIGURING FOR USING GPSD + CHRONY'
     echo '################################'
-      apt-get "${APT_TIMEOUT}" install chrony gpsd -y || exit 1
+      apt-get "${APT_TIMEOUT}" install --no-remove chrony gpsd -y || exit 1
       #Disabling and masking systemd-timesyncd
       systemctl stop systemd-timesyncd > /dev/null 2>&1
       systemctl disable systemd-timesyncd > /dev/null 2>&1
@@ -400,7 +406,7 @@ rtkbase_requirements(){
       if [[ $platform =~ 'aarch64' ]] || [[ $platform =~ 'x86_64' ]]
         then
           # More dependencies needed for aarch64 as there is no prebuilt wheel on piwheels.org
-          apt-get "${APT_TIMEOUT}" install -y libssl-dev libffi-dev || exit 1
+          apt-get "${APT_TIMEOUT}" install -y --no-remove libssl-dev libffi-dev || exit 1
       fi      
       # Copying udev rules
       [[ ! -d /etc/udev/rules.d ]] && mkdir /etc/udev/rules.d/
@@ -783,7 +789,7 @@ install_zeroconf_service() {
   echo 'INSTALLING ZEROCONF/AVAHI DEFINITION SERVICE'
   echo '################################'
   #Test is avahi is running and directory for services definition exists
-  type avahi-daemon >/dev/null 2>&1 || apt-get "${APT_TIMEOUT}" install -y avahi-daemon
+  type avahi-daemon >/dev/null 2>&1 || apt-get "${APT_TIMEOUT}" install -y --no-remove avahi-daemon
   if systemctl is-active --quiet avahi-daemon.service && [[ -d /etc/avahi/services ]]
   then
     web_port=$(grep "^web_port=.*" "${rtkbase_path}"/settings.conf | cut -d "=" -f2)
