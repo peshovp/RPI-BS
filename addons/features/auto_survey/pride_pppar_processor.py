@@ -44,10 +44,17 @@ confirmed working. Do not "simplify" this to a plain argv subprocess call.
 
 OUTPUT FORMAT - FUNDAMENTALLY DIFFERENT FROM ppp_processor.py's .pos FILE:
 PRIDE-PPPAR writes its result to a `pos_<mjd><doy>_<mark>`-style file (e.g.
-pos_2020001_abmf) under work_dir - process_ppp_ar() searches both work_dir
-itself and work_dir/results/ (recursively, one level) since the exact
-output subdirectory layout was not pinned down to a single confirmed path
-in this session; see process_ppp_ar()'s own comment for the search order.
+pos_2020001_abmf). CONFIRMED LIVE (BaseStation, manual pdp3 repro): the
+real location is work_dir/<year>/<doy>/pos_* (a 4-digit year, then a
+3-digit day-of-year subdirectory that pdp3 itself creates) - e.g.
+work_dir/2026/215/pos_2026215_topo - NOT directly under work_dir. This
+also matches an earlier manual pdp3 test's directory structure
+(~/pdp3_manual_test2/2026/267/), so it's pdp3's normal, consistent
+behavior, not a one-off. process_ppp_ar() searches work_dir/<year>/<doy>/
+first (the confirmed real location, year/doy taken from pdp3's own
+"ProcessSingleSession from <year> <doy> ..." stdout line), then falls
+back to work_dir itself, then work_dir/results/ (recursively, one level) -
+see process_ppp_ar()'s own comment for the full, current search order.
 The file has a variable-length header (config echo) ended by a literal
 "END OF HEADER" line, followed by exactly ONE data line with space-
 separated columns:
@@ -250,6 +257,41 @@ _FIX_RATE_LINE_RE = re.compile(
     r'([\d.]+)%\s+([\d.]+)%',
     re.IGNORECASE
 )
+
+# Confirmed live stdout line format (BaseStation), e.g.:
+#   ===> ProcessSingleSession from 2026 215 to 2026 215 ...
+# pdp3's own stated processing year/day-of-year - used to locate its
+# result file at work_dir/<year>/<doy>/pos_* (see module docstring's
+# OUTPUT FORMAT section), since this is pdp3's own record of what it
+# actually used, rather than something inferred separately (e.g. from the
+# obs file's RINEX header) that could drift out of sync with it. Captures
+# only the first (year, doy) pair - a session spanning a day boundary
+# would still have created its output under the FIRST day's subdirectory,
+# matching pdp3's own "from <year> <doy>" (not "to") semantics.
+_PROCESS_SESSION_LINE_RE = re.compile(
+    r'ProcessSingleSession\s+from\s+(\d{4})\s+(\d{1,3})\b'
+)
+
+
+def _parse_process_session_year_doy(stdout: str) -> Optional[tuple]:
+    """
+    Parse pdp3's "===> ProcessSingleSession from <year> <doy> to ..."
+    stdout line to recover the (year, doy) it actually processed under.
+
+    Args:
+        stdout: pdp3's captured stdout
+
+    Returns:
+        (year, doy) as (str, str), doy zero-padded to 3 digits to match
+        pdp3's own work_dir/<year>/<doy>/ directory naming - or None if
+        the line was not found (not an error; callers must fall back to
+        the other search locations, see process_ppp_ar()).
+    """
+    match = _PROCESS_SESSION_LINE_RE.search(stdout)
+    if not match:
+        return None
+    year, doy = match.group(1), match.group(2)
+    return year, doy.zfill(3)
 
 
 def _parse_fix_rate_line(stdout: str) -> Dict[str, Optional[float]]:
@@ -499,12 +541,41 @@ class PridePpparProcessor:
             _log_pdp3_error_lines(result.stdout, result.stderr, level=logging.ERROR)
             return None
 
-        # Output location was not pinned down to a single confirmed path
-        # in this session - search work_dir itself first, then
-        # work_dir/results/ (one level deep, covering a possible
-        # work_dir/results/<doy>/ layout), in that order. First match wins.
-        pos_files = list(work_dir.glob(_POS_FILE_GLOB))
-        search_locations = [str(work_dir)]
+        # Search order (first match wins), most-confirmed location first:
+        #   1. work_dir/<year>/<doy>/pos_* - CONFIRMED LIVE real location
+        #      (BaseStation manual repro): pdp3 creates a
+        #      <4-digit-year>/<3-digit-doy>/ subdirectory and writes its
+        #      pos_* file there, e.g. work_dir/2026/215/pos_2026215_topo.
+        #      year/doy are taken from pdp3's own "===> ProcessSingleSession
+        #      from <year> <doy> ..." stdout line (pdp3's own stated
+        #      processing date, not inferred separately).
+        #   2. work_dir/pos_* - kept as a fallback in case of a different
+        #      pdp3 config/version that writes directly to work_dir.
+        #   3. work_dir/results/ and work_dir/results/*/ - kept as a
+        #      fallback from before the year/doy location was confirmed.
+        pos_files = []
+        search_locations = []
+
+        year_doy = _parse_process_session_year_doy(result.stdout)
+        year_doy_dir = None
+        if year_doy is not None:
+            year, doy = year_doy
+            year_doy_dir = work_dir / year / doy
+            search_locations.append(str(year_doy_dir))
+            if year_doy_dir.is_dir():
+                pos_files = list(year_doy_dir.glob(_POS_FILE_GLOB))
+        else:
+            logger.warning(
+                "process_ppp_ar: could not find pdp3's 'ProcessSingleSession "
+                "from <year> <doy>' line in stdout - cannot check the "
+                "confirmed work_dir/<year>/<doy>/ location; falling back to "
+                "work_dir and work_dir/results only."
+            )
+
+        if not pos_files:
+            search_locations.append(str(work_dir))
+            pos_files = list(work_dir.glob(_POS_FILE_GLOB))
+
         if not pos_files:
             results_dir = work_dir / "results"
             search_locations.append(str(results_dir))
@@ -517,12 +588,18 @@ class PridePpparProcessor:
             # naming-convention mismatch (e.g. pdp3 using a different
             # prefix than "pos_") is immediately visible instead of just
             # "nothing found".
+            year_doy_dir_contents = (
+                sorted(p.name for p in year_doy_dir.iterdir())
+                if year_doy_dir is not None and year_doy_dir.is_dir() else
+                ('(directory does not exist)' if year_doy_dir is not None else '(year/doy unknown - not searched)')
+            )
             work_dir_contents = sorted(p.name for p in work_dir.iterdir()) if work_dir.is_dir() else []
             results_dir = work_dir / "results"
             results_dir_contents = sorted(p.name for p in results_dir.iterdir()) if results_dir.is_dir() else None
             logger.error(
                 f"process_ppp_ar: no pos_* result file found. "
                 f"Searched: {search_locations}. "
+                f"work_dir/<year>/<doy> contents: {year_doy_dir_contents}. "
                 f"work_dir contents: {work_dir_contents}. "
                 f"work_dir/results contents: "
                 f"{results_dir_contents if results_dir_contents is not None else '(directory does not exist)'}"
