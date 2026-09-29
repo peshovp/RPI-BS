@@ -116,8 +116,14 @@ install_dependencies() {
     echo 'INSTALLING DEPENDENCIES'
     echo '################################'
       apt-get "${APT_TIMEOUT}" update -y || exit 1
-      apt-get "${APT_TIMEOUT}" install -y git build-essential gfortran pps-tools python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-serial libsystemd-dev bc dos2unix socat zip unzip pkg-config psmisc proj-bin nftables || exit 1
-      apt-get "${APT_TIMEOUT}" install -y libxml2-dev libxslt-dev || exit 1 # needed for lxml (for pystemd)
+      # GeoMaxima: --no-remove is a safety net - confirmed live that an
+      # unrelated apt-get install (openresolv, on a board where it
+      # conflicts with the active systemd-resolved) silently removed a
+      # running system service with no warning at all. --no-remove makes
+      # apt abort with a clear error instead, on every install in this
+      # script.
+      apt-get "${APT_TIMEOUT}" install -y --no-remove git build-essential gfortran pps-tools python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-serial libsystemd-dev bc dos2unix socat zip unzip pkg-config psmisc proj-bin nftables || exit 1
+      apt-get "${APT_TIMEOUT}" install -y --no-remove libxml2-dev libxslt-dev || exit 1 # needed for lxml (for pystemd)
       #apt-get "${APT_TIMEOUT}" upgrade -y
 }
 
@@ -125,7 +131,25 @@ install_gpsd_chrony() {
     echo '################################'
     echo 'CONFIGURING FOR USING GPSD + CHRONY'
     echo '################################'
-      apt-get "${APT_TIMEOUT}" install chrony gpsd -y || exit 1
+      # GeoMaxima: confirmed live (both Armbian and Raspberry Pi OS ship
+      # systemd-timesyncd by default) that `apt-get install --no-remove
+      # chrony gpsd` ABORTS with "Packages need to be removed but remove
+      # is disabled" - chrony Conflicts: time-daemon, and
+      # systemd-timesyncd Provides: time-daemon, so apt must remove
+      # systemd-timesyncd to install chrony, which --no-remove correctly
+      # forbids by default. This removal is a KNOWN, INTENDED replacement
+      # (this function immediately stops/disables/masks
+      # systemd-timesyncd below anyway, since chrony is meant to fully
+      # replace it as the time source), so it is done explicitly and
+      # visibly here, BEFORE the --no-remove install - not via `--no-remove`
+      # being dropped for this one install, which would silently re-open
+      # the door to any OTHER unexpected removal alongside this expected
+      # one.
+      if dpkg -l systemd-timesyncd 2>/dev/null | grep -q '^ii'; then
+          echo 'Replacing systemd-timesyncd with chrony (GNSS/PPS time source) - chrony Conflicts: time-daemon, which systemd-timesyncd Provides.'
+          apt-get "${APT_TIMEOUT}" remove -y systemd-timesyncd || exit 1
+      fi
+      apt-get "${APT_TIMEOUT}" install --no-remove chrony gpsd -y || exit 1
       #Disabling and masking systemd-timesyncd
       systemctl stop systemd-timesyncd > /dev/null 2>&1
       systemctl disable systemd-timesyncd > /dev/null 2>&1
@@ -175,7 +199,48 @@ install_rtklib() {
     echo '################################'
     echo 'INSTALLING RTKLIB'
     echo '################################'
+    # GeoMaxima: tools/bin/RTKLIB-2.5.0/armv7l and armv6l (32-bit Raspberry
+    # Pi) have no rnx2rtkp binary at all - only str2str/rtkrcv/convbin were
+    # ever pre-built for those architectures. The --version check chain
+    # below therefore always fails on 32-bit Pi (the `&&` on the missing
+    # rnx2rtkp's --version check fails), so the `cp` branch a few lines down
+    # is never reached there and _compil_rtklib() (build from source) always
+    # runs instead. That is intentional/expected until a 32-bit rnx2rtkp
+    # binary is added here.
     arch_package=$(uname -m)
+    # GeoMaxima: `uname -m` reports the KERNEL architecture, not the
+    # userland one - Raspberry Pi OS 32-bit on a Pi 3B/4/5 runs a 64-bit
+    # kernel with an armhf userland, so `uname -m` would wrongly say
+    # "aarch64" here and select aarch64 binaries that cannot run on this
+    # userland. dpkg --print-architecture reports the actual
+    # userland/binary architecture that matters for picking the right
+    # tools/bin/RTKLIB-2.5.0/<arch>/ directory. Same mapping as
+    # tools/platform_detect.sh's GM_ARCH; falls back to the uname value
+    # above on any system without dpkg (none of the currently-supported
+    # boards hit that fallback).
+    if command -v dpkg &>/dev/null; then
+        case "$(dpkg --print-architecture 2>/dev/null)" in
+            arm64) arch_package='aarch64' ;;
+            armhf)
+                # GeoMaxima: dpkg reports "armhf" identically for a Pi
+                # Zero/1 (ARMv6) and a Pi 2/3/4 (ARMv7) running Raspberry
+                # Pi OS's 32-bit/armhf userland - dpkg's architecture name
+                # does not distinguish them, only `uname -m` does
+                # (confirmed: Pi OS armhf is built ARMv6-compatible, so
+                # `uname -m` still reports "armv6l" on that hardware even
+                # though the userland is the same "armhf" dpkg arch as a
+                # Pi 3/4). Use uname -m here to pick the right prebuilt
+                # binary directory instead of collapsing both onto armv7l.
+                if [[ "$(uname -m)" == "armv6l" ]]; then
+                    arch_package='armv6l'
+                else
+                    arch_package='armv7l'
+                fi
+                ;;
+            armel) arch_package='armv6l' ;;
+            amd64) arch_package='x86_64' ;;
+        esac
+    fi
     #[[ $arch_package == 'x86_64' ]] && arch_package='x86'
     [[ -f /sys/firmware/devicetree/base/model ]] && computer_model=$(tr -d '\0' < /sys/firmware/devicetree/base/model)
     # convert "Raspberry Pi 3 Model B plus rev 1.3" or other Raspi model to the variable "Raspberry Pi"
@@ -196,6 +261,17 @@ install_rtklib() {
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rtkrcv /usr/local/bin/
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/convbin /usr/local/bin/
       cp "${rtkbase_path}"'/tools/bin/'"${RTKLIB_RELEASE}"'/'"${arch_package}"/rnx2rtkp /usr/local/bin/
+      # GeoMaxima: belt-and-braces only, not the actual fix. `cp` preserves
+      # the source file's mode, and the --version checks above already
+      # require the tools/bin/... copies to be executable to reach this
+      # branch at all - so the real fix is the git-tracked exec bit on
+      # tools/bin/RTKLIB-2.5.0/armv7l and armv6l/{str2str,rtkrcv,convbin}
+      # (previously 644, unlike aarch64 which was already tracked
+      # executable; fixed via `git update-index --chmod=+x`, not here).
+      # This chmod just guards against some future re-vendor/re-tag of
+      # these binaries losing the executable bit again without anyone
+      # noticing until runtime. Harmless/idempotent either way.
+      chmod +x /usr/local/bin/str2str /usr/local/bin/rtkrcv /usr/local/bin/convbin /usr/local/bin/rnx2rtkp
     else
       echo 'No binary available for ' "${computer_model}" ' - ' "${arch_package}" '. We will build it from source'
       _compil_rtklib
@@ -348,7 +424,7 @@ rtkbase_requirements(){
       if [[ $platform =~ 'aarch64' ]] || [[ $platform =~ 'x86_64' ]]
         then
           # More dependencies needed for aarch64 as there is no prebuilt wheel on piwheels.org
-          apt-get "${APT_TIMEOUT}" install -y libssl-dev libffi-dev || exit 1
+          apt-get "${APT_TIMEOUT}" install -y --no-remove libssl-dev libffi-dev || exit 1
       fi      
       # Copying udev rules
       [[ ! -d /etc/udev/rules.d ]] && mkdir /etc/udev/rules.d/
@@ -445,8 +521,34 @@ detect_gnss() {
         echo 'UART GNSS RECEIVER DETECTION'
         echo '################################'
         systemctl is-active --quiet str2str_tcp.service && systemctl stop str2str_tcp.service && echo 'Stopping str2str_tcp service'
+        # GeoMaxima: GM_CONSOLE_TTYS (tools/platform_detect.sh) identifies
+        # the tty the kernel is actually using as a serial console (from
+        # /proc/cmdline's console= argument and the live
+        # /sys/class/tty/console/active list) - confirmed live that
+        # probing ttyS0 first, at all 5 baud rates (~50s), before ever
+        # reaching the real receiver on ttyUSB0 is not just slow: on a
+        # board where ttyS0 (or another probed port) IS the serial
+        # console, blasting UBX/unicore probe bytes at it is undesirable
+        # and, on some boards, that console is the only way to reach a
+        # login shell. Sourced defensively (this file may run from a
+        # context where tools/platform_detect.sh isn't reachable, e.g. a
+        # bundled/standalone copy) - GM_CONSOLE_TTYS simply stays empty in
+        # that case, and every candidate port is probed exactly as before.
+        GM_CONSOLE_TTYS=""
+        for _gm_pd_candidate in "${rtkbase_path}/tools/platform_detect.sh" "$(dirname "${BASH_SOURCE[0]}")/platform_detect.sh"; do
+            if [[ -f "$_gm_pd_candidate" ]]; then
+                # shellcheck source=/dev/null
+                source "$_gm_pd_candidate"
+                break
+            fi
+        done
+        unset _gm_pd_candidate
+        if [[ -n "$GM_CONSOLE_TTYS" ]]; then
+            echo "Skipping serial console port(s) during GNSS detection: $GM_CONSOLE_TTYS"
+        fi
         # TODO remove port if not available in /dev/
         for port in ttyS0 ttyUSB0 ttyUSB1 ttyUSB2 serial0 ttyS1 ttyS2 ttyS3 ttyS4 ttyS5; do
+            [[ " $GM_CONSOLE_TTYS " == *" $port "* ]] && { echo "Skipping $port (serial console)"; continue; }
             for port_speed in 115200 57600 38400 19200 9600; do
                 echo 'DETECTION ON ' $port ' at ' $port_speed
                 if [[ $(python3 "${rtkbase_path}"/tools/ubxtool -f /dev/$port -s $port_speed -p MON-VER -w 5 2>/dev/null) =~ 'ZED-F9P' ]]; then
@@ -731,7 +833,7 @@ install_zeroconf_service() {
   echo 'INSTALLING ZEROCONF/AVAHI DEFINITION SERVICE'
   echo '################################'
   #Test is avahi is running and directory for services definition exists
-  type avahi-daemon >/dev/null 2>&1 || apt-get "${APT_TIMEOUT}" install -y avahi-daemon
+  type avahi-daemon >/dev/null 2>&1 || apt-get "${APT_TIMEOUT}" install -y --no-remove avahi-daemon
   if systemctl is-active --quiet avahi-daemon.service && [[ -d /etc/avahi/services ]]
   then
     web_port=$(grep "^web_port=.*" "${rtkbase_path}"/settings.conf | cut -d "=" -f2)
@@ -757,7 +859,17 @@ main() {
   fi
   
   # check if there is at least 300MB of free space on the root partition to install rtkbase
-  if [[ $(df "$HOME" | awk 'NR==2 { print $4 }') -lt 300000 ]]
+  # GeoMaxima: confirmed live that $HOME is unset when this script runs
+  # from a systemd service (geomaxima-firstboot.service, phase 2 of the
+  # A733 SD->eMMC unattended install) - `df ""` then fails with
+  # "df: '': No such file or directory" and the unquoted-in-arithmetic
+  # empty result made the install exit as if disk space were low, even
+  # though 26.9 GB was actually free. `${HOME:-/}` falls back to the root
+  # filesystem (always mounted, always a valid df target) when HOME is
+  # unset - this measures the wrong filesystem only on an exotic setup
+  # where / and $HOME are on different filesystems AND HOME is unset,
+  # which does not apply to any station this project targets.
+  if [[ $(df "${HOME:-/}" | awk 'NR==2 { print $4 }') -lt 300000 ]]
   then
     echo 'Available space is lower than 300MB.'
     echo 'Exiting...'

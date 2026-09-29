@@ -1,0 +1,36 @@
+name: No hardcoded username/home path
+
+# GeoMaxima project rule: "no hardcoded users or home paths anywhere - any
+# username can be used on a station." The install user is derived only
+# from SUDO_USER at install time -> /etc/geomaxima/install.env's
+# GM_INSTALL_USER -> unit templates' {user}/{home} substitution
+# (tools/copy_unit.sh), and at runtime from install.env, the install dir's
+# owner (os.stat().st_uid -> pwd.getpwuid), or /etc/environment's
+# rtkbase_path - never from a literal.
+#
+# This workflow scans the WHOLE tracked tree (any *.py/*.sh/*.service/
+# *.timer/*.conf*), so it runs on every push/PR rather than being scoped
+# to a specific file list the way loop-emmc-test.yml's jobs are.
+
+on:
+  push:
+    branches: [main, feature/armbian-opi4pro-support]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  no-hardcoded-username-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run no-hardcoded-username/home-path CI guard
+        run: bash tests/no_hardcoded_username_test.sh
+
+  unit-templating-username-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unit-file templating test with a non-default username
+        run: bash tests/unit_templating_username_test.sh

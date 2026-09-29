@@ -156,7 +156,7 @@ def find_pdp3() -> Optional[Path]:
     - i.e. the HOME of whatever user this code is currently running as
     (root, when run via rtkbase_web.service), NOT any specific installer
     username. This matches PRIDE-PPPAR's own documented install
-    convention (~/.PRIDE_PPPAR_BIN) without hardcoding "peshovp" or any
+    convention (~/.PRIDE_PPPAR_BIN) without hardcoding any specific
     other username.
 
     Returns:

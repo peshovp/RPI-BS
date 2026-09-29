@@ -20,7 +20,13 @@ WEB_APP_DIR = os.path.join(RTKBASE_DIR, "web_app")
 # Feature flags
 FEATURES = {
     "wireguard_client": False,
-    "auto_survey_feature": True,  # Auto Survey-In for precise positioning
+    # GeoMaxima: addons/features/auto_survey_feature.py (this flag's own
+    # module) was dead code - never imported/registered anywhere, and this
+    # FEATURES dict itself is not read by web_app/server.py, which wires
+    # its own, separate Auto Survey-In implementation
+    # (addons/features/auto_survey/) directly. Deleted rather than kept
+    # (it also hardcoded a specific home path/username, a stale one at that
+    # for a username no station-agnostic build should ever assume).
     "ota_update_feature": True,   # OTA Update Manager for remote updates
     "watchdog_feature": True,     # System monitoring and auto-recovery
     "gnss_config_feature": True,  # GNSS Receiver Configuration Manager

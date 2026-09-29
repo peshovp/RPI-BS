@@ -7,9 +7,13 @@
 set -e
 
 GEOMAXIMA_REPO="https://github.com/peshovp/GeoMaxima-BS.git"
-RTKBASE_DIR="/home/peshovp/rtkbase"
+# GeoMaxima: no hardcoded username or stale path - derive the install user
+# the same way as everywhere else (explicit arg > SUDO_USER > current user),
+# and the checkout dir from that user's actual home, not a literal
+# username/"rtkbase" path (the checkout is RPI-BS, not rtkbase).
+STANDARD_USER="${1:-${SUDO_USER:-$(whoami)}}"
+RTKBASE_DIR="$(eval echo "~${STANDARD_USER}")/RPI-BS"
 GEOMAXIMA_TMP="/tmp/geomaxima_update"
-STANDARD_USER="${1:-peshovp}"
 
 echo "========================================="
 echo "GeoMaxima Update Script"

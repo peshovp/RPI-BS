@@ -152,32 +152,59 @@ class GNSSConfigManager:
     def scan_ports(self) -> List[Dict]:
         """
         Scan all available serial ports for GNSS receivers
-        
+
         Returns:
             List of detected receivers with info
         """
         import glob
-        
+
         # Common serial port patterns
         port_patterns = [
             '/dev/ttyACM*',
             '/dev/ttyUSB*',
             '/dev/ttyS*',
             '/dev/ttyAMA*',       # Raspberry Pi serial
+            '/dev/ttyAS*',        # Allwinner vendor kernels (Armbian)
             '/dev/ttyGNSS*',      # Custom GNSS symlinks
             '/dev/gnss*',         # Alternative GNSS naming
             '/dev/serial/by-id/*',
             '/dev/serial/by-path/*'
         ]
-        
+
         detected = []
         ports = []
-        
+
         for pattern in port_patterns:
             ports.extend(glob.glob(pattern))
-        
+
+        # GeoMaxima: exclude whichever tty the kernel is actually using as
+        # a serial console (from /proc/cmdline's console= argument and the
+        # live /sys/class/tty/console/active list) - matches
+        # tools/install.sh's detect_gnss() fix for the same confirmed-live
+        # issue (blasting receiver-probe bytes at a serial console is
+        # undesirable, and on some boards that console is the only way to
+        # reach a login shell). Imported defensively (addons.platform_info
+        # requires the repo root on sys.path, which web_app/server.py sets
+        # up before loading feature modules, but this module should never
+        # hard-fail if that import path isn't available in some other
+        # context) - falls back to no exclusion, exactly the pre-fix
+        # behavior, rather than raising.
+        console_ttys = frozenset()
+        try:
+            from addons.platform_info import detect_platform
+            console_ttys = detect_platform().console_ttys
+        except Exception as e:
+            logger.debug(f"scan_ports: could not determine console ttys to exclude ({e}) - scanning all matched ports.")
+
+        if console_ttys:
+            before = set(ports)
+            ports = [p for p in ports if Path(p).name not in console_ttys]
+            skipped = sorted(before - set(ports))
+            if skipped:
+                logger.info(f"Skipping serial console port(s) during GNSS scan: {skipped}")
+
         logger.info(f"Scanning {len(ports)} serial ports...")
-        
+
         for port in ports:
             logger.info(f"Checking port: {port}")
             try:
@@ -189,7 +216,7 @@ class GNSSConfigManager:
                     logger.debug(f"No receiver detected on {port}")
             except Exception as e:
                 logger.error(f"Error scanning {port}: {e}")
-        
+
         logger.info(f"Scan complete. Found {len(detected)} receiver(s)")
         return detected
     

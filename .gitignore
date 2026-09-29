@@ -18,3 +18,4 @@ test.conf
 **/venv*/*
 **/build/
 /rtkbase
+.continue/
