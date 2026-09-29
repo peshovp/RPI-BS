@@ -35,11 +35,22 @@ name: Loop-device eMMC migration test
 # Also runs tests/systemd_env_test.sh (same lightweight style, run under
 # `env -i` to simulate systemd's near-empty environment), which verifies
 # tools/geomaxima-firstboot.sh's HOME/USER/LOGNAME/TERM/LANG fallbacks
-# take effect, and that tools/install.sh's free-disk-space check
+# take effect, that tools/install.sh's free-disk-space check
 # (`df "${HOME:-/}"`) does not itself fail when HOME is unset - the
 # confirmed-live regression where phase 2 failed with
 # "Available space is lower than 300MB" on a board with 26.9 GB free,
-# because `df "$HOME"` became `df ""` under systemd.
+# because `df "$HOME"` became `df ""` under systemd - and that git's
+# "dubious ownership" check (confirmed-live regression when phase 2's
+# `git pull` ran as root under systemd against a non-root-owned repo) is
+# correctly allowlisted via the GIT_CONFIG_* safe.directory env vars
+# install.sh/geomaxima-firstboot.sh export for the upstream
+# tools/install.sh git-pull call path.
+#
+# tests/no_hardcoded_username_test.sh and tests/unit_templating_username_test.sh
+# (the "no hardcoded users/paths anywhere" CI guard and its unit-templating
+# check) run in their own workflow, .github/workflows/no-hardcoded-username.yml,
+# with a repo-wide trigger - they scan the WHOLE tracked tree, not just the
+# eMMC/Armbian-specific files this workflow's `paths:` filters are scoped to.
 
 on:
   push:

@@ -96,6 +96,78 @@ else
     chk '[[ "$RC_FIXED" != 1 ]]' "the check also does not error out once HOME=/root is exported (geomaxima-firstboot.sh's own fix), rc=$RC_FIXED"
 fi
 
+echo "== Case 3: git's dubious-ownership check under systemd's empty environment (no SUDO_UID) =="
+# Confirmed live regression (Orange Pi 4 Pro+, real board): phase 2's
+# `git -C "$rtkbase_path" pull` (tools/install.sh's install path) failed
+# with "detected dubious ownership in repository at ..." because the repo
+# is owned by the install user while phase 2 runs as root under systemd,
+# which - unlike a normal `sudo` invocation - never sets SUDO_UID (the
+# implicit owner-match git also honors). Fixed via geomaxima-firstboot.sh
+# and install.sh's own GIT_CONFIG_COUNT/GIT_CONFIG_KEY_N/GIT_CONFIG_VALUE_N
+# safe.directory exports (git >= 2.31), reserved specifically for the
+# upstream tools/install.sh git-pull call path per the project's own
+# "minimal diff to upstream" rule - GeoMaxima's OWN git operations
+# (install.sh's bootstrap_repo(), addons/tools/perform_update.sh, the OTA
+# UpdateController) instead run git AS the repo's actual owner via
+# `sudo -u`/stat-derived ownership, never via this env-var allowlist (the
+# repo belongs to the user; root should not become a git user of it) - see
+# those files' own comments for that half of the fix.
+if ! command -v git >/dev/null 2>&1; then
+    echo "SKIP: git not available in this environment - cannot exercise the dubious-ownership check."
+else
+    # Build a minimal-but-real PATH containing wherever git (and the other
+    # tools this case shells out to) actually live on THIS machine, rather
+    # than assuming a Linux FHS layout (a real systemd unit's PATH is also
+    # not the concern here - this case tests git's own behavior, not
+    # geomaxima-firstboot.service's actual PATH= value).
+    GIT_BIN_DIR="$(dirname "$(command -v git)")"
+    ENV_PATH="$GIT_BIN_DIR:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    GIT_TEST_DIR=$(mktemp -d)
+    trap 'rm -rf "$GIT_TEST_DIR"' EXIT
+    git init -q "$GIT_TEST_DIR"
+    git -C "$GIT_TEST_DIR" -c user.email=test@example.com -c user.name=test commit -q --allow-empty -m init
+
+    # Simulate the dubious-ownership failure itself: git >= 2.35.2 exposes a
+    # test-only env var to force the "owned by someone else" code path
+    # without actually needing a second real uid in CI.
+    if git -C "$GIT_TEST_DIR" status >/dev/null 2>&1 && \
+       GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git -C "$GIT_TEST_DIR" status >/dev/null 2>&1; then
+        echo "SKIP: this git version does not honor GIT_TEST_ASSUME_DIFFERENT_OWNER - cannot simulate dubious ownership without a real second uid (not available in this environment). The env-var safe.directory mechanism itself is still exercised below."
+    fi
+
+    # The actual fix under test: with safe.directory allowlisted via the
+    # SAME env vars install.sh/geomaxima-firstboot.sh export
+    # (GIT_CONFIG_COUNT/KEY_N/VALUE_N), git must succeed regardless of
+    # ownership state.
+    RESULT=$(env -i PATH="$ENV_PATH" \
+        GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
+        GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0=safe.directory \
+        GIT_CONFIG_VALUE_0="$GIT_TEST_DIR" \
+        git -C "$GIT_TEST_DIR" status 2>&1)
+    RC=$?
+    chk '[[ "$RC" -eq 0 ]]' "git succeeds under a simulated dubious-ownership state once safe.directory is allowlisted via GIT_CONFIG_* env vars (the exact mechanism install.sh and geomaxima-firstboot.sh use for the upstream tools/install.sh git-pull path)"
+    [[ "$RC" -ne 0 ]] && echo "    git output: $RESULT"
+
+    # And the negative case: WITHOUT that allowlist, under a genuinely
+    # simulated different-owner state, git's own safety check should still
+    # fire (confirms the test actually exercises the real mechanism, not a
+    # no-op).
+    RESULT_NOALLOW=$(env -i PATH="$ENV_PATH" \
+        GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
+        git -C "$GIT_TEST_DIR" status 2>&1)
+    RC_NOALLOW=$?
+    if [[ "$RC_NOALLOW" -ne 0 && "$RESULT_NOALLOW" == *"dubious ownership"* ]]; then
+        ok "git's dubious-ownership check genuinely fires without the allowlist (confirms GIT_TEST_ASSUME_DIFFERENT_OWNER is exercising the real code path, and that the fix above is doing real work, not passing vacuously)"
+    else
+        echo "SKIP: this git version did not reproduce the dubious-ownership failure without the allowlist (rc=$RC_NOALLOW: $RESULT_NOALLOW) - likely a git version where GIT_TEST_ASSUME_DIFFERENT_OWNER isn't honored. The positive case above (allowlist -> success) already ran either way."
+    fi
+
+    rm -rf "$GIT_TEST_DIR"
+    trap - EXIT
+fi
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 exit $FAIL

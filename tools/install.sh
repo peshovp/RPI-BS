@@ -521,8 +521,34 @@ detect_gnss() {
         echo 'UART GNSS RECEIVER DETECTION'
         echo '################################'
         systemctl is-active --quiet str2str_tcp.service && systemctl stop str2str_tcp.service && echo 'Stopping str2str_tcp service'
+        # GeoMaxima: GM_CONSOLE_TTYS (tools/platform_detect.sh) identifies
+        # the tty the kernel is actually using as a serial console (from
+        # /proc/cmdline's console= argument and the live
+        # /sys/class/tty/console/active list) - confirmed live that
+        # probing ttyS0 first, at all 5 baud rates (~50s), before ever
+        # reaching the real receiver on ttyUSB0 is not just slow: on a
+        # board where ttyS0 (or another probed port) IS the serial
+        # console, blasting UBX/unicore probe bytes at it is undesirable
+        # and, on some boards, that console is the only way to reach a
+        # login shell. Sourced defensively (this file may run from a
+        # context where tools/platform_detect.sh isn't reachable, e.g. a
+        # bundled/standalone copy) - GM_CONSOLE_TTYS simply stays empty in
+        # that case, and every candidate port is probed exactly as before.
+        GM_CONSOLE_TTYS=""
+        for _gm_pd_candidate in "${rtkbase_path}/tools/platform_detect.sh" "$(dirname "${BASH_SOURCE[0]}")/platform_detect.sh"; do
+            if [[ -f "$_gm_pd_candidate" ]]; then
+                # shellcheck source=/dev/null
+                source "$_gm_pd_candidate"
+                break
+            fi
+        done
+        unset _gm_pd_candidate
+        if [[ -n "$GM_CONSOLE_TTYS" ]]; then
+            echo "Skipping serial console port(s) during GNSS detection: $GM_CONSOLE_TTYS"
+        fi
         # TODO remove port if not available in /dev/
         for port in ttyS0 ttyUSB0 ttyUSB1 ttyUSB2 serial0 ttyS1 ttyS2 ttyS3 ttyS4 ttyS5; do
+            [[ " $GM_CONSOLE_TTYS " == *" $port "* ]] && { echo "Skipping $port (serial console)"; continue; }
             for port_speed in 115200 57600 38400 19200 9600; do
                 echo 'DETECTION ON ' $port ' at ' $port_speed
                 if [[ $(python3 "${rtkbase_path}"/tools/ubxtool -f /dev/$port -s $port_speed -p MON-VER -w 5 2>/dev/null) =~ 'ZED-F9P' ]]; then

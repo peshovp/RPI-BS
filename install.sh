@@ -47,6 +47,31 @@ else
     INSTALL_DIR="${HOME:-/root}/RPI-BS"
 fi
 
+# GeoMaxima: confirmed live that git >= 2.35.2 refuses to operate on a
+# repository not owned by the current UID ("detected dubious ownership in
+# repository at ...") - $INSTALL_DIR is owned by the install user, but
+# this script (and everything it execs, including tools/install.sh's own
+# `git -C "${rtkbase_path}" pull`) can run as root: under a normal `sudo`
+# invocation git also honors SUDO_UID as an implicit owner-match, so this
+# is usually a non-issue there, but systemd (phase 2's
+# geomaxima-firstboot.service) does not set SUDO_UID at all, so the check
+# fires for real in that case - confirmed live, cascading into a missing
+# settings.conf/rtkbase_web unit/chrony and tools/install.sh exiting 128.
+# tools/geomaxima-firstboot.sh already exports this same allowlisting
+# before invoking install.sh in phase 2 - repeated here too (redundant,
+# harmless if already set) so install.sh is self-protecting even if ever
+# invoked as root some other way (not only via that specific systemd
+# unit). Uses GIT_CONFIG_COUNT/GIT_CONFIG_KEY_N/GIT_CONFIG_VALUE_N (git's
+# own documented env-based config mechanism, git >= 2.31) rather than
+# editing global/system git config - scoped to this process and its
+# children only, no persistent config file changes, and no need to route
+# tools/install.sh's (upstream) own git calls through `sudo -u` instead.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$INSTALL_DIR"
+export GIT_CONFIG_KEY_1=safe.directory
+export GIT_CONFIG_VALUE_1="$INSTALL_DIR/rtkbase"
+
 log() { echo "$1" >&2; }
 
 if [[ $EUID -ne 0 ]]; then
@@ -99,10 +124,33 @@ bootstrap_repo() {
         # changes (or a non-ff-only-able history, e.g. after a rebase
         # upstream) must not brick an otherwise-working, already-cloned
         # install just because this particular pull couldn't fast-forward.
-        git -C "$INSTALL_DIR" pull --ff-only \
-            || log "WARNING: git pull --ff-only failed in $INSTALL_DIR - continuing with the existing checkout as-is (not re-cloning, not exiting)."
+        #
+        # GeoMaxima: runs as the checkout's ACTUAL OWNER (derived via
+        # `stat`, not a hardcoded username), not as root - this function
+        # only ever runs via `curl | sudo bash` (phase 2's own checkout
+        # already exists, so it goes through detect_existing_checkout()
+        # instead and never reaches here), where $SUDO_USER is always
+        # available. The repo belongs to the install user; root should
+        # not become a git user of it (see tools/dns_setup.sh-adjacent
+        # fix in addons/tools/perform_update.sh for the same principle
+        # applied there).
+        GM_BOOTSTRAP_OWNER="$(stat -c '%U' "$INSTALL_DIR" 2>/dev/null || echo "${SUDO_USER:-root}")"
+        if [[ -n "$GM_BOOTSTRAP_OWNER" && "$GM_BOOTSTRAP_OWNER" != "root" ]]; then
+            sudo -u "$GM_BOOTSTRAP_OWNER" git -C "$INSTALL_DIR" pull --ff-only \
+                || log "WARNING: git pull --ff-only failed in $INSTALL_DIR - continuing with the existing checkout as-is (not re-cloning, not exiting)."
+        else
+            git -C "$INSTALL_DIR" pull --ff-only \
+                || log "WARNING: git pull --ff-only failed in $INSTALL_DIR - continuing with the existing checkout as-is (not re-cloning, not exiting)."
+        fi
     else
         log "No existing checkout found. Cloning $REPO_URL into $INSTALL_DIR..."
+        # GeoMaxima: the target directory does not exist yet here, so
+        # there is no owner to `stat` and run as - cloning as root (this
+        # script always runs as root/sudo) is unavoidable for this one
+        # step; the chown right below immediately hands ownership to the
+        # real install user, and every subsequent git operation against
+        # this checkout runs as that owner instead (see above, and
+        # addons/tools/perform_update.sh).
         git clone "$REPO_URL" "$INSTALL_DIR" || { log "ERROR: git clone failed"; exit 1; }
     fi
 
@@ -785,7 +833,46 @@ export rtkbase_path="$(pwd)/rtkbase"
 # fresh clone/pull where the mode may have been stored as non-executable).
 chmod +x tools/bin/RTKLIB-2.5.0/aarch64/str2str tools/bin/RTKLIB-2.5.0/aarch64/rtkrcv tools/bin/RTKLIB-2.5.0/aarch64/convbin tools/bin/RTKLIB-2.5.0/aarch64/rnx2rtkp 2>/dev/null || true
 
+set +e
 ./tools/install.sh --all repo --rtkbase-repo main --user "${SUDO_USER:-$USER}" --start-services
+TOOLS_INSTALL_RC=$?
+set -e
+
+# GeoMaxima: confirmed live that a failure INSIDE tools/install.sh (e.g.
+# its `git -C "${rtkbase_path}" pull` step hitting git's "dubious
+# ownership" check under phase 2) does not stop this script from
+# continuing - tools/install.sh's own `main()` runs detect_gnss/
+# configure_gnss/start_services UNCONDITIONALLY regardless of whether the
+# earlier repo/dependency/rtklib/unit-file steps succeeded (it only
+# accumulates a non-zero exit code to return at the very end), and this
+# script previously never checked that returned exit code at all - so
+# install.sh sailed on into STAGE 4 ("STARTING SERVICES") with
+# settings.conf, the rtkbase_web unit, and chrony all missing, producing
+# a confusing cascade of unrelated-looking failures instead of one clear
+# error pointing at the actual cause.
+if [[ "$TOOLS_INSTALL_RC" -ne 0 ]]; then
+    echo "ERROR: tools/install.sh exited with status $TOOLS_INSTALL_RC - the RTKBase install did not complete successfully." >&2
+    echo "See the output above for the actual failure (e.g. a git error, a missing dependency, a failed download)." >&2
+    exit 1
+fi
+
+# GeoMaxima: belt-and-braces beyond the exit-code check above - verify the
+# two concrete artifacts that MUST exist after a successful
+# tools/install.sh run before proceeding any further, since a partial/
+# silent failure inside one of its many `&&`-chained steps could in
+# principle still return 0 (e.g. if a later step happens to also succeed
+# despite an earlier one failing) without either artifact actually being
+# in place.
+if [[ ! -f "$SCRIPT_DIR/settings.conf" ]]; then
+    echo "ERROR: settings.conf was not created by tools/install.sh - the RTKBase install did not complete successfully." >&2
+    echo "See the output above (or /tmp/ota_update.log for an OTA run) for the actual failure." >&2
+    exit 1
+fi
+if [[ ! -f /etc/systemd/system/rtkbase_web.service ]]; then
+    echo "ERROR: the rtkbase_web.service unit was not installed by tools/install.sh - the RTKBase install did not complete successfully." >&2
+    echo "See the output above for the actual failure." >&2
+    exit 1
+fi
 
 # tools/install.sh's internal git operations run as root (whole script is
 # sudo'd), which can leave a few .git internal files (FETCH_HEAD, ORIG_HEAD)
@@ -879,7 +966,7 @@ echo "==========================================================================
 # Install-user/home resolution matches the SAME "${SUDO_USER:-$USER}"
 # convention already used for tools/copy_unit.sh's --user argument at
 # STAGE 3 above (install.sh:207) - not a new convention, and never
-# hardcoded to any specific username (e.g. "peshovp").
+# hardcoded to any specific username.
 PRIDE_PPPAR_USER="${SUDO_USER:-$USER}"
 PRIDE_PPPAR_USER_HOME="$(getent passwd "$PRIDE_PPPAR_USER" | cut -d: -f6)"
 PRIDE_PPPAR_USER_HOME="${PRIDE_PPPAR_USER_HOME:-/root}"

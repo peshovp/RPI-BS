@@ -25,7 +25,33 @@ if [ ! -d "$DEV_REPO_PATH/.git" ]; then
     exit 1
 fi
 
-git config --system --replace-all safe.directory "$DEV_REPO_PATH" 2>/dev/null || true
+# GeoMaxima: git >= 2.35.2 refuses to operate on a repository not owned by
+# the current UID ("detected dubious ownership in repository at ...")
+# unless explicitly allowlisted via safe.directory - confirmed live to
+# break install.sh's phase-2 flow (a separate script) when running as
+# root under systemd, where SUDO_UID (which git also honors as an
+# implicit owner-match under a normal `sudo` invocation) is never set.
+#
+# Fixed here by running every git operation below AS THE REPO'S ACTUAL
+# OWNER (derived from the directory itself via `stat -c '%U'` - matching
+# the existing REPO_OWNER_FOR_ANTEX/PRIDE_PPPAR_USER pattern already used
+# further down in this same script, never a hardcoded username), not by
+# allowlisting root as a safe.directory user. The repo belongs to the
+# install user; root should not become a git user of it. This is also why
+# the pre-existing `git config --system --replace-all safe.directory ...`
+# line that used to be here was removed - it wrote to /etc/gitconfig
+# (persistent, system-wide, EVERY repo on the machine, not scoped to this
+# one), which install.sh/tools/geomaxima-firstboot.sh take a narrower,
+# per-process approach to avoid (see their own comments) - this script now
+# avoids it entirely rather than narrowing it, since running as the owner
+# makes the allowlist unnecessary in the first place.
+GM_REPO_OWNER="$(stat -c '%U' "$DEV_REPO_PATH")"
+if [[ -z "$GM_REPO_OWNER" || "$GM_REPO_OWNER" == "root" ]]; then
+    echo "⚠ Could not determine a non-root owner for $DEV_REPO_PATH (stat reported '${GM_REPO_OWNER:-<empty>}') - git operations will run as the current user instead. If this repo is genuinely owned by a non-root user, this is unexpected." >&2
+    GM_GIT_AS_OWNER() { "$@"; }
+else
+    GM_GIT_AS_OWNER() { sudo -u "$GM_REPO_OWNER" "$@"; }
+fi
 
 # Logging function
 log_status() {
@@ -90,23 +116,23 @@ log_status "info" "✓ Removed stale git lock"
 # Recover from incomplete merge
 if [ -d ".git/MERGE_HEAD" ]; then
     log_status "info" "Recovering from incomplete merge..."
-    git merge --abort 2>&1 || true
+    GM_GIT_AS_OWNER git merge --abort 2>&1 || true
 fi
 
 # Recover from incomplete rebase
 if [ -d ".git/rebase-merge" ]; then
     log_status "info" "Recovering from incomplete rebase..."
-    git rebase --abort 2>&1 || true
+    GM_GIT_AS_OWNER git rebase --abort 2>&1 || true
 fi
 
 # Discard any uncommitted changes to avoid merge conflicts
 log_status "info" "Discarding uncommitted changes..."
-git checkout -- . 2>&1 || true
+GM_GIT_AS_OWNER git checkout -- . 2>&1 || true
 
 log_status "info" "✓ Git state cleaned and ready"
 
 log_status "info" "Stashing local changes..."
-git stash push -m "Auto-stash before update $(date)" 2>&1 || log_status "info" "No changes to stash"
+GM_GIT_AS_OWNER git stash push -m "Auto-stash before update $(date)" 2>&1 || log_status "info" "No changes to stash"
 
 log_status "info" "✓ Local changes stashed"
 log_status "info" "Fetching latest updates..."
@@ -114,7 +140,7 @@ log_status "info" "Fetching latest updates..."
 # Explicit timeout + retry for flaky networks
 RETRY_COUNT=0
 MAX_RETRIES=3
-until git fetch origin 2>&1 | tee -a /tmp/ota_update.log; do
+until GM_GIT_AS_OWNER git fetch origin 2>&1 | tee -a /tmp/ota_update.log; do
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
         log_status "error" "Git fetch failed after $MAX_RETRIES retries"
@@ -127,7 +153,7 @@ done
 log_status "info" "✓ Fetched from origin"
 log_status "info" "Getting current branch..."
 
-BRANCH=$(git rev-parse --abbrev-ref HEAD 2>&1)
+BRANCH=$(GM_GIT_AS_OWNER git rev-parse --abbrev-ref HEAD 2>&1)
 if [ $? -ne 0 ]; then
     log_status "error" "Failed to get current branch: $BRANCH"
     exit 1
@@ -136,8 +162,8 @@ log_status "info" "✓ Current branch: $BRANCH"
 log_status "info" "Resetting to remote HEAD to avoid conflicts..."
 
 # Use hard reset instead of pull to avoid merge conflicts entirely
-git fetch origin "$BRANCH" 2>&1 | tee -a /tmp/ota_update.log || true
-if git reset --hard "origin/$BRANCH" 2>&1 | tee -a /tmp/ota_update.log; then
+GM_GIT_AS_OWNER git fetch origin "$BRANCH" 2>&1 | tee -a /tmp/ota_update.log || true
+if GM_GIT_AS_OWNER git reset --hard "origin/$BRANCH" 2>&1 | tee -a /tmp/ota_update.log; then
     log_status "info" "✓ Updates applied successfully"
 else
     log_status "error" "Git reset failed - repository may be corrupted"

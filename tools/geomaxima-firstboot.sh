@@ -53,6 +53,41 @@ export LOGNAME="${LOGNAME:-root}"
 export TERM="${TERM:-dumb}"
 export LANG="${LANG:-C.UTF-8}"
 
+# GeoMaxima: same class of bug as $HOME above, confirmed live separately -
+# git >= 2.35.2 refuses to operate on a repository not owned by the
+# current UID ("detected dubious ownership in repository at ...") unless
+# that path is explicitly allowlisted via safe.directory. The repo here is
+# owned by the install user (whichever Linux user ran the install - never
+# hardcoded), but phase 2 (this script) runs as root under systemd - under
+# a normal `sudo` invocation this would be a
+# non-issue (git also honors SUDO_UID as an implicit safe.directory
+# owner-match), but systemd does not set SUDO_UID at all, so git's
+# ownership check fires for real here. tools/install.sh's own
+# `git -C "${rtkbase_path}" pull` step (its `install_rtkbase_from_repo()`)
+# is exactly where this was confirmed to fail live, cascading into a
+# missing settings.conf/rtkbase_web unit/chrony and exit 128.
+#
+# Fixed via GIT_CONFIG_COUNT/GIT_CONFIG_KEY_N/GIT_CONFIG_VALUE_N (git's own
+# documented mechanism for injecting config via environment variables,
+# available since git 2.31) rather than editing global/system git config
+# (~/.gitconfig or /etc/gitconfig) - this scopes the allowlisting to only
+# this process and whatever it execs (tools/install.sh, its own git calls,
+# and anything else phase 2 happens to run), without leaving any
+# persistent config file changes behind on the system, and without
+# touching tools/install.sh (an upstream Stefal file) to route its git
+# calls through `sudo -u "$GM_INSTALL_USER"` instead - env vars are
+# automatically inherited by every child process, upstream code included,
+# with zero upstream diff required. Both $INSTALL_DIR itself (this
+# checkout) and $INSTALL_DIR/rtkbase (the symlink install.sh creates
+# pointing back at itself, which tools/install.sh's own git operations
+# actually resolve through) are allowlisted, since either could be the
+# path git sees depending on cwd at the time of the call.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$INSTALL_DIR"
+export GIT_CONFIG_KEY_1=safe.directory
+export GIT_CONFIG_VALUE_1="$INSTALL_DIR/rtkbase"
+
 attempt=0
 [[ -f "$COUNTER_FILE" ]] && attempt="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
 attempt=$(( attempt + 1 ))
