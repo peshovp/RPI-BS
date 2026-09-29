@@ -21,26 +21,24 @@ logger = logging.getLogger(__name__)
 class UpdateController:
     """Manages over-the-air updates for GeoMaxima"""
     
-    def __init__(self, repo_path: str = None, git_user: str = 'peshovp'):
+    def __init__(self, repo_path: str = None, git_user: str = None):
         """
         Initialize update controller
 
         Args:
             repo_path: Path to GeoMaxima repository (auto-detected if None)
-            git_user: User to run git commands as (default: peshovp)
-
-        Note: The 'peshovp' default is an intentional match with the current
-        single-user deploy environment (this is the actual system/repo owner
-        on the deployed device), not a universal default. If this project is
-        ever deployed under a different Linux user, this must be passed
-        explicitly rather than relying on the default.
+            git_user: User to run git commands as. If None (the normal case -
+                web_app/server.py instantiates this with no arguments), it is
+                derived from the repo directory's own owner
+                (os.stat(repo_path).st_uid -> pwd.getpwuid), never hardcoded -
+                any station can be installed under any Linux username.
         """
         if repo_path is None:
             # Auto-detect repository path
             repo_path = self._find_repo_path()
-        
+
         self.repo_path = Path(repo_path)
-        self.git_user = git_user
+        self.git_user = git_user if git_user is not None else self._detect_repo_owner()
         self.update_lock = threading.Lock()
         self.update_in_progress = False
         self.last_update_status = None
@@ -61,6 +59,25 @@ class UpdateController:
         self._load_token()
         
         logger.info(f"UpdateController initialized: {self.repo_path}, user: {self.git_user}")
+
+    def _detect_repo_owner(self) -> str:
+        """
+        Derive the station's actual Linux user from the repo directory's
+        owner (GeoMaxima: no hardcoded username - any station can be
+        installed under any username). Falls back to the current process
+        user, and finally to 'root', if the owner can't be resolved (e.g.
+        pwd unavailable, or repo_path doesn't exist yet).
+        """
+        try:
+            import pwd
+            return pwd.getpwuid(os.stat(self.repo_path).st_uid).pw_name
+        except Exception as e:
+            logger.debug(f"Could not determine repo owner for {self.repo_path} ({e}) - falling back to current user.")
+            try:
+                import pwd
+                return pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                return 'root'
 
     def _load_token(self):
         """Load GitHub token from local file if present"""

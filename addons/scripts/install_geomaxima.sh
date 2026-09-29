@@ -5,7 +5,7 @@
 # 
 # Automatically installs:
 # 1. RTKBase (from official Stefal repository)
-# 2. GeoMaxima extensions (from peshovp/GeoMaxima-BS)
+# 2. GeoMaxima extensions (from the GeoMaxima-BS repository)
 #
 # Usage:
 #   wget -O - https://raw.githubusercontent.com/peshovp/GeoMaxima-BS/master/install_geomaxima.sh | sudo bash

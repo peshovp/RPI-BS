@@ -86,7 +86,7 @@ else
         # Create .netrc
         cat > "${NETRC_FILE}" << EOF
 machine github.com
-login peshovp
+login x-access-token
 password ${GITHUB_TOKEN}
 EOF
         
