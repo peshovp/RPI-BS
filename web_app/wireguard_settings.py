@@ -30,11 +30,18 @@ WG_CONFIG_FILE = os.path.join(WG_CONFIG_DIR, f"{WG_INTERFACE}.conf")
 
 # Ordered list of (source_key, section, option) mirroring the
 # [{"source_section": ...}, {key: val}, ...] convention from
-# RTKBaseConfigManager.get_file_settings() and friends.
+# RTKBaseConfigManager.get_file_settings() and friends. settings.html
+# indexes this list positionally (wireguard_settings[2] = address, ...), so
+# keep the two in sync.
+#
+# No DNS field: DNS must never come from the tunnel. A "DNS =" line makes
+# wg-quick register that resolver with resolvconf in exclusive mode,
+# replacing the network's own DNS - confirmed live, where it broke OTA and
+# PPP product downloads (see tools/dns_setup.sh). The config is rebuilt
+# from this map on save, so an existing DNS line is dropped (and logged).
 _FIELD_MAP = (
     ("private_key", "Interface", "PrivateKey"),
     ("address", "Interface", "Address"),
-    ("dns", "Interface", "DNS"),
     ("peer_public_key", "Peer", "PublicKey"),
     ("endpoint", "Peer", "Endpoint"),
     ("allowed_ips", "Peer", "AllowedIPs"),
@@ -47,7 +54,7 @@ def get_wireguard_settings(config_file=WG_CONFIG_FILE):
     """
         Parse /etc/wireguard/wg0.conf into the RTKBase positional list format:
         [{"source_section": "wireguard"}, {"private_key": ...}, {"address": ...},
-         {"dns": ...}, {"peer_public_key": ...}, {"endpoint": ...},
+         {"peer_public_key": ...}, {"endpoint": ...},
          {"allowed_ips": ...}, {"persistent_keepalive": ...}]
 
         If the file doesn't exist or can't be parsed, returns the same
@@ -100,7 +107,7 @@ def write_wireguard_config(fields_dict, config_file=WG_CONFIG_FILE):
         the peer's registered public key on the remote WireGuard server).
 
         :param fields_dict: dict with keys matching _FIELD_MAP source keys
-            (private_key, address, dns, peer_public_key, endpoint,
+            (private_key, address, peer_public_key, endpoint,
             allowed_ips, persistent_keepalive, preshared_key)
         :param config_file: path to the wg0.conf file (overridable for tests)
         :return: True on success, False on failure
@@ -128,6 +135,17 @@ def write_wireguard_config(fields_dict, config_file=WG_CONFIG_FILE):
         parser.optionxform = str
         parser.add_section("Interface")
         parser.add_section("Peer")
+
+        if os.path.exists(config_file):
+            try:
+                old = ConfigParser(interpolation=None, strict=False)
+                old.optionxform = str
+                old.read(config_file)
+                if old.has_option("Interface", "DNS"):
+                    logger.warning(f"Removed 'DNS = {old.get('Interface', 'DNS')}' from {config_file}: "
+                                   "the station always uses its own network's DNS, never the tunnel's.")
+            except Exception:
+                pass
 
         for key, section, option in _FIELD_MAP:
             value = fields_dict.get(key, "")

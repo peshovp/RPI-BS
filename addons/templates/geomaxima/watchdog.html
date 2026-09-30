@@ -318,6 +318,42 @@ input:checked + .slider:before {
             </div>
             <div class="stat-label">Активни Монитори</div>
         </div>
+        {# DNS self-test (addons/dns_health.py, run by the network monitor).
+           The station uses only its own network's DNS - never a public one. #}
+        {% set dns = status.dns %}
+        {% set dns_labels = {'ok': ('OK', '#28a745'), 'degraded': ('Частично', '#ffc107'),
+                             'failed': ('Неуспешно', '#dc3545'), 'no_dns': ('Няма DNS от мрежата', '#dc3545')} %}
+        {% set dns_label = dns_labels.get(dns.status, ('Няма данни', '#6c757d')) if dns else ('Няма данни', '#6c757d') %}
+        <div class="stat-card" title="{{ dns.message if dns else 'DNS тестът още не е изпълнен' }}">
+            <div class="stat-value" style="color: {{ dns_label[1] }}; font-size: 1.4em;">{{ dns_label[0] }}</div>
+            <div class="stat-label">DNS</div>
+            {% if dns %}
+            <div class="text-muted" style="font-size: 0.8em; margin-top: 4px;">
+                {{ dns.message }}<br>{{ dns.timestamp[:19]|replace('T', ' ') }} UTC
+            </div>
+            {% endif %}
+        </div>
+        {# LAN/internet reachability (NetworkMonitor._check_reachability): the default
+           gateway and the hosts the station depends on - no hard-coded public IPs. #}
+        {% set reach = status.reach %}
+        {% set reach_ok = reach and reach.gateway and reach.gateway.ok and reach.internet_ok != false %}
+        <div class="stat-card">
+            <div class="stat-value" style="color: {{ '#6c757d' if not reach else ('#28a745' if reach_ok else '#dc3545') }}; font-size: 1.4em;">
+                {{ 'Няма данни' if not reach else ('OK' if reach_ok else 'Проблем') }}
+            </div>
+            <div class="stat-label">Връзка</div>
+            {% if reach %}
+            <div class="text-muted" style="font-size: 0.8em; margin-top: 4px; text-align: left;">
+                LAN (gateway):
+                {% if reach.gateway %}{{ reach.gateway.host }} {{ '✓' if reach.gateway.ok else '✗' }}{% else %}няма default route ✗{% endif %}<br>
+                {% for t in reach.targets %}
+                {{ t.host }}: {{ '✓' if t.ok else ('✗ не се резолва (DNS)' if not t.resolved else '✗ няма отговор') }}<br>
+                {% endfor %}
+                {% if not reach.targets %}Само gateway: не е намерен WireGuard endpoint или активен NTRIP caster.<br>{% endif %}
+                {{ reach.timestamp[:19]|replace('T', ' ') }} UTC
+            </div>
+            {% endif %}
+        </div>
     </div>
 
     <!-- Service Monitor -->

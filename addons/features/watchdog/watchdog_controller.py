@@ -73,7 +73,14 @@ class WatchdogController:
                     'enabled': True,
                     'check_internet': True,
                     'check_vpn': True,
-                    'ping_hosts': ['8.8.8.8', '1.1.1.1'],
+                    # DNS self-test via the system resolver (addons/dns_health.py)
+                    'check_dns': True,
+                    'dns_check_interval_seconds': 600,
+                    # No 'ping_hosts': reachability targets are the default
+                    # gateway and the hosts the station depends on (WireGuard
+                    # endpoint, active NTRIP casters) - see
+                    # NetworkMonitor._check_reachability(). A 'ping_hosts' key
+                    # left in an older saved config is ignored.
                     'vpn_interface': 'wg0',
                     'alert_on_failure': True,
                     'vpn_auto_restart': True,
@@ -422,6 +429,28 @@ class WatchdogController:
                     'enabled': self.config['monitors']['memory']['enabled']
                 }
             },
-            'recent_incidents': len(self.get_incidents(limit=10))
+            'recent_incidents': len(self.get_incidents(limit=10)),
+            'dns': self._dns_status(),
+            'reach': self._reach_status(),
         }
+
+    @staticmethod
+    def _reach_status():
+        """Last LAN/internet reachability result (written by the network monitor), or None."""
+        try:
+            return json.loads(Path('/var/lib/rtkbase/network_reach.json').read_text())
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _dns_status():
+        """Last DNS self-test result (written by the network monitor), or None."""
+        try:
+            from addons import dns_health
+        except ImportError:
+            try:
+                import dns_health
+            except ImportError:
+                return None
+        return dns_health.load_status()
 

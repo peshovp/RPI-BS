@@ -17,6 +17,21 @@ import glob
 
 logger = logging.getLogger(__name__)
 
+try:
+    from addons import dns_health
+except ImportError:
+    dns_health = None
+
+
+def _describe_fetch_error(stderr: str) -> str:
+    """git's error text, prefixed with a plain statement when the cause is
+    DNS resolution - so it isn't mistaken for a GitHub/token problem."""
+    text = (stderr or '').strip() or 'Unknown error'
+    if dns_health is not None and dns_health.classify_network_error(text)['dns']:
+        return ("DNS resolution failed - the station could not resolve the git host. "
+                "Check the DNS its network provides (Watchdog > DNS). git: " + text)
+    return text
+
 
 class UpdateController:
     """Manages over-the-air updates for GeoMaxima"""
@@ -313,7 +328,7 @@ fi
                         time.sleep(2 ** attempt)
             else:
                 # All retries failed
-                error_msg = f"Failed to fetch after {max_retries} attempts: {last_error or 'Unknown error'}"
+                error_msg = f"Failed to fetch after {max_retries} attempts: {_describe_fetch_error(last_error)}"
                 logger.error(error_msg)
                 return {'error': error_msg}
             
@@ -585,7 +600,7 @@ fi
                     capture_output=True, text=True, timeout=30
                 )
                 if result.returncode != 0:
-                    error_msg = f"Git fetch failed: {result.stderr}"
+                    error_msg = f"Git fetch failed: {_describe_fetch_error(result.stderr)}"
                     logger.error(error_msg)
                     update_log.append(f"❌ {error_msg}")
                     self.last_update_status['log'] = '\n'.join(update_log)

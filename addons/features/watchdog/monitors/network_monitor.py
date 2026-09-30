@@ -12,6 +12,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+try:                                    # web app: repo root on sys.path
+    from addons import dns_health
+except ImportError:                     # run_watchdog_check.py: addons/ on sys.path
+    try:
+        import dns_health
+    except ImportError:
+        dns_health = None
+
 
 class NetworkMonitor:
     """Monitor network connectivity"""
@@ -59,17 +67,52 @@ class NetworkMonitor:
             'incidents': []
         }
 
-        # Check internet connectivity
+        # Reachability: the default gateway (LAN) and the hosts this station
+        # actually depends on (WireGuard peer endpoint, active NTRIP
+        # casters) - never hard-coded public IPs.
         if self.config.get('check_internet', True):
-            internet_ok = self._check_internet()
-            results['checks']['internet'] = internet_ok
-
-            if not internet_ok:
+            reach = self._check_reachability()
+            results['checks']['lan'] = reach['gateway']['ok'] if reach['gateway'] else None
+            results['checks']['internet'] = reach['internet_ok']
+            if not reach['gateway']:
+                results['status'] = 'critical'
+                results['incidents'].append({
+                    'type': 'no_default_route',
+                    'severity': 'critical',
+                    'message': 'No default route - the station has no LAN gateway'
+                })
+            elif not reach['gateway']['ok']:
+                results['status'] = 'critical'
+                results['incidents'].append({
+                    'type': 'lan_down',
+                    'severity': 'critical',
+                    'message': f"Default gateway {reach['gateway']['host']} not reachable (LAN)"
+                })
+            if reach['internet_ok'] is False:
                 results['status'] = 'critical'
                 results['incidents'].append({
                     'type': 'internet_down',
                     'severity': 'critical',
-                    'message': 'Internet connectivity lost'
+                    'message': 'Internet targets not reachable: ' + ', '.join(
+                        f"{t['host']} ({'not resolved' if not t['resolved'] else 'no reply'})"
+                        for t in reach['targets'])
+                })
+
+        # DNS self-test through the system resolver (see addons/dns_health.py)
+        if self.config.get('check_dns', True) and dns_health is not None:
+            dns = self._check_dns()
+            results['checks']['dns'] = dns.get('status')
+            if dns.get('_fresh') and dns.get('status') != 'ok':
+                severity = 'critical' if dns['status'] in ('no_dns', 'failed') else 'warning'
+                if severity == 'critical' and results['status'] == 'ok':
+                    results['status'] = 'critical'
+                elif results['status'] == 'ok':
+                    results['status'] = 'warning'
+                results['incidents'].append({
+                    'type': f"dns_{dns['status']}",
+                    'severity': severity,
+                    'message': f"DNS: {dns['message']}",
+                    'timestamp': datetime.utcnow().isoformat()
                 })
 
         # Check VPN
@@ -117,31 +160,136 @@ class NetworkMonitor:
 
         return results
 
-    def _check_internet(self) -> bool:
+    def _check_dns(self) -> Dict:
         """
-        Check internet connectivity by pinging hosts
-
-        Returns:
-            True if internet is reachable
+        Run the DNS self-test at most every dns_check_interval_seconds
+        (default 600 - it resolves several hosts, each up to 12 s when DNS
+        is broken, while the watchdog itself runs every minute). Between
+        runs the cached result is returned (without '_fresh', so no repeat
+        incident). The result is saved for the UI either way.
         """
-        hosts = self.config.get('ping_hosts', ['8.8.8.8'])
-
-        for host in hosts:
+        interval = self.config.get('dns_check_interval_seconds', 600)
+        cached = dns_health.load_status()
+        if cached and cached.get('raise_incident'):
+            # Written by tools/dns_setup.sh (e.g. the DNS migration rolled
+            # back because the network's own DNS resolved nothing): raise
+            # the incident once, keep the state for the card.
+            cached.pop('raise_incident', None)
+            dns_health.save_status(cached)
+            logger.error(f"DNS: {cached.get('message')}")
+            return {**cached, '_fresh': True}
+        if cached:
             try:
-                result = subprocess.run(
-                    ['ping', '-c', '1', '-W', '3', host],
-                    capture_output=True,
-                    timeout=5
-                )
+                age = (datetime.utcnow() - datetime.fromisoformat(cached['timestamp']).replace(tzinfo=None)).total_seconds()
+                if age < interval:
+                    return cached
+            except (KeyError, ValueError):
+                pass
+        status = dns_health.dns_self_test()
+        dns_health.save_status(status)
+        if status['status'] == 'ok':
+            logger.info(f"DNS self-test: {status['message']}")
+        elif status['status'] == 'no_dns':
+            logger.error(f"DNS self-test: {status['message']}")
+        else:
+            logger.warning(f"DNS self-test ({status['status']}): {status['message']}")
+        return {**status, '_fresh': True}
 
-                if result.returncode == 0:
-                    return True
+    # Where the reachability result is saved for the watchdog page.
+    REACH_STATUS_FILE = Path("/var/lib/rtkbase/network_reach.json")
+    SETTINGS_FILE = Path(__file__).resolve().parents[4] / "settings.conf"
+    WG_DIR = Path("/etc/wireguard")
 
-            except Exception as e:
-                logger.debug(f"Ping to {host} failed: {e}")
-                continue
+    @staticmethod
+    def _ping(host: str) -> bool:
+        try:
+            return subprocess.run(['ping', '-c', '1', '-W', '3', host],
+                                  capture_output=True, timeout=6).returncode == 0
+        except Exception as e:
+            logger.debug(f"Ping to {host} failed: {e}")
+            return False
 
-        return False
+    @staticmethod
+    def _resolves(host: str) -> bool:
+        """Through the system resolver (glibc), like everything else on the station."""
+        try:
+            return subprocess.run(['getent', 'ahostsv4', host], capture_output=True,
+                                  timeout=12).returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _default_gateway():
+        try:
+            out = subprocess.run(['ip', '-4', 'route', 'show', 'default'],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            return None
+        for line in out.splitlines():
+            parts = line.split()
+            if 'via' in parts:
+                return parts[parts.index('via') + 1]
+        return None
+
+    def _internet_targets(self) -> List[str]:
+        """
+        Hosts this station actually depends on: the WireGuard peer
+        endpoint(s) from /etc/wireguard/<iface>.conf (the watchdog runs as
+        root), then the casters of NTRIP services that are active.
+        """
+        hosts: List[str] = []
+        iface = self.config.get('vpn_interface', 'wg0')
+        try:
+            for line in (self.WG_DIR / f"{iface}.conf").read_text().splitlines():
+                key, _, value = line.partition('=')
+                if key.strip().lower() == 'endpoint' and value.strip():
+                    ep = value.strip()
+                    host = ep[1:ep.index(']')] if ep.startswith('[') else ep.rsplit(':', 1)[0]
+                    if host and host not in hosts:
+                        hosts.append(host)
+        except OSError:
+            pass
+        try:
+            from configparser import ConfigParser
+            cfg = ConfigParser(interpolation=None)
+            cfg.read(self.SETTINGS_FILE)
+            for section, key, service in (('ntrip_A', 'svr_addr_a', 'str2str_ntrip_A'),
+                                          ('ntrip_B', 'svr_addr_b', 'str2str_ntrip_B')):
+                host = cfg.get(section, key, fallback='').strip().strip("'\"")
+                if host and host not in hosts and subprocess.run(
+                        ['systemctl', 'is-active', '--quiet', service], timeout=5).returncode == 0:
+                    hosts.append(host)
+        except Exception as e:
+            logger.debug(f"reading caster hosts from {self.SETTINGS_FILE} failed: {e}")
+        return hosts
+
+    def _check_reachability(self) -> Dict:
+        """
+        LAN: ping the default gateway. Internet: ping the hosts from
+        _internet_targets(), resolved via the system resolver - a host that
+        doesn't resolve is reported as a DNS problem, not as unreachable.
+        No hard-coded public IPs. If no such host can be determined, only
+        the gateway is checked ('internet_ok' None) and the note says so.
+        """
+        gw = self._default_gateway()
+        result = {'gateway': {'host': gw, 'ok': self._ping(gw)} if gw else None,
+                  'targets': [], 'internet_ok': None, 'note': '',
+                  'timestamp': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}
+        for host in self._internet_targets():
+            resolved = self._resolves(host)
+            result['targets'].append({'host': host, 'resolved': resolved,
+                                      'ok': resolved and self._ping(host)})
+        if result['targets']:
+            result['internet_ok'] = any(t['ok'] for t in result['targets'])
+        else:
+            result['note'] = ('No WireGuard endpoint or active NTRIP caster found - '
+                              'checking the LAN gateway only')
+        try:
+            self.REACH_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.REACH_STATUS_FILE.write_text(json.dumps(result, indent=2))
+        except OSError as e:
+            logger.debug(f"could not write {self.REACH_STATUS_FILE}: {e}")
+        return result
 
     def _check_vpn(self) -> bool:
         """

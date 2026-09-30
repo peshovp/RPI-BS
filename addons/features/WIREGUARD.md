@@ -77,11 +77,12 @@ Navigate to: `http://your-rtkbase-ip/geomaxima/wireguard`
 
 Standard WireGuard configuration format:
 
+> **No `DNS =` line.** The station always uses the DNS provided by its own network. A `DNS =` line would make `wg-quick` register that resolver in exclusive mode and replace the network's DNS, so it is stripped automatically when a configuration is saved (see `tools/dns_setup.sh`).
+
 ```ini
 [Interface]
 PrivateKey = YOUR_PRIVATE_KEY_HERE
 Address = 10.0.0.2/24
-DNS = 1.1.1.1
 
 [Peer]
 PublicKey = SERVER_PUBLIC_KEY_HERE
@@ -264,7 +265,6 @@ AllowedIPs = 10.0.0.0/24
 [Interface]
 PrivateKey = cGFzc3dvcmQ=
 Address = 10.0.0.2/24
-DNS = 1.1.1.1
 
 [Peer]
 PublicKey = c2VydmVy

@@ -137,17 +137,34 @@ GM_GIT_AS_OWNER git stash push -m "Auto-stash before update $(date)" 2>&1 || log
 log_status "info" "✓ Local changes stashed"
 log_status "info" "Fetching latest updates..."
 
-# Explicit timeout + retry for flaky networks
+# Retry with backoff for flaky networks. GeoMaxima: the former loop was
+# `until git fetch ... | tee ...`, which tests TEE's exit status (always
+# 0) - a failed fetch was never retried and never detected, and the
+# `git reset --hard origin/<branch>` below then "applied" the stale
+# remote-tracking ref and reported success. ${PIPESTATUS[0]} is git's own
+# status. Six attempts over ~4 min ride out bursty DNS/network failures.
+# A DNS failure is named as such so it isn't mistaken for a GitHub or
+# authentication problem.
 RETRY_COUNT=0
-MAX_RETRIES=3
-until GM_GIT_AS_OWNER git fetch origin 2>&1 | tee -a /tmp/ota_update.log; do
+MAX_RETRIES=6
+while :; do
+    # (`&& ... || ...` form: this script runs under `set -e`, which would
+    # otherwise abort on the failing assignment itself.)
+    FETCH_OUT="$(GM_GIT_AS_OWNER git fetch origin 2>&1)" && FETCH_RC=0 || FETCH_RC=$?
+    printf '%s\n' "$FETCH_OUT" | tee -a /tmp/ota_update.log
+    [ $FETCH_RC -eq 0 ] && break
     RETRY_COUNT=$((RETRY_COUNT + 1))
+    if printf '%s' "$FETCH_OUT" | grep -qiE 'Could not resolve host|Temporary failure in name resolution|Name or service not known|Resolving timed out'; then
+        FETCH_WHY="DNS resolution failed (the station could not resolve the git host - check the DNS its network provides; see Watchdog > DNS)"
+    else
+        FETCH_WHY="git fetch exited $FETCH_RC"
+    fi
     if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-        log_status "error" "Git fetch failed after $MAX_RETRIES retries"
+        log_status "error" "Git fetch failed after $MAX_RETRIES attempts: $FETCH_WHY"
         exit 1
     fi
-    log_status "info" "⚠ Fetch failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
-    sleep 2
+    log_status "info" "⚠ Fetch failed ($FETCH_WHY), retrying ($RETRY_COUNT/$MAX_RETRIES) in $((RETRY_COUNT * 15))s..."
+    sleep $((RETRY_COUNT * 15))
 done
 
 log_status "info" "✓ Fetched from origin"
@@ -204,44 +221,38 @@ if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     log_status "info" "⚠ WireGuard setup failed - continuing anyway (optional feature, does not affect RTCM/GNSS)"
 fi
 
-log_status "info" "Ensuring openresolv is installed only if actually safe (idempotent - see tools/dns_setup.sh)..."
-# GeoMaxima: this OTA script never installed openresolv itself, but a
-# station whose install.sh run predates this fix could already have it
-# installed in an unsafe state (e.g. having already fought with
-# systemd-resolved) - re-running the same safe decision logic here is a
-# no-op on a station where nothing needs to change, and self-heals one
-# that isn't. Same absolute-path-sourcing and ${PIPESTATUS[0]} handling as
-# the WireGuard call above, for the same reasons.
+log_status "info" "DNS: openresolv step (now a no-op - see tools/dns_setup.sh)..."
+# GeoMaxima: kept as a call so this script and older copies of it behave
+# the same; the function no longer installs anything.
 sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_maybe_install_openresolv" 2>&1 | tee -a /tmp/ota_update.log
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    log_status "info" "⚠ openresolv setup failed - continuing anyway (does not affect RTCM/GNSS)"
-fi
 
-log_status "info" "Ensuring DNS fallback resolvers are configured (idempotent - DHCP nameserver stays primary)..."
-# GeoMaxima: mirrors install.sh's own DNS resolver resilience step exactly
-# via the SAME shared helper (tools/dns_setup.sh) - previously this was a
-# separately-duplicated copy of the detection logic that (like install.sh's
-# former copy) wrote to the Debian resolvconf package's tail-file
-# convention unconditionally, which has NO EFFECT when openresolv (a
-# different, non-interoperable implementation of the same command name) is
-# what's actually installed - confirmed live on an Orange Pi 4 Pro+. See
-# tools/dns_setup.sh's header comment for the full confirmed-live
-# rationale. Gets already-provisioned stations this fix automatically on
-# their next OTA update, with no manual per-station step required.
+log_status "info" "DNS: removing injected public resolvers and WireGuard DNS lines (idempotent, verified, auto-rollback)..."
+# GeoMaxima: DNS policy - only the DNS the station's own network provides;
+# no public resolver, never from WireGuard. geomaxima_configure_dns_fallback()
+# (name kept: older copies of THIS script, still running on stations during
+# the OTA that delivers the fix, call it by this name after `git reset` has
+# already put the new tools/dns_setup.sh on disk) now migrates stations off
+# the 8.8.8.8/1.1.1.1 injection and the WireGuard exclusive-DNS entry,
+# without restarting WireGuard or bouncing the link, and rolls everything
+# back if resolution gets worse. See tools/dns_setup.sh's header comment.
 # Verification on a live station after this runs:
-#   resolvectl status   (systemd-resolved)
-#   cat /etc/resolv.conf (resolvconf/openresolv)
-#   nmcli dev show <iface> | grep DNS   (NetworkManager)
+#   cat /etc/resolv.conf     (router/ISP resolvers only)
+#   resolvconf -l            (no wg0 entry)
+#   cat /var/lib/rtkbase/dns_migration.json
 sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_configure_dns_fallback" 2>&1 | tee -a /tmp/ota_update.log
 if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    log_status "info" "⚠ DNS fallback configuration failed - continuing anyway (does not affect RTCM/GNSS)"
+    log_status "info" "⚠ DNS migration was rolled back or failed - see the [dns] lines above (does not affect RTCM/GNSS)"
 fi
 
 log_status "info" "Verifying DNS resolution is still working after the DNS/WireGuard setup steps above..."
-sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_dns_health_check" 2>&1 | tee -a /tmp/ota_update.log
+# GeoMaxima: never aborts the OTA. The code is already updated at this
+# point (git reset above); stopping here would skip the ANTEX/PRIDE steps
+# and the service restart, leaving the station half-updated. A DNS failure
+# is logged here and shown by the watchdog (Watchdog > DNS) instead.
+# GM_DNS_HEALTH_FATAL=1 only so the function reports the real result.
+sudo bash -c "GM_DNS_HEALTH_FATAL=1; source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_dns_health_check" 2>&1 | tee -a /tmp/ota_update.log
 if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    log_status "error" "DNS resolution is broken after the steps above - aborting OTA update rather than continuing into a cascade of apt/network failures. See diagnostic output above."
-    exit 1
+    log_status "info" "⚠ DNS resolution is not working through the network's DNS - continuing the update anyway (see the diagnostics above and Watchdog > DNS); downloads later in this update may fail."
 fi
 
 log_status "info" "Ensuring ANTEX (igs20.atx) is present (idempotent, needed for optional PPP-static feature)..."

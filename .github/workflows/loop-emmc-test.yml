@@ -15,13 +15,15 @@ name: Loop-device eMMC migration test
 # package - the confirmed-live root cause of a real Orange Pi 4 Pro+
 # station's boot brick (see that script's own header comment).
 #
-# Also runs tests/dns_setup_test.sh (same lightweight style, `systemctl`/
-# `apt-get`/`nmcli`/`dpkg`/`resolvconf` stubbed via PATH), which verifies
-# tools/dns_setup.sh never installs openresolv when systemd-resolved or
-# NetworkManager is active, and writes the DNS-fallback config to whichever
-# resolvconf mechanism (openresolv's append_nameservers vs. the Debian
-# resolvconf package's tail file) is ACTUALLY installed - the confirmed-live
-# root cause of that same station's DNS breaking during phase 2.
+# Also runs tests/dns_setup_test.sh (same lightweight style, nmcli/
+# resolvconf/getent/systemctl/netplan/dpkg stubbed via PATH), which verifies
+# tools/dns_setup.sh's DNS migration on a model of the confirmed-live
+# station state (WireGuard "DNS = 8.8.8.8" registered exclusively with
+# openresolv, injected 8.8.8.8/1.1.1.1 in the NetworkManager profile and
+# netplan YAML, an ISP blocking public DNS): everything injected is removed
+# without restarting WireGuard or bouncing the link, a second run is a
+# no-op, a run that makes resolution worse is fully rolled back, and no
+# public resolver is ever added.
 #
 # Also runs tests/install_gpsd_chrony_test.sh (same lightweight style,
 # `dpkg`/`apt-get`/`systemctl` stubbed via PATH, tools/install.sh's

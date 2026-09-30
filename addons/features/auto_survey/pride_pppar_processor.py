@@ -95,6 +95,14 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+try:
+    from addons import dns_health       # DNS vs. transfer error classification
+except ImportError:
+    try:
+        import dns_health
+    except ImportError:
+        dns_health = None
+
 # Literal marker line PRIDE-PPPAR's pos_* file uses to separate its header
 # (config echo - not parsed here) from the single data line that follows
 # it. Matched via exact-text membership check, not a regex, per Pesho's
@@ -659,6 +667,43 @@ def _log_pdp3_error_lines(stdout: str, stderr: str, level: int = logging.WARNING
             "process_ppp_ar: pdp3 reported the following error/warning line(s), "
             "likely the actual cause of this failed run:\n" + "\n".join(matched_lines)
         )
+
+    _log_download_failure_kinds(f"{stdout or ''}\n{stderr or ''}", level)
+
+
+# curl/wget failure lines printed by pdp3's product downloads (curl for
+# bdspride, wget for igs.gnsswhu.cn and others). They don't start with
+# "error:"/"warning:", so _PDP3_ERROR_LINE_RE never surfaced them.
+_DOWNLOAD_FAILURE_RE = re.compile(
+    r'curl: \(\d+\)|wget: |ERROR \d{3}|failed: |unable to resolve|Failed EPSV|'
+    r'421 |550 |Connection (?:timed out|refused)', re.IGNORECASE)
+
+
+def _log_download_failure_kinds(text: str, level: int) -> None:
+    """
+    Tell apart "DNS resolution failed" (curl exit 6, or exit 28 with
+    "Resolving timed out", wget "unable to resolve host address") from
+    server/transfer errors (FTP 421, 550 file not found, connect timeouts,
+    stalled data channels). They need different fixes: the first is the
+    station's network DNS (see Watchdog > DNS and tools/dns_setup.sh), the
+    second is the mirror or the product not being published yet.
+    """
+    if dns_health is None:
+        return
+    dns = dns_health.classify_network_error(text)
+    other = [l.strip() for l in text.splitlines()
+             if _DOWNLOAD_FAILURE_RE.search(l) and l.strip() not in dns['lines']]
+    if dns['dns']:
+        logger.log(level,
+                   f"process_ppp_ar: product download failed on DNS RESOLUTION "
+                   f"({len(dns['lines'])} line(s), hosts: {', '.join(dns['hosts']) or 'unknown'}) - "
+                   f"the station could not resolve the mirror's name; not a server or transfer error. "
+                   f"Check the DNS the station's network provides (Watchdog > DNS). "
+                   f"First lines: {dns['lines'][:3]}")
+    if other:
+        logger.log(level,
+                   f"process_ppp_ar: product download server/transfer errors "
+                   f"({len(other)} line(s), not DNS): {other[:5]}")
 
 
 class PridePpparProcessor:

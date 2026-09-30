@@ -48,17 +48,16 @@ cd RPI-BS && sudo ./addons/tools/perform_update.sh "$(pwd)" "$(pwd)/.update_stat
   - Long-term fix: ask Armbian to enable `CONFIG_WIREGUARD` in the
     sun60iw2 vendor kernel config, which would make this station-side
     workaround unnecessary.
-- **The `openresolv` package is never installed on boards where
-  systemd-resolved or NetworkManager is already managing DNS** (this
-  includes the Orange Pi 4 Pro+'s Armbian image, which uses
-  systemd-networkd + systemd-resolved). Confirmed live: `openresolv` and
-  `systemd-resolved` conflict with each other on Debian trixie, so a plain
-  `apt-get install openresolv` silently REMOVED the active
-  systemd-resolved package, leaving the board with no working DNS at all.
-  The installer now installs `openresolv` only when no resolver manager is
-  already active and no `resolvconf` implementation is already present. On
-  a board that already has an `openresolv` or Debian-`resolvconf`
-  installation, the DNS-fallback step (adding 8.8.8.8/1.1.1.1 as
-  secondary resolvers) writes to whichever mechanism that specific
-  implementation actually reads - the two are not interoperable. See
-  `tools/dns_setup.sh` for the full technical detail.
+- **DNS: the station uses only the DNS its own network provides.** No
+  public resolver is ever added (no 8.8.8.8/1.1.1.1 fallback), and DNS never
+  comes from the WireGuard tunnel: a `DNS =` line is stripped from any
+  WireGuard configuration, because `wg-quick` registers it with resolvconf
+  in exclusive mode and replaces the network's own DNS. Confirmed live: a
+  tunnel config with `DNS = 8.8.8.8` plus the public resolvers this project
+  used to add, on an ISP that blocks public DNS, broke OTA updates and PPP
+  product downloads. Existing stations are migrated automatically on their
+  next OTA update (verified before/after, rolled back if resolution gets
+  worse, without restarting WireGuard or dropping the link). If the network
+  provides no DNS at all, that is reported as an error (log and Watchdog >
+  DNS), not papered over. `openresolv` is no longer installed by this
+  project. See `tools/dns_setup.sh` for the full technical detail.

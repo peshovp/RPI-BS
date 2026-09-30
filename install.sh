@@ -713,12 +713,16 @@ fi
 # `wireguard` metapackage's dependency chain - see tools/wireguard_setup.sh.
 apt-get install -y -qq --no-remove curl git ca-certificates fonts-dejavu-core
 
-# GeoMaxima: openresolv is now installed ONLY when actually safe/necessary
-# (never when it would conflict with an already-active systemd-resolved or
-# NetworkManager) - see tools/dns_setup.sh's header comment for the full
-# confirmed-live "why" this moved out of the unconditional apt-get line
-# above. Sourced before the wireguard/DNS-fallback steps below, since both
-# of those also need to know the current resolver stack.
+# GeoMaxima: DNS policy - the station uses only the DNS its own network
+# provides (DHCP or the user's own static setting); this project never adds
+# a public resolver and WireGuard never sets DNS. See tools/dns_setup.sh's
+# header comment. geomaxima_maybe_install_openresolv() is now a no-op kept
+# for compatibility (openresolv was only ever needed for wg-quick's DNS=).
+# A fresh install must STOP on broken DNS rather than cascade into apt
+# errors, so the health check is made fatal here (it is non-fatal by
+# default, which the OTA path relies on). Exported so tools/security_setup.sh,
+# run by this script below, gets the same behavior.
+export GM_DNS_HEALTH_FATAL=1
 # shellcheck source=tools/dns_setup.sh
 source "$SCRIPT_DIR/tools/dns_setup.sh"
 geomaxima_maybe_install_openresolv
@@ -739,30 +743,25 @@ geomaxima_dns_health_check || {
 source "$SCRIPT_DIR/tools/wireguard_setup.sh"
 geomaxima_install_wireguard
 
-# --- DNS resolver resilience: DHCP-provided nameserver stays primary,
-# 8.8.8.8/1.1.1.1 added as fallback only ---
-# Confirmed live on BaseStation: DNS resolution to both
-# igs.gnsswhu.cn (WHU PPP product server) and
-# github.com (OTA git fetch) intermittently failed with only a single
-# upstream nameserver configured (in that case, DHCP-supplied 8.8.8.8 via
-# resolvconf - a single resolver is not resilient enough for either
-# lookup). Idempotent and warning-only: detects whichever resolver stack
-# is actually active (systemd-resolved, then NetworkManager, then
-# resolvconf - distinguishing openresolv from the Debian resolvconf
-# package, since they use different, non-interoperable fallback-nameserver
-# mechanisms - see tools/dns_setup.sh) and adds 8.8.8.8/1.1.1.1 as FALLBACK
-# entries only - it never removes or reorders the DHCP-provided
-# nameserver, which always stays first/primary. Skips (with a warning, not
-# a hard failure) if no supported stack is found, since this station's
-# GNSS/RTCM functions do not depend on it.
+# --- DNS: the network's own resolvers only ---
+# geomaxima_configure_dns_fallback() (name kept for OTA compatibility) no
+# longer ADDS public resolvers - it removes any this project injected
+# earlier (NetworkManager profile, netplan YAML, systemd-resolved,
+# openresolv, resolvconf tail) and any "DNS =" line in a WireGuard config,
+# sets resolver options timeout:2 attempts:2 where openresolv manages
+# resolv.conf, and verifies resolution before/after with full rollback.
+# On a fresh install there is normally nothing to remove. Confirmed live
+# why: the injected 8.8.8.8/1.1.1.1 came ahead of the router's DNS, and on
+# networks whose ISP blocks public DNS every lookup then depended on
+# 8.8.8.8 happening to answer - see tools/dns_setup.sh.
 #
 # Verification on a live station after this runs:
-#   resolvectl status   (systemd-resolved: shows DNS Servers incl. fallback)
-#   cat /etc/resolv.conf (resolvconf/openresolv: shows all nameserver lines)
-#   nmcli dev show <iface> | grep DNS   (NetworkManager)
+#   cat /etc/resolv.conf          (should list the router/ISP resolvers only)
+#   resolvconf -l                 (no wg0 entry)
+#   nmcli -g ipv4.dns connection show <conn>   (no 8.8.8.8,1.1.1.1)
 geomaxima_configure_dns_fallback
 geomaxima_dns_health_check || {
-    echo "ERROR: DNS resolution is broken after the DNS-fallback step above - aborting rather than continuing into a cascade of apt/network failures." >&2
+    echo "ERROR: DNS resolution is broken after the DNS step above - aborting rather than continuing into a cascade of apt/network failures." >&2
     echo "See the diagnostic state logged above. This must be fixed manually before re-running install.sh." >&2
     exit 1
 }
