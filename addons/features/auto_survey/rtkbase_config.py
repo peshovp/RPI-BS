@@ -132,13 +132,21 @@ class RTKBaseConfig:
         Returns:
             Path to data file or None
         """
-        # Check data directory first
+        # Check data directory first. str2str_file names the raw log
+        # "<file_name>.<receiver_format>" (run_cast.sh out_file), so the
+        # configured format's extension is looked for first; the other raw
+        # formats the converter handles (rinex_converter._FORMAT_BY_SUFFIX)
+        # are still recognised. Previously only .ubx/.rtcm3 were, so a
+        # station logging "sbf" or "unicore" silently fell back to a
+        # str2str log file.
         if self.data_dir.exists():
-            data_files = list(self.data_dir.glob("*.ubx")) + \
-                        list(self.data_dir.glob("*.rtcm3"))
-            if data_files:
-                latest = max(data_files, key=lambda p: p.stat().st_mtime)
-                return latest
+            configured = self.config.get('main', 'receiver_format', fallback='').strip("'\" ")
+            exts = [configured] if configured else []
+            exts += [e for e in ('ubx', 'rtcm3', 'sbf', 'unicore') if e != configured]
+            for ext in exts:
+                data_files = list(self.data_dir.glob(f"*.{ext}"))
+                if data_files:
+                    return max(data_files, key=lambda p: p.stat().st_mtime)
         
         # Check for file service logs
         file_log = self.find_latest_log("str2str_file_*.log")
