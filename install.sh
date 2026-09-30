@@ -873,12 +873,17 @@ if [[ ! -f /etc/systemd/system/rtkbase_web.service ]]; then
     exit 1
 fi
 
-# tools/install.sh's internal git operations run as root (whole script is
-# sudo'd), which can leave a few .git internal files (FETCH_HEAD, ORIG_HEAD)
-# root-owned even though bootstrap_repo() already chown'd everything earlier.
-# Fix ownership again here, now that tools/install.sh has finished running.
-if [[ -n "${SUDO_USER:-}" ]]; then
-    chown -R "${SUDO_USER}":"${SUDO_USER}" "${SCRIPT_DIR}/.git" 2>/dev/null || true
+# tools/install.sh runs as root and writes into this checkout; anything it
+# leaves root-owned - in .git or the working tree - makes every later OTA
+# (which runs git as the repo owner) fail to update it. Confirmed live: a
+# root-owned tests/ directory made the OTA's `git reset --hard` fail
+# half-way. Hand the WHOLE tree back to the repo owner, not just .git.
+# SUDO_USER is unset when phase 2 runs from systemd, so fall back to the
+# checkout directory's own owner (set by bootstrap_repo()).
+GM_REPO_OWNER="${SUDO_USER:-$(stat -c '%U' "${SCRIPT_DIR}" 2>/dev/null)}"
+if [[ -n "$GM_REPO_OWNER" && "$GM_REPO_OWNER" != "root" ]]; then
+    chown -R "${GM_REPO_OWNER}": "${SCRIPT_DIR}" 2>/dev/null \
+        || log "WARNING: chown of ${SCRIPT_DIR} to ${GM_REPO_OWNER} failed - a later OTA may be unable to update root-owned files"
 fi
 
 # --- Firewall: allow this station's actual service ports, then enable UFW ---

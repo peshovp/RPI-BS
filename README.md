@@ -22,7 +22,7 @@ After installation, access the web interface at `http://<pi-ip-address>`.
 Updates can be applied directly from the web UI (Settings → Check for Updates → Update Now), or manually:
 
 ```bash
-cd RPI-BS && sudo ./addons/tools/perform_update.sh "$(pwd)" "$(pwd)/.update_status.json"
+cd RPI-BS && sudo ./addons/tools/perform_update.sh "$(pwd)" /var/lib/rtkbase/ota/update_status.json
 ```
 
 ## Armbian limitations (Orange Pi 4 Pro+ and similar boards)

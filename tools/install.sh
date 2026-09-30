@@ -327,7 +327,12 @@ install_rtkbase_from_repo() {
       if [ -d "${rtkbase_path}"/.git ]
       then
         echo "RtkBase repo: YES, git pull"
-        git -C "${rtkbase_path}" pull
+        # GeoMaxima: pull as the repo's user, like the clone in _rtkbase_repo()
+        # above. Run as root, git creates root-owned files and directories in
+        # the working tree and .git/objects, and every later OTA - which runs
+        # git as the repo owner - then fails to update them (confirmed live:
+        # "unable to unlink old 'tests/dns_setup_test.sh': Permission denied").
+        sudo -u "${RTKBASE_USER}" git -C "${rtkbase_path}" pull
       else
         echo "RtkBase repo: NO, rm release & git clone rtkbase"
         rm -r "${rtkbase_path}"

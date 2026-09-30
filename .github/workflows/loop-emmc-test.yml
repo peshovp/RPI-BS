@@ -78,6 +78,9 @@ on:
       - 'tests/dns_setup_test.sh'
       - 'tests/install_gpsd_chrony_test.sh'
       - 'tests/systemd_env_test.sh'
+      - 'tests/ota_update_test.sh'
+      - 'addons/tools/perform_update.sh'
+      - 'tools/repo_update.sh'
       - '.github/workflows/loop-emmc-test.yml'
   pull_request:
     paths:
@@ -94,6 +97,9 @@ on:
       - 'tests/dns_setup_test.sh'
       - 'tests/install_gpsd_chrony_test.sh'
       - 'tests/systemd_env_test.sh'
+      - 'tests/ota_update_test.sh'
+      - 'addons/tools/perform_update.sh'
+      - 'tools/repo_update.sh'
       - '.github/workflows/loop-emmc-test.yml'
   workflow_dispatch: {}
 
@@ -142,3 +148,16 @@ jobs:
 
       - name: Run systemd-empty-environment test
         run: bash tests/systemd_env_test.sh
+
+  # OTA updater: ownership normalization, reset failures reported as
+  # FAILED, recovery from a half-updated checkout - including the OLD
+  # 2b01198 updater still on stations (hence the full history).
+  ota-update-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run OTA updater test
+        run: bash tests/ota_update_test.sh

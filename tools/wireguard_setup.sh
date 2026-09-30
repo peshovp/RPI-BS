@@ -49,6 +49,14 @@
 # =============================================================================
 
 geomaxima_install_wireguard() {
+    # GeoMaxima: first root step an OLDER on-station updater runs after its
+    # git reset - lets that reset be finished if it failed half-way (no-op
+    # otherwise, and outside an OTA). See tools/repo_update.sh.
+    # shellcheck source=tools/repo_update.sh
+    if source "$(dirname "${BASH_SOURCE[0]}")/repo_update.sh" 2>/dev/null; then
+        geomaxima_finish_interrupted_update
+    fi
+
     echo "Installing WireGuard tooling (wireguard-tools only - never the 'wireguard' metapackage, see tools/wireguard_setup.sh)..."
 
     if ! apt-get install -y -qq --no-remove wireguard-tools; then

@@ -4,11 +4,47 @@
 # This runs independently from Flask process
 #
 
+# GeoMaxima: run from a private copy. bash reads a script incrementally
+# while executing it, and `git reset` below replaces this very file. git
+# replaces files by unlink + create, so an already-open copy would keep
+# reading the old content - but a rewrite in place (an editor, a future
+# git change) would make bash continue at the old byte offset inside the
+# NEW file. Copying first makes the running updater immune to whatever
+# happens to the file on disk. GM_UPDATER_COPY marks the copy.
+if [ -z "${GM_UPDATER_COPY:-}" ]; then
+    if GM_UPDATER_COPY="$(mktemp /tmp/perform_update.XXXXXX.sh)" && cp "$0" "$GM_UPDATER_COPY"; then
+        export GM_UPDATER_COPY
+        exec bash "$GM_UPDATER_COPY" "$@"
+    fi
+    GM_UPDATER_COPY=""   # copy failed - run in place
+fi
+
 set -e
 
-# Log everything to /tmp/ota_update.log for debugging
+# Log everything to /tmp/ota_update.log for debugging. This already
+# captures every command's output, so commands below must NOT also pipe
+# through `tee -a /tmp/ota_update.log` - that wrote every such line to the
+# log twice (confirmed live: every [dns] line appeared twice).
 exec 1> >(tee -a /tmp/ota_update.log)
 exec 2>&1
+
+# Any exit other than the explicit success at the end is a FAILED update -
+# including `set -e` aborts. The status file must never be left saying
+# "running" or "success" in that case. (log_status is defined below; the
+# trap only fires once the script is running.)
+GM_UPDATE_DONE=0
+GM_ERROR_REPORTED=0
+gm_on_exit() {
+    local rc=$?
+    [ -n "${GM_UPDATER_COPY:-}" ] && rm -f "$GM_UPDATER_COPY"
+    # Only if nothing more specific was reported (log_status "error" sets
+    # GM_ERROR_REPORTED) - never overwrite e.g. the git reset error text.
+    if [ "$GM_UPDATE_DONE" != 1 ] && [ "$rc" -ne 0 ] && [ "$GM_ERROR_REPORTED" != 1 ]; then
+        log_status "error" "❌ Update FAILED (exit $rc, failing command at line ${GM_LAST_LINE:-?}) - see /tmp/ota_update.log" 2>/dev/null || true
+    fi
+}
+trap 'GM_LAST_LINE=$LINENO' ERR
+trap gm_on_exit EXIT
 
 echo "=========================================="
 echo "OTA UPDATE STARTED: $(date)"
@@ -65,44 +101,62 @@ log_status() {
     # "IsADirectoryError: [Errno 21] Is a directory: '.'" on every single
     # log_status call - skip the JSON status write entirely rather than
     # hitting that every time.
+    [ "$status" = "error" ] && GM_ERROR_REPORTED=1
     [ -z "$STATUS_FILE" ] && return 0
 
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%6N")
 
-    # Append to log
-    python3 -c "
-import json
-import sys
+    # GeoMaxima: values are passed as arguments, never pasted into the
+    # Python source. The former '${message}' interpolation broke on any
+    # message containing a quote (confirmed live: SyntaxError on "never the
+    # 'wireguard' metapackage"), silently dropping that status line.
+    python3 - "$STATUS_FILE" "$status" "$message" "$timestamp" <<'PYEOF' || true
+import json, sys
 from pathlib import Path
-
-status_file = Path('${STATUS_FILE}')
+path, status, message, timestamp = sys.argv[1:5]
+status_file = Path(path)
 try:
     if status_file.exists():
-        with open(status_file, 'r') as f:
+        with open(status_file) as f:
             data = json.load(f)
     else:
-        data = {'success': False, 'log': '', 'completed': False, 'timestamp': '${timestamp}'}
-    
-    data['log'] += '${message}\n'
-    
-    if '${status}' == 'success':
+        data = {'success': False, 'log': '', 'completed': False, 'timestamp': timestamp}
+    data['log'] = data.get('log', '') + message + '\n'
+    if status == 'success':
         data['success'] = True
         data['completed'] = True
-    elif '${status}' == 'error':
+    elif status == 'error':
         data['success'] = False
         data['completed'] = True
-        data['error'] = '${message}'
-    
+        data['error'] = message
+    status_file.parent.mkdir(parents=True, exist_ok=True)
     with open(status_file, 'w') as f:
         json.dump(data, f, indent=2)
 except Exception as e:
     print(f'Error updating status: {e}', file=sys.stderr)
-" || true
+PYEOF
 }
 
 log_status "info" "📦 Repo: $DEV_REPO_PATH"
 
 cd "$DEV_REPO_PATH" || exit 1
+
+# ============================================================================
+# OWNERSHIP - before ANY git command
+# ============================================================================
+# git runs as the repo owner (GM_GIT_AS_OWNER). Anything in the working
+# tree or .git that isn't the owner's - left by older root-run git, or
+# written by root services - makes git fail on it. Confirmed live: a
+# root-owned tests/ directory made `git reset --hard` fail half-way, and
+# root-owned .git/objects directories can make a fetch fail. Hand it all
+# back to the owner first (see tools/repo_update.sh).
+log_status "info" "Checking repository ownership..."
+if sudo bash -c "source '${DEV_REPO_PATH}/tools/repo_update.sh' && geomaxima_repo_normalize_ownership '${DEV_REPO_PATH}'" 2>&1; then
+    log_status "info" "✓ Repository ownership OK"
+else
+    log_status "error" "Could not give the repository back to its owner ($GM_REPO_OWNER) - git would fail on root-owned files. See /tmp/ota_update.log."
+    exit 1
+fi
 
 # ============================================================================
 # ROBUST GIT STATE RECOVERY
@@ -141,8 +195,8 @@ log_status "info" "Fetching latest updates..."
 # `until git fetch ... | tee ...`, which tests TEE's exit status (always
 # 0) - a failed fetch was never retried and never detected, and the
 # `git reset --hard origin/<branch>` below then "applied" the stale
-# remote-tracking ref and reported success. ${PIPESTATUS[0]} is git's own
-# status. Six attempts over ~4 min ride out bursty DNS/network failures.
+# remote-tracking ref and reported success. Now git's own exit status is
+# checked. Six attempts over ~4 min ride out bursty DNS/network failures.
 # A DNS failure is named as such so it isn't mistaken for a GitHub or
 # authentication problem.
 RETRY_COUNT=0
@@ -151,7 +205,7 @@ while :; do
     # (`&& ... || ...` form: this script runs under `set -e`, which would
     # otherwise abort on the failing assignment itself.)
     FETCH_OUT="$(GM_GIT_AS_OWNER git fetch origin 2>&1)" && FETCH_RC=0 || FETCH_RC=$?
-    printf '%s\n' "$FETCH_OUT" | tee -a /tmp/ota_update.log
+    printf '%s\n' "$FETCH_OUT"
     [ $FETCH_RC -eq 0 ] && break
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if printf '%s' "$FETCH_OUT" | grep -qiE 'Could not resolve host|Temporary failure in name resolution|Name or service not known|Resolving timed out'; then
@@ -170,27 +224,42 @@ done
 log_status "info" "✓ Fetched from origin"
 log_status "info" "Getting current branch..."
 
-BRANCH=$(GM_GIT_AS_OWNER git rev-parse --abbrev-ref HEAD 2>&1)
-if [ $? -ne 0 ]; then
+# (`&& ... || ...` form throughout: under `set -e` a failing assignment
+# would otherwise abort before the error could be reported.)
+BRANCH="$(GM_GIT_AS_OWNER git rev-parse --abbrev-ref HEAD 2>&1)" && BRANCH_RC=0 || BRANCH_RC=$?
+if [ $BRANCH_RC -ne 0 ]; then
     log_status "error" "Failed to get current branch: $BRANCH"
     exit 1
 fi
 log_status "info" "✓ Current branch: $BRANCH"
 log_status "info" "Resetting to remote HEAD to avoid conflicts..."
 
-# Use hard reset instead of pull to avoid merge conflicts entirely
-GM_GIT_AS_OWNER git fetch origin "$BRANCH" 2>&1 | tee -a /tmp/ota_update.log || true
-if GM_GIT_AS_OWNER git reset --hard "origin/$BRANCH" 2>&1 | tee -a /tmp/ota_update.log; then
-    log_status "info" "✓ Updates applied successfully"
-else
-    log_status "error" "Git reset failed - repository may be corrupted"
+# Use hard reset instead of pull to avoid merge conflicts entirely.
+# GeoMaxima: the reset was piped through `tee`, so its failure was never
+# seen - confirmed live: "unable to unlink old ... Permission denied" /
+# "Could not reset index file", and the update carried on and reported
+# success with HEAD still on the old commit. Now git's own status is
+# checked, and the result is verified: HEAD must equal origin/<branch>
+# with no tracked changes left. Anything else stops the update as FAILED.
+RESET_OUT="$(GM_GIT_AS_OWNER git reset --hard "origin/$BRANCH" 2>&1)" && RESET_RC=0 || RESET_RC=$?
+printf '%s\n' "$RESET_OUT"
+if [ $RESET_RC -ne 0 ]; then
+    log_status "error" "Git reset to origin/$BRANCH FAILED (exit $RESET_RC): $(printf '%s' "$RESET_OUT" | grep -iE 'error|fatal' | head -3 | tr '\n' ' ')"
     exit 1
 fi
+GM_HEAD="$(GM_GIT_AS_OWNER git rev-parse HEAD 2>/dev/null)" || GM_HEAD=""
+GM_TARGET="$(GM_GIT_AS_OWNER git rev-parse "origin/$BRANCH" 2>/dev/null)" || GM_TARGET=""
+GM_DIRTY="$(GM_GIT_AS_OWNER git status --porcelain --untracked-files=no 2>&1)" || GM_DIRTY="git status failed: $GM_DIRTY"
+if [ -z "$GM_HEAD" ] || [ "$GM_HEAD" != "$GM_TARGET" ] || [ -n "$GM_DIRTY" ]; then
+    log_status "error" "Git reset did not complete: HEAD ${GM_HEAD:0:7}, origin/$BRANCH ${GM_TARGET:0:7}, tracked changes: $(printf '%s' "$GM_DIRTY" | head -5 | tr '\n' ' ')"
+    exit 1
+fi
+log_status "info" "✓ Updates applied successfully: $(GM_GIT_AS_OWNER git log -1 --oneline 2>/dev/null)"
 log_status "info" "Ensuring SPI is enabled (idempotent, needed for optional LCD display feature)..."
-sudo raspi-config nonint do_spi 0 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ raspi-config SPI enable failed - continuing anyway"
+sudo raspi-config nonint do_spi 0 2>&1 || log_status "info" "⚠ raspi-config SPI enable failed - continuing anyway"
 
 log_status "info" "Ensuring fonts-dejavu-core is installed (idempotent, needed for optional LCD display feature)..."
-sudo apt-get install -y -qq --no-remove fonts-dejavu-core 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ fonts-dejavu-core install failed - continuing anyway"
+sudo apt-get install -y -qq --no-remove fonts-dejavu-core 2>&1 || log_status "info" "⚠ fonts-dejavu-core install failed - continuing anyway"
 
 log_status "info" "Ensuring WireGuard tooling is installed (idempotent - never the 'wireguard' metapackage, see tools/wireguard_setup.sh)..."
 # GeoMaxima: same shared helper install.sh uses - re-applied on every OTA
@@ -209,22 +278,17 @@ log_status "info" "Ensuring WireGuard tooling is installed (idempotent - never t
 # launches a NEW shell whose cwd, while normally inherited from the caller,
 # should not be relied on across a sudo boundary here.
 #
-# `${PIPESTATUS[0]}` (not `... | tee ... || log_status`) is required to
-# actually see the helper's own exit status - piping through `tee` means a
-# plain `||` after the pipeline sees tee's exit code (always 0), never the
-# helper's, silently masking a real failure. This file has no `pipefail`
-# set repo-wide (kept that way here rather than changing it globally,
-# since ~20 other pre-existing `| tee` lines in this file are unrelated to
-# this fix and untested against a pipefail change).
-sudo bash -c "source '${DEV_REPO_PATH}/tools/wireguard_setup.sh' && geomaxima_install_wireguard" 2>&1 | tee -a /tmp/ota_update.log
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+# Commands are not piped through `tee` (stdout is already logged, see the
+# top), so `if ! cmd` sees the helper's own exit status - and a failure
+# can't trip `set -e`.
+if ! sudo bash -c "source '${DEV_REPO_PATH}/tools/wireguard_setup.sh' && geomaxima_install_wireguard" 2>&1; then
     log_status "info" "⚠ WireGuard setup failed - continuing anyway (optional feature, does not affect RTCM/GNSS)"
 fi
 
 log_status "info" "DNS: openresolv step (now a no-op - see tools/dns_setup.sh)..."
 # GeoMaxima: kept as a call so this script and older copies of it behave
 # the same; the function no longer installs anything.
-sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_maybe_install_openresolv" 2>&1 | tee -a /tmp/ota_update.log
+sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_maybe_install_openresolv" 2>&1 || true
 
 log_status "info" "DNS: removing injected public resolvers and WireGuard DNS lines (idempotent, verified, auto-rollback)..."
 # GeoMaxima: DNS policy - only the DNS the station's own network provides;
@@ -239,8 +303,7 @@ log_status "info" "DNS: removing injected public resolvers and WireGuard DNS lin
 #   cat /etc/resolv.conf     (router/ISP resolvers only)
 #   resolvconf -l            (no wg0 entry)
 #   cat /var/lib/rtkbase/dns_migration.json
-sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_configure_dns_fallback" 2>&1 | tee -a /tmp/ota_update.log
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+if ! sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_configure_dns_fallback" 2>&1; then
     log_status "info" "⚠ DNS migration was rolled back or failed - see the [dns] lines above (does not affect RTCM/GNSS)"
 fi
 
@@ -250,8 +313,7 @@ log_status "info" "Verifying DNS resolution is still working after the DNS/WireG
 # and the service restart, leaving the station half-updated. A DNS failure
 # is logged here and shown by the watchdog (Watchdog > DNS) instead.
 # GM_DNS_HEALTH_FATAL=1 only so the function reports the real result.
-sudo bash -c "GM_DNS_HEALTH_FATAL=1; source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_dns_health_check" 2>&1 | tee -a /tmp/ota_update.log
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+if ! sudo bash -c "GM_DNS_HEALTH_FATAL=1; source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_dns_health_check" 2>&1; then
     log_status "info" "⚠ DNS resolution is not working through the network's DNS - continuing the update anyway (see the diagnostics above and Watchdog > DNS); downloads later in this update may fail."
 fi
 
@@ -261,12 +323,13 @@ ANTEX_PATH="$ANTEX_DIR/igs20.atx"
 if [ -f "$ANTEX_PATH" ]; then
     log_status "info" "✓ ANTEX file already present, skipping download"
 else
-    mkdir -p "$ANTEX_DIR" 2>&1 | tee -a /tmp/ota_update.log
-    if curl -fsSL "https://files.igs.org/pub/station/general/igs20.atx.gz" -o "$ANTEX_DIR/igs20.atx.gz" 2>&1 | tee -a /tmp/ota_update.log; then
-        if gzip -d "$ANTEX_DIR/igs20.atx.gz" 2>&1 | tee -a /tmp/ota_update.log; then
+    # GeoMaxima: written as the repo owner (GM_GIT_AS_OWNER is a plain
+    # "run as the owner" wrapper), never as root inside the working tree.
+    # geomaxima_ppp/ is gitignored.
+    GM_GIT_AS_OWNER mkdir -p "$ANTEX_DIR" 2>&1 || true
+    if GM_GIT_AS_OWNER curl -fsSL "https://files.igs.org/pub/station/general/igs20.atx.gz" -o "$ANTEX_DIR/igs20.atx.gz" 2>&1; then
+        if GM_GIT_AS_OWNER gzip -d "$ANTEX_DIR/igs20.atx.gz" 2>&1; then
             log_status "info" "✓ ANTEX file downloaded and decompressed"
-            REPO_OWNER_FOR_ANTEX=$(stat -c '%U' "$DEV_REPO_PATH")
-            chown -R "$REPO_OWNER_FOR_ANTEX":"$REPO_OWNER_FOR_ANTEX" "$ANTEX_DIR" 2>&1 | tee -a /tmp/ota_update.log || true
         else
             log_status "info" "⚠ ANTEX decompression failed - PPP-static will not work until resolved manually"
         fi
@@ -383,7 +446,7 @@ else
     rm -rf "$PRIDE_PPPAR_REPO_DIR" "$PRIDE_PPPAR_TMP_HOME"
     mkdir -p "$PRIDE_PPPAR_TMP_HOME"
     chown "$PRIDE_PPPAR_USER":"$PRIDE_PPPAR_USER" "$PRIDE_PPPAR_TMP_HOME" 2>/dev/null || true
-    if sudo -u "$PRIDE_PPPAR_USER" cp -r "$PRIDE_PPPAR_VENDORED_SRC" "$PRIDE_PPPAR_REPO_DIR" 2>&1 | tee -a /tmp/ota_update.log; then
+    if sudo -u "$PRIDE_PPPAR_USER" cp -r "$PRIDE_PPPAR_VENDORED_SRC" "$PRIDE_PPPAR_REPO_DIR" 2>&1; then
 
         log_status "info" "Applying -O0 workaround for gfortran aarch64 ICE..."
         find "$PRIDE_PPPAR_REPO_DIR" -name Makefile -exec sed -i 's/-O3/-O0/g; s/-O2/-O0/g; s/-O1/-O0/g' {} \;
@@ -391,7 +454,7 @@ else
         sudo -u "$PRIDE_PPPAR_USER" chmod +x "$PRIDE_PPPAR_REPO_DIR/install.sh" 2>/dev/null || true
 
         log_status "info" "Building PRIDE-PPPAR (non-interactive, into temporary location)..."
-        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" env HOME="$PRIDE_PPPAR_TMP_HOME" bash -c 'yes "" | ./install.sh') 2>&1 | tee -a /tmp/ota_update.log; then
+        if (cd "$PRIDE_PPPAR_REPO_DIR" && sudo -u "$PRIDE_PPPAR_USER" env HOME="$PRIDE_PPPAR_TMP_HOME" bash -c 'yes "" | ./install.sh') 2>&1; then
             if [ -x "$PRIDE_PPPAR_TMP_BIN/pdp3" ]; then
                 # Build confirmed successful (binary present and
                 # executable in the TEMPORARY location) - now, and only
@@ -459,8 +522,8 @@ log_status "info" "Ensuring /var/log/rtkbase/ exists (idempotent, needed by geom
 # geomaxima_watchdog.timer until this was fixed. This step ensures
 # already-deployed stations (BaseStation, BaseStation) get this fixed
 # automatically on their next OTA update.
-sudo mkdir -p /var/log/rtkbase 2>&1 | tee -a /tmp/ota_update.log
-sudo chown root:root /var/log/rtkbase 2>&1 | tee -a /tmp/ota_update.log || log_status "info" "⚠ chown of /var/log/rtkbase to root failed - continuing anyway"
+sudo mkdir -p /var/log/rtkbase 2>&1 || log_status "info" "⚠ could not create /var/log/rtkbase - continuing anyway"
+sudo chown root:root /var/log/rtkbase 2>&1 || log_status "info" "⚠ chown of /var/log/rtkbase to root failed - continuing anyway"
 
 log_status "info" "Redeploying systemd units (unit/ and addons/unit/)..."
 
@@ -472,7 +535,7 @@ fi
 
 if [ -x "$VENV_PYTHON" ]; then
     log_status "info" "Refreshing Python dependencies (requirements.txt) in venv..."
-    if sudo "$VENV_PYTHON" -m pip install -q -r "$DEV_REPO_PATH/web_app/requirements.txt" 2>&1 | tee -a /tmp/ota_update.log; then
+    if sudo "$VENV_PYTHON" -m pip install -q -r "$DEV_REPO_PATH/web_app/requirements.txt" 2>&1; then
         log_status "info" "✓ Python dependencies refreshed"
     else
         log_status "info" "⚠ pip install refresh reported an error - continuing anyway (existing packages untouched)"
@@ -482,7 +545,7 @@ else
 fi
 
 if [ -x "$DEV_REPO_PATH/tools/copy_unit.sh" ] && [ -x "$VENV_PYTHON" ]; then
-    if sudo "$DEV_REPO_PATH/tools/copy_unit.sh" --python_path "$VENV_PYTHON" --user "$REPO_OWNER" 2>&1 | tee -a /tmp/ota_update.log; then
+    if sudo "$DEV_REPO_PATH/tools/copy_unit.sh" --python_path "$VENV_PYTHON" --user "$REPO_OWNER" 2>&1; then
         log_status "info" "✓ Systemd units redeployed"
     else
         log_status "info" "⚠ copy_unit.sh reported an error - continuing anyway (existing units untouched)"
@@ -494,7 +557,7 @@ if [ -x "$DEV_REPO_PATH/tools/copy_unit.sh" ] && [ -x "$VENV_PYTHON" ]; then
     for timer_file in "$DEV_REPO_PATH"/addons/unit/*.timer; do
         [ -e "$timer_file" ] || continue
         timer_name=$(basename "$timer_file")
-        sudo systemctl enable --now "$timer_name" 2>&1 | tee -a /tmp/ota_update.log || true
+        sudo systemctl enable --now "$timer_name" 2>&1 || true
     done
 else
     log_status "info" "⚠ copy_unit.sh or venv python not found - skipping unit redeploy"
@@ -505,6 +568,7 @@ log_status "info" "Scheduling service restart..."
 # Schedule restart in background with sudo (needed for systemctl)
 (sleep 5 && sudo systemctl restart rtkbase_web) &
 
+GM_UPDATE_DONE=1
 log_status "success" "✅ Update completed successfully! Service will restart in 5 seconds."
 
 exit 0

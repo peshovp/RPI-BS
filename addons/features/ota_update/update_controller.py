@@ -14,8 +14,13 @@ import json
 import shlex
 import tempfile
 import glob
+import shutil
 
 logger = logging.getLogger(__name__)
+
+# OTA runtime files (status, token, askpass) - outside the git working tree.
+# GM_OTA_STATE_DIR is a test seam only.
+OTA_STATE_DIR = Path(os.environ.get('GM_OTA_STATE_DIR', '/var/lib/rtkbase/ota'))
 
 try:
     from addons import dns_health
@@ -57,9 +62,17 @@ class UpdateController:
         self.update_lock = threading.Lock()
         self.update_in_progress = False
         self.last_update_status = None
-        self.status_file = self.repo_path / '.update_status.json'
-        self.token_file = self.repo_path / '.github_token'
-        self._askpass_script = self.repo_path / '.git_askpass.sh'
+        # GeoMaxima: runtime files live OUTSIDE the git working tree. This
+        # controller runs as root; files it wrote into the repo were
+        # root-owned, and root-owned paths in the checkout are what made an
+        # OTA's `git reset` (run as the repo owner) fail half-way - confirmed
+        # live. /var/lib/rtkbase/ota is root's; the askpass helper, which
+        # git executes as the repo owner, is chowned to that owner.
+        self.state_dir = OTA_STATE_DIR
+        self.status_file = self.state_dir / 'update_status.json'
+        self.token_file = self.state_dir / 'github_token'
+        self._askpass_script = self.state_dir / 'git_askpass.sh'
+        self._migrate_runtime_files_out_of_repo()
         self.github_token: Optional[str] = None
 
         # If status says "in progress" for too long, treat as stale and allow a new run
@@ -94,6 +107,39 @@ class UpdateController:
             except Exception:
                 return 'root'
 
+    def _migrate_runtime_files_out_of_repo(self):
+        """
+        One-time move of the status file and GitHub token from their old
+        places in the repo root to self.state_dir; the old askpass helper
+        (it embeds the token) is deleted - it is regenerated on demand.
+        Idempotent; never raises.
+        """
+        try:
+            # 0711: root-only listing, but the repo owner can reach the
+            # askpass helper by its exact path.
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.state_dir, 0o711)
+        except OSError as e:
+            logger.warning(f"Cannot create {self.state_dir}: {e}")
+            return
+        for old, new in ((self.repo_path / '.update_status.json', self.status_file),
+                         (self.repo_path / '.github_token', self.token_file)):
+            try:
+                if old.exists():
+                    if not new.exists():
+                        shutil.move(str(old), str(new))
+                        if new == self.token_file:
+                            os.chmod(new, 0o600)
+                        logger.info(f"Moved {old} -> {new} (runtime files no longer live in the git checkout)")
+                    else:
+                        old.unlink()
+            except OSError as e:
+                logger.warning(f"Could not move {old} out of the repo: {e}")
+        try:
+            (self.repo_path / '.git_askpass.sh').unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def _load_token(self):
         """Load GitHub token from local file if present"""
         try:
@@ -114,6 +160,7 @@ class UpdateController:
                     self.token_file.unlink()
                 self.github_token = None
                 return True
+            self.token_file.parent.mkdir(parents=True, exist_ok=True)
             self.token_file.write_text(token)
             os.chmod(self.token_file, 0o600)
             self.github_token = token
@@ -141,8 +188,17 @@ else
   echo "%(token)s"
 fi
 """ % {"token": self.github_token}
+            self._askpass_script.parent.mkdir(parents=True, exist_ok=True)
             self._askpass_script.write_text(content)
             os.chmod(self._askpass_script, 0o700)
+            # git runs as the repo owner (see _run_git_command) and must be
+            # able to execute this helper.
+            try:
+                st = os.stat(self.repo_path)
+                if os.getuid() == 0 and st.st_uid != 0:
+                    os.chown(self._askpass_script, st.st_uid, st.st_gid)
+            except OSError as e:
+                logger.warning(f"Could not hand {self._askpass_script} to the repo owner: {e}")
             return str(self._askpass_script)
         except Exception as e:
             logger.error(f"Failed to create GIT_ASKPASS script: {e}")
@@ -203,7 +259,11 @@ fi
             
             # If we're not the repo owner, use sudo
             if current_user != repo_owner and current_user == 'root':
-                cmd = ['sudo', '-u', repo_owner] + cmd
+                # sudo resets the environment, which silently dropped
+                # GIT_ASKPASS/GIT_TERMINAL_PROMPT - pass the git variables
+                # explicitly through `env`.
+                git_vars = [f"{k}={env[k]}" for k in ('GIT_ASKPASS', 'GIT_TERMINAL_PROMPT') if k in env]
+                cmd = ['sudo', '-u', repo_owner] + (['env'] + git_vars if git_vars else []) + cmd
                 logger.info(f"Running git as {repo_owner} (current: {current_user})")
         except Exception as e:
             # On systems without pwd module or permission issues, run normally
@@ -417,7 +477,7 @@ fi
             
             # Use standalone update script that runs independently
             update_script = self.repo_path / 'addons' / 'tools' / 'perform_update.sh'
-            status_file = self.repo_path / '.update_status.json'
+            status_file = self.status_file   # outside the repo - see __init__
 
             if not update_script.exists():
                 error_msg = f"Update script not found: {update_script}"

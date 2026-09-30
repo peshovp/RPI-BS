@@ -125,6 +125,12 @@ _gm_wg_up() {
 }
 
 geomaxima_maybe_install_openresolv() {
+    # Second chance for an interrupted update (see tools/repo_update.sh and
+    # geomaxima_install_wireguard) - a no-op when there is nothing to finish.
+    # shellcheck source=tools/repo_update.sh
+    if source "$(dirname "${BASH_SOURCE[0]}")/repo_update.sh" 2>/dev/null; then
+        geomaxima_finish_interrupted_update
+    fi
     _gm_dns_log "openresolv is not installed by this project any more (WireGuard no longer sets DNS, so wg-quick never needs resolvconf). An existing installation is left as it is."
     return 0
 }
@@ -472,10 +478,11 @@ _gm_dns_rollback() {
 
 # _gm_dns_report_state <result> <detail>: machine-readable record for the UI.
 _gm_dns_report_state() {
-    local state="${GM_STATE_DIR:-/var/lib/rtkbase}"
+    local state="${GM_STATE_DIR:-/var/lib/rtkbase}" detail="$2" q="'"
     mkdir -p "$state" 2>/dev/null || return 0
+    detail="${detail//\"/$q}"   # a double quote would break the JSON
     printf '{"result": "%s", "detail": "%s", "timestamp": "%s", "nameservers": "%s"}\n' \
-        "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_gm_dns_nameservers | tr '\n' ' ' | sed 's/ $//')" \
+        "$1" "$detail" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_gm_dns_nameservers | tr '\n' ' ' | sed 's/ $//')" \
         > "$state/dns_migration.json" 2>/dev/null
 }
 _gm_err_state() { _gm_dns_err "$1"; _gm_dns_report_state "error" "$1"; }
