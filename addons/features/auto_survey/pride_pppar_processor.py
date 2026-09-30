@@ -645,8 +645,11 @@ class PridePpparProcessor:
         """
         Parse a PRIDE-PPPAR pos_* result file.
 
-        Finds the data line immediately after the literal "END OF HEADER"
-        marker line (exact-text match, not a regex), parses its
+        Finds the data line after the literal "END OF HEADER" marker line
+        (exact-text match, not a regex) - skipping any "*"-prefixed
+        column-label line(s) in between (CONFIRMED LIVE, pos_2026272_base:
+        END OF HEADER is immediately followed by a "*Name Mjd X Y Z ...
+        Nobs" label line, then the actual data line) - parses its
         space-separated columns (Name Mjd X Y Z Sx Sy Sz Rxy Rxz Ryz Sig0
         Nobs), converts ECEF X/Y/Z (meters) to geodetic lat/lon/height
         (WGS84) via _ecef_to_geodetic(), and parses the wide-lane/narrow-
@@ -694,17 +697,29 @@ class PridePpparProcessor:
             )
             return None
 
+        # CONFIRMED LIVE (BaseStation, pos_2026272_base): immediately after
+        # END OF HEADER comes a column-label line starting with "*" (e.g.
+        # "*Name         Mjd               X ... Nobs"), and only THEN the
+        # actual single data line - skip any "*"-prefixed line(s) (blank
+        # lines are also skipped, as before) rather than treating the
+        # first non-blank line as data. We've only observed exactly one
+        # such label line in practice, but the loop tolerates more than
+        # one without assuming a fixed count.
         data_line = None
         for line in lines[header_idx + 1:]:
             stripped = line.strip()
-            if stripped:
-                data_line = stripped
-                break
+            if not stripped:
+                continue
+            if stripped.startswith('*'):
+                continue
+            data_line = stripped
+            break
 
         if data_line is None:
             logger.error(
                 f"parse_ppp_ar_result: no data line found after "
-                f"'{_END_OF_HEADER_MARKER}' in {pos_file} - FULL raw content:\n{raw_content}"
+                f"'{_END_OF_HEADER_MARKER}' (and any '*'-prefixed column-label "
+                f"lines) in {pos_file} - FULL raw content:\n{raw_content}"
             )
             return None
 
