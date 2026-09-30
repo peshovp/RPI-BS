@@ -333,8 +333,9 @@ input:checked + .slider:before {
             </div>
             {% endif %}
         </div>
-        {# LAN/internet reachability (NetworkMonitor._check_reachability): the default
-           gateway and the hosts the station depends on - no hard-coded public IPs. #}
+        {# LAN/internet reachability (NetworkMonitor._check_reachability): gateway ping (LAN),
+           TCP connect to active NTRIP casters, WireGuard handshake age - no ICMP to
+           internet hosts, no hard-coded public IPs. #}
         {% set reach = status.reach %}
         {% set reach_ok = reach and reach.gateway and reach.gateway.ok and reach.internet_ok != false %}
         <div class="stat-card">
@@ -347,7 +348,16 @@ input:checked + .slider:before {
                 LAN (gateway):
                 {% if reach.gateway %}{{ reach.gateway.host }} {{ '✓' if reach.gateway.ok else '✗' }}{% else %}няма default route ✗{% endif %}<br>
                 {% for t in reach.targets %}
-                {{ t.host }}: {{ '✓' if t.ok else ('✗ не се резолва (DNS)' if not t.resolved else '✗ няма отговор') }}<br>
+                {% if t.kind == 'caster' %}
+                Caster {{ t.host }}:{{ t.port }} (TCP):
+                {{ '✓' if t.ok else ('✗ не се резолва (DNS)' if not t.resolved else '✗ няма TCP връзка') }}<br>
+                {% else %}
+                WireGuard ({{ t.host }}):
+                {% if t.ok %}✓ handshake преди {{ t.handshake_age_s }} s
+                {% elif t.ok is none %}? {% if t.handshake_age_s is not none %}handshake преди {{ t.handshake_age_s }} s{% else %}още няма handshake{% endif %} (без PersistentKeepalive - неактивен тунел не може да се прецени)
+                {% else %}✗ {% if t.handshake_age_s is not none %}няма handshake от {{ t.handshake_age_s }} s{% else %}няма handshake{% endif %}
+                {% endif %}<br>
+                {% endif %}
                 {% endfor %}
                 {% if not reach.targets %}Само gateway: не е намерен WireGuard endpoint или активен NTRIP caster.<br>{% endif %}
                 {{ reach.timestamp[:19]|replace('T', ' ') }} UTC

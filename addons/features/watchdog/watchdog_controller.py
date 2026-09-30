@@ -76,11 +76,12 @@ class WatchdogController:
                     # DNS self-test via the system resolver (addons/dns_health.py)
                     'check_dns': True,
                     'dns_check_interval_seconds': 600,
-                    # No 'ping_hosts': reachability targets are the default
-                    # gateway and the hosts the station depends on (WireGuard
-                    # endpoint, active NTRIP casters) - see
+                    # No 'ping_hosts': LAN = ping the default gateway;
+                    # internet = TCP connect to active NTRIP casters and the
+                    # WireGuard handshake age (no ICMP, no public IPs) - see
                     # NetworkMonitor._check_reachability(). A 'ping_hosts' key
                     # left in an older saved config is ignored.
+                    'wg_handshake_max_age_seconds': 180,
                     'vpn_interface': 'wg0',
                     'alert_on_failure': True,
                     'vpn_auto_restart': True,

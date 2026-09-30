@@ -6,7 +6,8 @@ import logging
 import subprocess
 import time
 import json
-from typing import Dict, List
+import socket
+from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
 
@@ -93,9 +94,9 @@ class NetworkMonitor:
                 results['incidents'].append({
                     'type': 'internet_down',
                     'severity': 'critical',
-                    'message': 'Internet targets not reachable: ' + ', '.join(
-                        f"{t['host']} ({'not resolved' if not t['resolved'] else 'no reply'})"
-                        for t in reach['targets'])
+                    'message': 'Internet targets not reachable: ' + '; '.join(
+                        f"{t['kind']} {t['host']}{':' + str(t['port']) if t.get('port') else ''}: {t['detail']}"
+                        for t in reach['targets'] if t['ok'] is False)
                 })
 
         # DNS self-test through the system resolver (see addons/dns_health.py)
@@ -210,13 +211,42 @@ class NetworkMonitor:
             return False
 
     @staticmethod
-    def _resolves(host: str) -> bool:
-        """Through the system resolver (glibc), like everything else on the station."""
+    def _tcp_connect(host: str, port: int, timeout: float = 5.0) -> Dict:
+        """
+        TCP connect to host:port - the service an NTRIP caster actually
+        provides (many servers drop ICMP, so ping says nothing). The name is
+        resolved through the system resolver (getaddrinfo = glibc), and a
+        name that doesn't resolve is reported as DNS, not as unreachable.
+        """
         try:
-            return subprocess.run(['getent', 'ahostsv4', host], capture_output=True,
-                                  timeout=12).returncode == 0
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            return {'resolved': False, 'ok': False, 'detail': f"does not resolve (DNS): {e}"}
+        last = ''
+        for family, socktype, proto, _, addr in infos:
+            try:
+                with socket.socket(family, socktype, proto) as s:
+                    s.settimeout(timeout)
+                    s.connect(addr)
+                    return {'resolved': True, 'ok': True, 'detail': f"TCP connect to {addr[0]}:{port} OK"}
+            except OSError as e:
+                last = f"{addr[0]}:{port}: {e}"
+        return {'resolved': True, 'ok': False, 'detail': f"no TCP connection ({last})"}
+
+    @staticmethod
+    def _wg_handshake_age(iface: str) -> Optional[int]:
+        """Seconds since the most recent handshake of any peer on iface, or
+        None if there has never been one / wg is unavailable."""
+        try:
+            out = subprocess.run(['wg', 'show', iface, 'latest-handshakes'],
+                                 capture_output=True, text=True, timeout=5)
         except Exception:
-            return False
+            return None
+        if out.returncode != 0:
+            return None
+        epochs = [int(p[1]) for p in (l.split() for l in out.stdout.splitlines())
+                  if len(p) == 2 and p[1].isdigit() and int(p[1]) > 0]
+        return int(time.time()) - max(epochs) if epochs else None
 
     @staticmethod
     def _default_gateway():
@@ -231,57 +261,86 @@ class NetworkMonitor:
                 return parts[parts.index('via') + 1]
         return None
 
-    def _internet_targets(self) -> List[str]:
+    def _internet_targets(self) -> List[Dict]:
         """
-        Hosts this station actually depends on: the WireGuard peer
-        endpoint(s) from /etc/wireguard/<iface>.conf (the watchdog runs as
-        root), then the casters of NTRIP services that are active.
+        What this station actually depends on on the internet:
+        - its WireGuard tunnel ({'kind': 'wireguard', 'iface', 'host',
+          'keepalive'}), from /etc/wireguard/<iface>.conf (the watchdog runs
+          as root);
+        - the casters of the NTRIP services that are active ({'kind':
+          'caster', 'host', 'port'}), from settings.conf.
         """
-        hosts: List[str] = []
+        targets: List[Dict] = []
         iface = self.config.get('vpn_interface', 'wg0')
         try:
+            host, keepalive = None, False
             for line in (self.WG_DIR / f"{iface}.conf").read_text().splitlines():
                 key, _, value = line.partition('=')
-                if key.strip().lower() == 'endpoint' and value.strip():
-                    ep = value.strip()
-                    host = ep[1:ep.index(']')] if ep.startswith('[') else ep.rsplit(':', 1)[0]
-                    if host and host not in hosts:
-                        hosts.append(host)
+                key, value = key.strip().lower(), value.strip()
+                if key == 'endpoint' and value and host is None:
+                    host = value[1:value.index(']')] if value.startswith('[') else value.rsplit(':', 1)[0]
+                elif key == 'persistentkeepalive' and value.isdigit() and int(value) > 0:
+                    keepalive = True
+            if host:
+                targets.append({'kind': 'wireguard', 'iface': iface, 'host': host, 'keepalive': keepalive})
         except OSError:
             pass
         try:
             from configparser import ConfigParser
             cfg = ConfigParser(interpolation=None)
             cfg.read(self.SETTINGS_FILE)
-            for section, key, service in (('ntrip_A', 'svr_addr_a', 'str2str_ntrip_A'),
-                                          ('ntrip_B', 'svr_addr_b', 'str2str_ntrip_B')):
-                host = cfg.get(section, key, fallback='').strip().strip("'\"")
-                if host and host not in hosts and subprocess.run(
-                        ['systemctl', 'is-active', '--quiet', service], timeout=5).returncode == 0:
-                    hosts.append(host)
+            for section, suffix, service in (('ntrip_A', 'a', 'str2str_ntrip_A'),
+                                             ('ntrip_B', 'b', 'str2str_ntrip_B')):
+                host = cfg.get(section, f'svr_addr_{suffix}', fallback='').strip().strip("'\"")
+                port = cfg.get(section, f'svr_port_{suffix}', fallback='').strip().strip("'\"")
+                if host and port.isdigit() and \
+                        not any(t.get('host') == host and t.get('port') == int(port) for t in targets) and \
+                        subprocess.run(['systemctl', 'is-active', '--quiet', service], timeout=5).returncode == 0:
+                    targets.append({'kind': 'caster', 'host': host, 'port': int(port)})
         except Exception as e:
             logger.debug(f"reading caster hosts from {self.SETTINGS_FILE} failed: {e}")
-        return hosts
+        return targets
 
     def _check_reachability(self) -> Dict:
         """
-        LAN: ping the default gateway. Internet: ping the hosts from
-        _internet_targets(), resolved via the system resolver - a host that
-        doesn't resolve is reported as a DNS problem, not as unreachable.
-        No hard-coded public IPs. If no such host can be determined, only
-        the gateway is checked ('internet_ok' None) and the note says so.
+        LAN: ping the default gateway.
+        Internet, never by ICMP (many servers drop ping):
+        - NTRIP caster: TCP connect to its configured host:port;
+        - WireGuard (UDP - no TCP check possible): age of the latest
+          handshake. With PersistentKeepalive set, traffic is expected and
+          WireGuard re-handshakes every ~2 min, so older than
+          wg_handshake_max_age_seconds (default 180) = tunnel problem.
+          Without keepalive an idle tunnel legitimately has an old
+          handshake, so it can't be judged ('ok' None).
+        No hard-coded public IPs. With no such target, only the gateway is
+        checked ('internet_ok' None) and the note says so.
         """
         gw = self._default_gateway()
+        max_age = self.config.get('wg_handshake_max_age_seconds', 180)
         result = {'gateway': {'host': gw, 'ok': self._ping(gw)} if gw else None,
                   'targets': [], 'internet_ok': None, 'note': '',
                   'timestamp': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}
-        for host in self._internet_targets():
-            resolved = self._resolves(host)
-            result['targets'].append({'host': host, 'resolved': resolved,
-                                      'ok': resolved and self._ping(host)})
-        if result['targets']:
-            result['internet_ok'] = any(t['ok'] for t in result['targets'])
-        else:
+        for t in self._internet_targets():
+            if t['kind'] == 'caster':
+                t.update(self._tcp_connect(t['host'], t['port']))
+            else:
+                age = self._wg_handshake_age(t['iface'])
+                t['handshake_age_s'] = age
+                if age is not None and age <= max_age:
+                    t['ok'], t['detail'] = True, f"latest handshake {age} s ago"
+                elif not t['keepalive']:
+                    t['ok'] = None
+                    t['detail'] = (f"latest handshake {age} s ago" if age is not None else "no handshake yet") + \
+                                  " - no PersistentKeepalive, an idle tunnel can't be judged"
+                else:
+                    t['ok'] = False
+                    t['detail'] = (f"no handshake for {age} s (> {max_age} s)" if age is not None
+                                   else "no handshake since the interface came up")
+            result['targets'].append(t)
+        judged = [t['ok'] for t in result['targets'] if t['ok'] is not None]
+        if judged:
+            result['internet_ok'] = any(judged)
+        elif not result['targets']:
             result['note'] = ('No WireGuard endpoint or active NTRIP caster found - '
                               'checking the LAN gateway only')
         try:
