@@ -579,42 +579,42 @@
       <div class="form-group row">
         <label for="wg_address" class="col-sm-3 col-form-label">Address: </label>
         <div class="col-sm-9">
-            <input id="wg_address" type="text" name="address" class="form-control" aria-describedby="wg_addressHelp" placeholder="10.0.0.2/24" value="{{ wireguard_settings[1].address }}" pattern="[^\|><\s]*">
+            <input id="wg_address" type="text" name="address" class="form-control" aria-describedby="wg_addressHelp" placeholder="10.0.0.2/24" value="{{ wireguard_settings[2].address }}" pattern="[^\|><\s]*">
             <small class="form-text text-muted" id="wg_addressHelp">Tunnel address assigned to this client (CIDR notation)</small>
         </div>
       </div>
       <div class="form-group row">
         <label for="wg_dns" class="col-sm-3 col-form-label">DNS: </label>
         <div class="col-sm-9">
-            <input id="wg_dns" type="text" name="dns" class="form-control" aria-describedby="wg_dnsHelp" placeholder="1.1.1.1" value="{{ wireguard_settings[2].dns }}" pattern="[^\|><\s]*">
+            <input id="wg_dns" type="text" name="dns" class="form-control" aria-describedby="wg_dnsHelp" placeholder="1.1.1.1" value="{{ wireguard_settings[3].dns }}" pattern="[^\|><\s]*">
             <small class="form-text text-muted" id="wg_dnsHelp">Optional DNS server to use while the tunnel is up</small>
         </div>
       </div>
       <div class="form-group row">
         <label for="peer_public_key" class="col-sm-3 col-form-label">Peer Public Key: </label>
         <div class="col-sm-9">
-            <input id="peer_public_key" type="text" name="peer_public_key" class="form-control" aria-describedby="peer_public_keyHelp" placeholder="Peer's public key" value="{{ wireguard_settings[3].peer_public_key }}" pattern="[^\|><\s]*">
+            <input id="peer_public_key" type="text" name="peer_public_key" class="form-control" aria-describedby="peer_public_keyHelp" placeholder="Peer's public key" value="{{ wireguard_settings[4].peer_public_key }}" pattern="[^\|><\s]*">
             <small class="form-text text-muted" id="peer_public_keyHelp">Public key of the remote WireGuard peer/server</small>
         </div>
       </div>
       <div class="form-group row">
         <label for="wg_endpoint" class="col-sm-3 col-form-label">Endpoint: </label>
         <div class="col-sm-9">
-            <input id="wg_endpoint" type="text" name="endpoint" class="form-control" aria-describedby="wg_endpointHelp" placeholder="vpn.example.com:51820" value="{{ wireguard_settings[4].endpoint }}" pattern="[^\|><\s]*">
+            <input id="wg_endpoint" type="text" name="endpoint" class="form-control" aria-describedby="wg_endpointHelp" placeholder="vpn.example.com:51820" value="{{ wireguard_settings[5].endpoint }}" pattern="[^\|><\s]*">
             <small class="form-text text-muted" id="wg_endpointHelp">Remote peer address and port</small>
         </div>
       </div>
       <div class="form-group row">
         <label for="allowed_ips" class="col-sm-3 col-form-label">Allowed IPs: </label>
         <div class="col-sm-9">
-            <input id="allowed_ips" type="text" name="allowed_ips" class="form-control" aria-describedby="allowed_ipsHelp" placeholder="0.0.0.0/0" value="{{ wireguard_settings[5].allowed_ips }}" pattern="[^\|><\s]*">
+            <input id="allowed_ips" type="text" name="allowed_ips" class="form-control" aria-describedby="allowed_ipsHelp" placeholder="0.0.0.0/0" value="{{ wireguard_settings[6].allowed_ips }}" pattern="[^\|><\s]*">
             <small class="form-text text-muted" id="allowed_ipsHelp">Traffic ranges routed through the tunnel</small>
         </div>
       </div>
       <div class="form-group row">
         <label for="persistent_keepalive" class="col-sm-3 col-form-label">Persistent Keepalive: </label>
         <div class="col-sm-9">
-            <input id="persistent_keepalive" type="text" name="persistent_keepalive" class="form-control" aria-describedby="persistent_keepaliveHelp" placeholder="25" value="{{ wireguard_settings[6].persistent_keepalive }}" pattern="\d*">
+            <input id="persistent_keepalive" type="text" name="persistent_keepalive" class="form-control" aria-describedby="persistent_keepaliveHelp" placeholder="25" value="{{ wireguard_settings[7].persistent_keepalive }}" pattern="\d*">
             <small class="form-text text-muted" id="persistent_keepaliveHelp">Keepalive interval in seconds (useful behind NAT). Leave empty to disable</small>
         </div>
       </div>
