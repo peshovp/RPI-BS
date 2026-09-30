@@ -89,7 +89,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -294,6 +294,292 @@ def _parse_process_session_year_doy(stdout: str) -> Optional[tuple]:
     return year, doy.zfill(3)
 
 
+# Receiver-agnostic frequency combination selection for pdp3's -frq option.
+#
+# pdp3's own default (G12 R12 E15 C26 J12) assumes a receiver tracking
+# Galileo E5a and BeiDou B3I. Confirmed live (ZED-F9P station, doy 272): the
+# F9P records only E1+E5b and B1I+B2I, so with the defaults every Galileo
+# and BeiDou satellite was unusable and ambiguity resolution ran on GPS
+# alone. A UM980 does track E5a/B3I, so no single fixed combination suits
+# both receivers - instead the combination is chosen per run from the obs
+# file itself: its "SYS / # / OBS TYPES" header, plus a short scan of the
+# first epochs to count satellites that actually carry both bands.
+#
+# Digits are RINEX 3.03+ band numbers (G: 1=L1 2=L2 5=L5; E: 1=E1 5=E5a
+# 7=E5b 6=E6 8=E5ab; C: 2=B1I 6=B3I 7=B2I/B2b 1=B1C 5=B2a 8=B2ab). The valid
+# digit sets below are copied verbatim from pdp3.sh's own -frq validation (G
+# "125", R "12", E "15678", C "125678", J "1256") so we can never emit a
+# combination pdp3 would reject.
+#
+# Priority = prefer pairs whose phase biases WUM products carry (AR-capable),
+# then any other valid pair present. Verified against the vendored PRIDE
+# 3.2.11 source rather than assumed:
+#   - Within a band, pdp3's RINEX reader (src/lib/rdrnxoi3.f90) prefers any
+#     tracking code that HAS an OSB in the product over one that doesn't, so
+#     we choose bands only - we don't need to steer it toward specific
+#     tracking codes (e.g. UM980's C1C vs C1L).
+#   - src/lib/read_bias.f90 fills a missing phase bias from another tracking
+#     code on the SAME frequency ("assumes phase biases on the same
+#     frequency are identical"), so F9P's Galileo L1X/L7X get the product's
+#     L1C/L7Q biases - E17 is AR-capable.
+#   - C27 (B1I+B2I) is expected to be FLOAT-ONLY on the F9P. Confirmed from
+#     the doy-272 obs file: of 19 BeiDou satellites only C09 (a BDS-2 IGSO)
+#     carries any L7I data. BDS-3 satellites don't broadcast B2I (their
+#     1207.14 MHz signal is B2b), so the same-frequency fill above has
+#     nothing to bridge, and the one BDS-2 satellite has no B2I bias in WUM
+#     products. In practice the minimum-satellite rule below excludes F9P
+#     BeiDou entirely.
+#   - PRIDE 3.2.11 processes dual-frequency ionosphere-free combinations
+#     only ("all-frequency PPP-AR on any dual-frequency ionosphere-free
+#     combinations", CHANGELOG) - there is no triple-frequency/uncombined
+#     mode to exploit for the UM980's extra bands.
+_PDP3_VALID_BANDS = {'G': '125', 'R': '12', 'E': '15678', 'C': '125678', 'J': '1256'}
+_FREQ_PRIORITY = {
+    'G': ['12', '15'],
+    'R': ['12'],
+    'E': ['15', '17', '16'],
+    'C': ['26', '27'],
+    'J': ['12', '15'],
+}
+# Fallback beyond _FREQ_PRIORITY: pair one upper L-band signal (~1.56-1.60
+# GHz) with one lower L-band signal (~1.17-1.28 GHz), in the order listed.
+# Never two bands from the same region (e.g. C12 = B1C+B1I, E57 = E5a+E5b):
+# their frequencies are so close that the ionosphere-free combination
+# amplifies noise enormously, even though pdp3 would accept the digits.
+_UPPER_BANDS = {'G': '1', 'R': '1', 'E': '1', 'C': '21', 'J': '1'}
+_LOWER_BANDS = {'G': '25', 'R': '2', 'E': '5768', 'C': '6758', 'J': '256'}
+# A constellation with fewer satellites than this carrying BOTH chosen
+# bands is excluded: it contributes almost no geometry but still costs an
+# inter-system bias parameter.
+_MIN_SATS_PER_SYSTEM = 4
+# The satellite count only needs a representative sample, not the whole
+# (possibly 24h, 1 Hz) file - scan the first 30 minutes of epochs.
+_SAT_SCAN_SECONDS = 1800
+# Used only if the obs file can't be used at all - suits the F9P, the
+# receiver we have live evidence for (pdp3's own defaults suit neither
+# receiver better, and are silently wrong for the F9P).
+_FREQ_FALLBACK = ['G12', 'R12', 'E17', 'C27']
+_OBS_TYPES_LABEL = 'SYS / # / OBS TYPES'
+
+
+def _bds_band(band: str, rinex_version: float) -> str:
+    """
+    RINEX 3.00-3.02 numbered BeiDou B1I as band 1 (C1I/L1I); 3.03+ uses
+    band 2, and band 1 became B1C. Map old files onto the 3.03+ numbering
+    used everywhere in this module (and by pdp3's -frq). pdp3 itself does
+    the reverse lookup when reading a 3.02 file (rdrnxoi3.f90: "if C and
+    ver == 302 and band 2 -> 1"), so passing C2x for such a file is right.
+    """
+    return '2' if (band == '1' and rinex_version < 3.03) else band
+
+
+def _read_obs_file_info(obs_file: Path) -> Optional[Dict]:
+    """
+    Read what frequency selection needs from a RINEX 3/4 obs file:
+        'version': e.g. 3.04
+        'types':   {system: ['C1C', 'L1C', ...]} from "SYS / # / OBS TYPES"
+                   (handles continuation lines - a UM980 always has >13)
+        'epoch_bands': {system: {prn: [set_of_bands, ...]}} - one set per
+                   epoch: the bands on which that satellite had a non-blank
+                   phase value in that epoch. Kept per epoch so a pair is
+                   only credited if both bands appeared in the SAME epoch.
+                   Only the first _SAT_SCAN_SECONDS of data are scanned.
+        'epochs_scanned': int
+    BeiDou bands are already remapped to 3.03+ numbering (_bds_band).
+    Returns None if the file isn't RINEX 3/4 or has no obs-type lines.
+    """
+    types: Dict[str, List[str]] = {}
+    current = None
+    with open(obs_file, 'r', errors='replace') as f:
+        first = f.readline()
+        try:
+            version = float(first[:9])
+        except ValueError:
+            return None
+        if not 3.0 <= version < 5.0:
+            return None
+        for line in f:
+            label = line[60:].strip()
+            if label == 'END OF HEADER':
+                break
+            if label != _OBS_TYPES_LABEL:
+                continue
+            if line[0] != ' ':
+                current = line[0]
+                types[current] = []
+            if current is not None:
+                types[current].extend(line[7:60].split())
+        if not types:
+            return None
+
+        # Column index -> band, for phase observations only.
+        phase_cols = {
+            s: [(i, _bds_band(t[1], version) if s == 'C' else t[1])
+                for i, t in enumerate(ts) if len(t) == 3 and t[0] == 'L']
+            for s, ts in types.items()
+        }
+        # {system: {prn: [set_of_bands_per_epoch, ...]}}
+        epoch_bands: Dict[str, Dict[str, List[set]]] = {s: {} for s in types}
+        epochs, t0 = 0, None
+        pending = 0          # satellite lines still to read for this epoch
+        skip = 0             # special-event lines to skip
+        for line in f:
+            if skip:
+                skip -= 1
+                continue
+            if line.startswith('>'):
+                # RINEX 3 epoch record: "> yyyy mm dd hh mi ss.sssssss  f nnn"
+                # year [2:6] .. minute [16:18], seconds [18:29] (F11.7),
+                # event flag [31:32], satellite count [32:35].
+                try:
+                    y, mo, d, h, mi = (int(x) for x in line[2:18].split())
+                    t = datetime(y, mo, d, h, mi) + timedelta(seconds=float(line[18:29]))
+                    flag = int(line[31:32]) if line[31:32].strip() else 0
+                    nsat = int(line[32:35])
+                except ValueError:
+                    pending = 0
+                    continue
+                if flag > 1:            # special event: next nsat lines are header records
+                    skip, pending = nsat, 0
+                    continue
+                if t0 is None:
+                    t0 = t
+                elif (t - t0).total_seconds() > _SAT_SCAN_SECONDS:
+                    break
+                epochs += 1
+                pending = nsat
+                continue
+            if not pending:
+                continue
+            pending -= 1
+            system, prn = line[0], line[:3]
+            cols = phase_cols.get(system)
+            if not cols:
+                continue
+            bands = set()
+            for i, band in cols:
+                field = line[3 + 16 * i: 3 + 16 * i + 14]
+                try:
+                    if float(field) != 0.0:
+                        bands.add(band)
+                except ValueError:
+                    pass   # blank = not observed
+            if bands:
+                epoch_bands[system].setdefault(prn, []).append(bands)
+
+    return {'version': version, 'types': types, 'epoch_bands': epoch_bands,
+            'epochs_scanned': epochs}
+
+
+def _usable_bands(obs_types: List[str], system: str, version: float) -> str:
+    """Bands with BOTH a code and a phase observation - pdp3 needs both."""
+    def band(t):
+        return _bds_band(t[1], version) if system == 'C' else t[1]
+    code = {band(t) for t in obs_types if len(t) == 3 and t[0] == 'C'}
+    phase = {band(t) for t in obs_types if len(t) == 3 and t[0] == 'L'}
+    return ''.join(sorted(code & phase))
+
+
+def _sats_with_pair(epoch_bands: Dict[str, List[set]], pair: str) -> int:
+    """Satellites that had BOTH bands of `pair` in at least one epoch."""
+    need = set(pair)
+    return sum(1 for per_epoch in epoch_bands.values() if any(need <= b for b in per_epoch))
+
+
+def _fallback(reasons: Dict[str, str], why: str, bands=None) -> Dict:
+    return {'frq': list(_FREQ_FALLBACK), 'sys': None, 'bands': bands or {},
+            'sat_counts': {}, 'reasons': {**reasons, '*': why}, 'fallback': True}
+
+
+def select_frequency_combination(obs_file: Path) -> Dict:
+    """
+    Pick pdp3's -frq combination (and matching -sys constellation list)
+    from the obs file itself. See _FREQ_PRIORITY above for the rationale
+    and the verification behind it.
+
+    Per constellation: walk the candidate pairs (_FREQ_PRIORITY, then the
+    upper x lower fallback) and take the first whose two bands are in the
+    header AND are carried together by at least _MIN_SATS_PER_SYSTEM
+    satellites in the first _SAT_SCAN_SECONDS of data. If none qualifies,
+    the constellation is excluded (reason logged).
+
+    Returns a dict:
+        'frq': e.g. ['G12', 'R12', 'E17'] - passed as `-frq ...`
+        'sys': e.g. 'GRE', or None to leave pdp3's constellation set alone
+               (only on fallback). Needed because pdp3 fills in its default
+               combination for any constellation missing from -frq, so
+               omitting one from -frq does NOT exclude it.
+        'bands': {system: usable band digits from the header}
+        'sat_counts': {system: satellites carrying the chosen pair}
+        'reasons': {system: human-readable reason for its choice}
+        'fallback': True if the obs file couldn't be used
+    """
+    try:
+        info = _read_obs_file_info(obs_file)
+    except OSError as e:
+        logger.warning(f"select_frequency_combination: could not read {obs_file}: {e}")
+        info = None
+
+    if not info:
+        return _fallback({}, 'obs header not parseable (not RINEX 3/4 or no '
+                             f'"{_OBS_TYPES_LABEL}" lines) - using fallback')
+
+    # If the body scan found no epochs at all, a satellite count of zero
+    # would say nothing about the data - skip the minimum-satellite rule
+    # rather than exclude every constellation on a parsing technicality.
+    count_sats = info['epochs_scanned'] > 0
+    reasons: Dict[str, str] = {}
+    if not count_sats:
+        reasons['*'] = 'no epochs found in the first scan window - minimum-satellite check skipped'
+    if info['version'] < 3.03 and 'C' in info['types']:
+        reasons['C-version'] = (f"RINEX {info['version']:.2f}: BeiDou band 1 read as B1I "
+                                "(remapped to 3.03+ band 2)")
+
+    frq, bands, sat_counts = [], {}, {}
+    for system, valid in _PDP3_VALID_BANDS.items():
+        if system not in info['types']:
+            continue
+        present = ''.join(b for b in _usable_bands(info['types'][system], system, info['version'])
+                          if b in valid)
+        bands[system] = present
+        preferred = _FREQ_PRIORITY[system]
+        candidates = preferred + [u + l for u in _UPPER_BANDS[system] for l in _LOWER_BANDS[system]
+                                  if u + l not in preferred]
+        chosen, rejected = None, []
+        for c in candidates:
+            if c[0] not in present or c[1] not in present:
+                continue
+            n = _sats_with_pair(info['epoch_bands'].get(system, {}), c) if count_sats else None
+            if n is not None and n < _MIN_SATS_PER_SYSTEM:
+                rejected.append(f"{system}{c}: {n} sat(s)")
+                continue
+            chosen = c
+            sat_counts[system] = n
+            break
+
+        if chosen is None:
+            why = (f"only {', '.join(rejected)} carrying both bands (< {_MIN_SATS_PER_SYSTEM})"
+                   if rejected else "no usable dual-band pair")
+            reasons[system] = f"bands {present or 'none'} - {why} - constellation excluded"
+            continue
+
+        frq.append(system + chosen)
+        before = preferred[:preferred.index(chosen)] if chosen in preferred else preferred
+        unavailable = [system + c for c in before if not (c[0] in present and c[1] in present)]
+        reasons[system] = (f"bands {present} -> {system}{chosen}"
+                           + (f" ({sat_counts[system]} sats)" if sat_counts.get(system) is not None else '')
+                           + (f" ({', '.join(unavailable)} not in obs)" if unavailable else '')
+                           + (f" (rejected {', '.join(rejected)})" if rejected else '')
+                           + ('' if chosen in preferred else ' [outside preferred list - may be float-only]'))
+
+    if not frq:
+        return _fallback(reasons, 'no constellation has a usable dual-band pair - using fallback', bands)
+
+    return {'frq': frq, 'sys': ''.join(c[0] for c in frq), 'bands': bands,
+            'sat_counts': sat_counts, 'reasons': reasons, 'fallback': False}
+
+
+
 def _parse_fix_rate_line(stdout: str) -> Dict[str, Optional[float]]:
     """
     Parse PRIDE-PPPAR's "Integer rounding" wide-lane/narrow-lane fix-rate
@@ -477,9 +763,26 @@ class PridePpparProcessor:
         else:
             logger.debug(f"process_ppp_ar: obs_file already in work_dir, no copy needed: {local_obs_file}")
 
-        # Confirmed live CLI: `pdp3 -m S <obs-file>` (static mode). No
-        # config file, no sp3/clk arguments - see module docstring.
-        pdp3_args = [str(self.pdp3), "-m", "S", local_obs_file.name]
+        # Frequency combination chosen per run from the obs header, so the
+        # same code serves both the ZED-F9P and the UM980 (see
+        # select_frequency_combination()).
+        freq = select_frequency_combination(local_obs_file)
+        self._last_freq_selection = freq
+        logger.info(
+            f"process_ppp_ar: frequency combination {' '.join(freq['frq'])}"
+            f"{' (FALLBACK)' if freq['fallback'] else ''}; "
+            f"detected bands: {freq['bands'] or 'n/a'}; "
+            f"reasons: {'; '.join(f'{k}: {v}' for k, v in freq['reasons'].items())}"
+        )
+
+        # Confirmed live CLI: `pdp3 -m S <obs-file>` (static mode), plus the
+        # per-run -frq/-sys selection above. No config file, no sp3/clk
+        # arguments - see module docstring. The obs file must stay LAST:
+        # pdp3's ParseCmdArgs() treats the last argument as the obs file.
+        pdp3_args = [str(self.pdp3), "-m", "S", "-frq", *freq['frq']]
+        if freq['sys']:
+            pdp3_args += ["-sys", freq['sys']]
+        pdp3_args.append(local_obs_file.name)
 
         # CRITICAL: pdp3 must run under an enlarged stack ulimit, set in
         # the SAME shell process that execs it (see module docstring) - a
