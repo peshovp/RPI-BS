@@ -82,6 +82,32 @@ cat "$W/out"
 [[ "$rc" == "0" ]] && ok "Case F (no applied_position yet) exits 0" || bad "Case F exits $rc, expected 0"
 grep -q "No Autosurvey result has been applied on this station" "$W/out" && ok "Case F states explicitly that no survey has been applied" || bad "Case F missing the required explicit wording"
 
+echo "== Case G: survey_state.json exists but is not readable (permission denied) =="
+R="$W/station_g"; mkdir -p "$R"
+echo "position='42.68045168 26.30807124 104.425'" > "$R/settings.conf"
+mkdir -p "$W/var_lib_g"
+cat > "$W/var_lib_g/survey_state.json" <<'EOF'
+{"applied": true, "applied_position": {"height_ellipsoidal": 208.306}}
+EOF
+chmod 000 "$W/var_lib_g/survey_state.json"
+if [[ "$(id -u)" == "0" ]]; then
+    echo "  (skipped - running as root, chmod 000 has no effect)"
+else
+    rc=$(run_check "$R" "$W/var_lib_g/survey_state.json")
+    cat "$W/out"
+    [[ "$rc" == "2" ]] && ok "Case G exits 2 (permission error)" || bad "Case G exits $rc, expected 2"
+    grep -q "permission denied" "$W/out" && ok "Case G reports permission denied, not a generic parse error" || bad "Case G missing the permission-specific message"
+    grep -qi "sudo" "$W/out" && ok "Case G suggests sudo" || bad "Case G missing the sudo suggestion"
+fi
+chmod 644 "$W/var_lib_g/survey_state.json"
+
+echo "== Case H: check_rtcm_height.sh is tracked as executable in git =="
+if git -C "$REPO" ls-files -s tools/check_rtcm_height.sh | grep -q '^100755'; then
+    ok "Case H: tools/check_rtcm_height.sh has the executable bit in git"
+else
+    bad "Case H: tools/check_rtcm_height.sh is NOT tracked as executable (100644) - won't be +x after a fresh checkout/OTA pull"
+fi
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 exit $FAIL

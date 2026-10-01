@@ -14,11 +14,14 @@
 #  reasoning). This script checks whether any station's CURRENTLY APPLIED
 #  position was written while that bug was live.
 #
-#  It does NOT need root and does not change anything.
+#  Does not change anything. settings.conf is normally world-readable, but
+#  /var/lib/rtkbase/survey_state.json is typically root-owned - if this
+#  script reports a permission error reading it, re-run it with sudo.
 #
 #  Usage: ./check_rtcm_height.sh [/path/to/RPI-BS]
 #  (default: this script's own parent directory's parent, i.e. assumes it is
 #  still at tools/check_rtcm_height.sh inside the checkout)
+#  If permission is denied reading survey_state.json: sudo ./check_rtcm_height.sh
 # =============================================================================
 set -uo pipefail
 
@@ -69,6 +72,10 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         state = json.load(f)
+except PermissionError:
+    print("PERMISSION_ERROR PERMISSION_ERROR PERMISSION_ERROR PERMISSION_ERROR "
+          "PERMISSION_ERROR PERMISSION_ERROR PERMISSION_ERROR")
+    sys.exit(0)
 except Exception as e:
     print(f"PARSE_ERROR PARSE_ERROR PARSE_ERROR PARSE_ERROR PARSE_ERROR PARSE_ERROR PARSE_ERROR")
     sys.exit(0)
@@ -104,8 +111,14 @@ if [[ "${app_h_ellip:-}" == "NO_APPLIED_SURVEY" ]]; then
     exit 0
 fi
 
+if [[ "${app_h_ellip:-}" == "PERMISSION_ERROR" ]]; then
+    echo "ERROR: permission denied reading $STATE_FILE - this file is typically" >&2
+    echo "root-owned; try running this script with sudo." >&2
+    exit 2
+fi
+
 if [[ "${app_h_ellip:-}" == "PARSE_ERROR" || "${app_h_ellip:-}" == "None" || -z "${app_h_ellip:-}" ]]; then
-    echo "ERROR: could not parse $STATE_FILE (empty or corrupt)." >&2
+    echo "ERROR: could not parse $STATE_FILE (empty or corrupt JSON)." >&2
     exit 2
 fi
 
