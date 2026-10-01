@@ -267,39 +267,52 @@ _FIX_RATE_LINE_RE = re.compile(
 )
 
 # Confirmed live stdout line format (BaseStation), e.g.:
-#   ===> ProcessSingleSession from 2026 215 to 2026 215 ...
-# pdp3's own stated processing year/day-of-year - used to locate its
-# result file at work_dir/<year>/<doy>/pos_* (see module docstring's
-# OUTPUT FORMAT section), since this is pdp3's own record of what it
-# actually used, rather than something inferred separately (e.g. from the
-# obs file's RINEX header) that could drift out of sync with it. Captures
-# only the first (year, doy) pair - a session spanning a day boundary
-# would still have created its output under the FIRST day's subdirectory,
-# matching pdp3's own "from <year> <doy>" (not "to") semantics.
+#   ===> ProcessSingleSession from 2026 215 to 2026 215 ...   (single day)
+#   ===> ProcessSingleSession from 2026 272 to 2026 273 ...   (crosses midnight)
+# pdp3's own stated processing year/day-of-year - used to locate its result
+# file, since this is pdp3's own record of what it actually used, rather
+# than something inferred separately (e.g. from the obs file's RINEX
+# header) that could drift out of sync with it. Now captures BOTH the
+# "from" and "to" (year, doy) pairs (previously only "from"), because
+# pdp3.sh's own output-directory naming (main(), ~line 145) differs when
+# they're not equal:
+#   mjd_span == 0:  work_dir/<year_s>/<doy_s>/            (single day)
+#   mjd_span  > 0:  work_dir/<year_s>/<doy_s>-<doy_e>/     (spans days)
+# CONFIRMED by reading pdp3.sh directly: local work_dir="$proj_dir/$ymd_s/
+# $doy_s-$doy_e" where $ymd_s is a bash ARRAY (from `tr '-' ' '` on the
+# yyyy-mm-dd date) - unindexed "$ymd_s" expands to its first element only,
+# i.e. the START year - so the year subdirectory is always the start
+# year, even if the session's end day falls in a different year (e.g. 365
+# -> 001). This matches the confirmed-live directory name
+# work_dir/2026/272-273/ exactly (8h slot crossing UTC midnight, doy 272
+# to 273, same year).
 _PROCESS_SESSION_LINE_RE = re.compile(
-    r'ProcessSingleSession\s+from\s+(\d{4})\s+(\d{1,3})\b'
+    r'ProcessSingleSession\s+from\s+(\d{4})\s+(\d{1,3})\s+to\s+(\d{4})\s+(\d{1,3})\b'
 )
 
 
 def _parse_process_session_year_doy(stdout: str) -> Optional[tuple]:
     """
-    Parse pdp3's "===> ProcessSingleSession from <year> <doy> to ..."
-    stdout line to recover the (year, doy) it actually processed under.
+    Parse pdp3's "===> ProcessSingleSession from <year> <doy> to <year>
+    <doy> ..." stdout line to recover the (start_year, start_doy, end_doy)
+    it actually processed under.
 
     Args:
         stdout: pdp3's captured stdout
 
     Returns:
-        (year, doy) as (str, str), doy zero-padded to 3 digits to match
-        pdp3's own work_dir/<year>/<doy>/ directory naming - or None if
-        the line was not found (not an error; callers must fall back to
-        the other search locations, see process_ppp_ar()).
+        (start_year, start_doy, end_doy) as (str, str, str), both doy
+        values zero-padded to 3 digits to match pdp3's own directory
+        naming (see _PROCESS_SESSION_LINE_RE's comment for the exact
+        single-day vs. multi-day naming) - or None if the line was not
+        found (not an error; callers must fall back to the other search
+        locations, see process_ppp_ar()).
     """
     match = _PROCESS_SESSION_LINE_RE.search(stdout)
     if not match:
         return None
-    year, doy = match.group(1), match.group(2)
-    return year, doy.zfill(3)
+    start_year, start_doy, _end_year, end_doy = match.groups()
+    return start_year, start_doy.zfill(3), end_doy.zfill(3)
 
 
 # Receiver-agnostic frequency combination selection for pdp3's -frq option.
@@ -890,13 +903,22 @@ class PridePpparProcessor:
             return None
 
         # Search order (first match wins), most-confirmed location first:
-        #   1. work_dir/<year>/<doy>/pos_* - CONFIRMED LIVE real location
-        #      (BaseStation manual repro): pdp3 creates a
-        #      <4-digit-year>/<3-digit-doy>/ subdirectory and writes its
-        #      pos_* file there, e.g. work_dir/2026/215/pos_2026215_topo.
-        #      year/doy are taken from pdp3's own "===> ProcessSingleSession
-        #      from <year> <doy> ..." stdout line (pdp3's own stated
-        #      processing date, not inferred separately).
+        #   1. work_dir/<year>/<doy>/pos_* (single-day session) or
+        #      work_dir/<year>/<doy_s>-<doy_e>/pos_* (session spanning a day
+        #      boundary, e.g. an 8h slot crossing UTC midnight) - CONFIRMED
+        #      LIVE real locations (BaseStation manual repro and an 8h
+        #      cross-midnight slot respectively: work_dir/2026/215/
+        #      pos_2026215_topo and work_dir/2026/272-273/...). year/doy(s)
+        #      are taken from pdp3's own "===> ProcessSingleSession from
+        #      <year> <doy> to <year> <doy> ..." stdout line (pdp3's own
+        #      stated processing dates, not inferred separately) - see
+        #      _PROCESS_SESSION_LINE_RE's comment for the exact naming rule
+        #      (confirmed by reading pdp3.sh directly).
+        #   1b. work_dir/<year>/<doy>*/pos_* - glob fallback in case the
+        #      exact doy_s/doy_e values parsed here ever disagree with the
+        #      directory pdp3 actually created (e.g. a future pdp3 version
+        #      changing the separator) - still scoped to the right year and
+        #      starting doy, so it can't match an unrelated run.
         #   2. work_dir/pos_* - kept as a fallback in case of a different
         #      pdp3 config/version that writes directly to work_dir.
         #   3. work_dir/results/ and work_dir/results/*/ - kept as a
@@ -907,17 +929,22 @@ class PridePpparProcessor:
         year_doy = _parse_process_session_year_doy(result.stdout)
         year_doy_dir = None
         if year_doy is not None:
-            year, doy = year_doy
-            year_doy_dir = work_dir / year / doy
+            year, doy_s, doy_e = year_doy
+            exact_name = doy_s if doy_s == doy_e else f"{doy_s}-{doy_e}"
+            year_doy_dir = work_dir / year / exact_name
             search_locations.append(str(year_doy_dir))
             if year_doy_dir.is_dir():
                 pos_files = list(year_doy_dir.glob(_POS_FILE_GLOB))
+            if not pos_files:
+                glob_pattern = f"{year}/{doy_s}*/{_POS_FILE_GLOB}"
+                search_locations.append(str(work_dir / glob_pattern))
+                pos_files = list(work_dir.glob(glob_pattern))
         else:
             logger.warning(
                 "process_ppp_ar: could not find pdp3's 'ProcessSingleSession "
-                "from <year> <doy>' line in stdout - cannot check the "
-                "confirmed work_dir/<year>/<doy>/ location; falling back to "
-                "work_dir and work_dir/results only."
+                "from <year> <doy> to <year> <doy>' line in stdout - cannot "
+                "check the confirmed work_dir/<year>/<doy>[-<doy>]/ location; "
+                "falling back to work_dir and work_dir/results only."
             )
 
         if not pos_files:
