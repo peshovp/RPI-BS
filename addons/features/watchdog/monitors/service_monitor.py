@@ -61,7 +61,16 @@ class ServiceMonitor:
         for service_name in self.config.get('services', []):
             service_status = self._check_service(service_name)
             results['services'][service_name] = service_status
-            
+
+            # GeoMaxima: a disabled service is down ON PURPOSE (the user
+            # switched it off, or another controller - e.g. Autosurvey's
+            # file_service_owned logic - owns its lifecycle and currently
+            # wants it stopped). Never restarted, never reported as an
+            # incident; the watchdog only acts on services that are
+            # SUPPOSED to be running. See _check_service()'s docstring.
+            if not service_status['enabled']:
+                continue
+
             if not service_status['active']:
                 results['status'] = 'warning'
                 
@@ -108,11 +117,22 @@ class ServiceMonitor:
     
     def _check_service(self, service_name: str) -> Dict:
         """
-        Check if service is active
-        
+        Check if service is active, and whether it's enabled.
+
+        GeoMaxima: 'enabled' added alongside 'active'. web_app/server.py's
+        switchService() (via ServiceController.stop()) calls
+        DisableUnitFiles when the user switches a service off from the UI -
+        so a service that is both inactive AND disabled was turned off on
+        purpose, not crashed. Confirmed live: enabling Watchdog started
+        str2str_file.service (File logging, normally only started/stopped
+        by Autosurvey - see survey_controller.py's file_service_owned
+        logic) because the monitor restarted any configured service that
+        wasn't active, with no way to tell "down on purpose" apart from
+        "down because it crashed".
+
         Args:
             service_name: Systemd service name
-            
+
         Returns:
             Dict with service status
         """
@@ -123,26 +143,43 @@ class ServiceMonitor:
                 capture_output=True,
                 text=True
             )
-            
+
             is_active = result.stdout.strip() == 'active'
-            
+
+            # Check if service is enabled - 'disabled' means a user (or
+            # another controller, e.g. Autosurvey) turned it off on
+            # purpose; is-enabled's exit code is non-zero for 'disabled'
+            # even though that's a normal, successfully-read state, so the
+            # STDOUT text is what's checked here, not the return code.
+            enabled_result = subprocess.run(
+                ['systemctl', 'is-enabled', service_name],
+                capture_output=True,
+                text=True
+            )
+            is_enabled = enabled_result.stdout.strip() not in ('disabled', 'masked')
+
             # Get service status details
             status_result = subprocess.run(
                 ['systemctl', 'status', service_name, '--no-pager'],
                 capture_output=True,
                 text=True
             )
-            
+
             return {
                 'active': is_active,
+                'enabled': is_enabled,
                 'status': result.stdout.strip(),
                 'details': status_result.stdout
             }
-            
+
         except Exception as e:
             logger.error(f"Failed to check service {service_name}: {e}")
             return {
                 'active': False,
+                # Unknown enabled-state defaults to True (treat as a real
+                # problem) rather than silently skipping a genuine crash
+                # just because this diagnostic call itself failed.
+                'enabled': True,
                 'status': 'unknown',
                 'error': str(e)
             }

@@ -407,6 +407,19 @@ input:checked + .slider:before {
                 <label>Наблюдавани услуги:</label>
                 <small class="text-muted">{{ ', '.join(config.monitors.service.services) }}</small>
             </div>
+            {# GeoMaxima: str2str_file.service's lifecycle belongs to
+               Autosurvey (survey_controller.py's file_service_owned logic
+               starts/stops it only while a survey is running), so it is
+               never in the list above and the Watchdog never restarts or
+               alerts on it - a disabled service is treated as "off on
+               purpose", not as an incident (see ServiceMonitor). #}
+            <div class="config-item">
+                <small class="text-muted">
+                    <i class="fas fa-info-circle"></i>
+                    File услугата (<code>str2str_file.service</code>) не се наблюдава тук -
+                    тя се управлява от Auto Survey-In само докато тече заснемане.
+                </small>
+            </div>
         </div>
     </div>
 

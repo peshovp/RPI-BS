@@ -148,6 +148,28 @@ class WatchdogController:
                 # The merged result lives in default_config itself after
                 # this call, not in a captured return value.
                 self._deep_merge(default_config, loaded_config)
+
+                # GeoMaxima one-time cleanup: a station whose
+                # watchdog_config.json predates bebce2a (which removed
+                # str2str_file.service from the default monitored-services
+                # list - its lifecycle belongs to Autosurvey, see
+                # survey_controller.py's file_service_owned logic) still has
+                # it in its SAVED list forever, since _deep_merge replaces
+                # (not unions) a list value wholesale from the loaded file -
+                # it never removes an entry the current defaults dropped.
+                # Confirmed live: enabling Watchdog on such a station
+                # started File logging, because the service monitor
+                # restarted any configured-but-down service with no way to
+                # tell "down on purpose" apart from "crashed" (now also
+                # fixed separately via the enabled-state check in
+                # ServiceMonitor._check_service()/check() - this cleanup
+                # additionally stops it from being monitored at all).
+                services = default_config.get('monitors', {}).get('service', {}).get('services')
+                if isinstance(services, list) and 'str2str_file.service' in services:
+                    services.remove('str2str_file.service')
+                    logger.info("Removed str2str_file.service from the saved Watchdog service list - "
+                                "its lifecycle is owned by Autosurvey, not Watchdog.")
+
                 if default_config != loaded_config:
                     self._save_config(default_config)
                 return default_config
