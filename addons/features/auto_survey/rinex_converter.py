@@ -33,6 +33,30 @@ _FORMAT_BY_SUFFIX = {'.ubx': 'ubx', '.rtcm3': 'rtcm3', '.rtcm': 'rtcm3',
 _LOG_NAME_TIME_RE = re.compile(r'(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})')
 
 
+def parse_log_start_time(raw_file: Path) -> Optional[datetime]:
+    """
+    Extract the logging START time embedded in an RTKBase raw log's file
+    name (file_name='%Y-%m-%d_%H-%M-%S_GNSS-1' in settings.conf, e.g.
+    "2026-09-29_00-00-00_GNSS-1.rtcm3" -> 2026-09-29 00:00:00). This is
+    str2str's own rotation boundary - each time file_rotate_time elapses
+    (typically 24h = UTC midnight), str2str starts a NEW file stamped with
+    the rotation moment, while the PREVIOUS file is closed and left in
+    place (or later zipped by archive_and_clean.sh) covering
+    [its own start time, the next file's start time).
+
+    Returns None if the name doesn't match the expected pattern (an
+    unexpected file in data_dir - caller should not assume any particular
+    time range for it).
+    """
+    m = _LOG_NAME_TIME_RE.search(raw_file.name)
+    if not m:
+        return None
+    try:
+        return datetime(*(int(g) for g in m.groups()))
+    except ValueError:
+        return None
+
+
 def rtcm_time_reference(raw_file: Path) -> Tuple[datetime, str]:
     """
     Approximate UTC time of an RTCM3 log, for convbin's -tr.
@@ -46,12 +70,9 @@ def rtcm_time_reference(raw_file: Path) -> Tuple[datetime, str]:
 
     Returns (time, source) with source 'file name' or 'mtime'.
     """
-    m = _LOG_NAME_TIME_RE.search(raw_file.name)
-    if m:
-        try:
-            return datetime(*(int(g) for g in m.groups())), 'file name'
-        except ValueError:
-            pass
+    start_time = parse_log_start_time(raw_file)
+    if start_time is not None:
+        return start_time, 'file name'
     mtime = datetime.fromtimestamp(raw_file.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None)
     return mtime, 'mtime'
 
@@ -305,7 +326,151 @@ class RINEXConverter:
                 logger.info(f"✓ NAV: {nav_file.name}")
             
             return (obs_file, nav_file)
-            
+
         except Exception as e:
             logger.error(f"RINEX conversion failed: {e}", exc_info=True)
             return None
+
+    def convert_raw_files_to_rinex_obs(self,
+                                       raw_files: List[Path],
+                                       output_dir: Path,
+                                       marker_name: str = "BASE") -> Optional[Tuple[Path, Path]]:
+        """
+        Convert MULTIPLE raw log segments (e.g. a window spanning a
+        UTC-midnight str2str rotation, or an older segment that
+        archive_and_clean.sh has since zipped and
+        RTKBaseConfig.get_data_files_since() already extracted to a temp
+        file) into ONE continuous RINEX obs file.
+
+        convbin itself takes exactly one raw file per invocation (confirmed
+        via its own "convbin [option ...] file" usage string - no
+        multi-file/append option exists), so each segment is converted to
+        its own obs file in an ISOLATED per-segment subdirectory (not
+        output_dir itself - convert_raw_to_rinex_obs() picks the newest
+        *.obs by mtime in whatever directory it's given, so converting
+        multiple segments into the SAME directory would make each call
+        liable to pick up a previous segment's leftover output instead of
+        its own), then the resulting obs files are merged in chronological
+        order with merge_rinex_obs().
+
+        A single raw_files entry (the common case - no rotation in the
+        window) skips merging entirely and returns that segment's own
+        convert_raw_to_rinex_obs() result directly.
+
+        Args:
+            raw_files: raw log segments, in ANY order (sorted here by
+                parse_log_start_time()/mtime before conversion) - see
+                RTKBaseConfig.get_data_files_since() for how these
+                are gathered for a given survey/slot window.
+            output_dir: directory for the FINAL merged obs file (and its
+                nav file, taken from whichever segment produced one -
+                process_ppp_ar() never uses nav_file, see
+                pride_pppar_processor.py, so which segment's nav survives
+                does not matter).
+            marker_name: see convert_raw_to_rinex_obs().
+
+        Returns:
+            (merged_obs_file, nav_file) or None on failure. nav_file may be
+            None (same as convert_raw_to_rinex_obs() - PRIDE-PPPAR doesn't
+            use it).
+        """
+        if not raw_files:
+            logger.error("convert_raw_files_to_rinex_obs: no raw files given")
+            return None
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if len(raw_files) == 1:
+            return self.convert_raw_to_rinex_obs(raw_files[0], output_dir, marker_name=marker_name)
+
+        ordered = sorted(raw_files, key=lambda p: parse_log_start_time(p) or
+                         datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None))
+        logger.info(f"convert_raw_files_to_rinex_obs: merging {len(ordered)} raw segments "
+                    f"spanning a rotation: {[p.name for p in ordered]}")
+
+        segment_results = []
+        for i, raw_file in enumerate(ordered):
+            segment_dir = output_dir / f"_segment_{i}"
+            result = self.convert_raw_to_rinex_obs(raw_file, segment_dir, marker_name=marker_name)
+            if not result:
+                logger.error(f"convert_raw_files_to_rinex_obs: segment {i} ({raw_file.name}) "
+                            f"failed to convert - aborting merge (a partial/wrong-window obs "
+                            f"file is worse than no result at all)")
+                return None
+            segment_results.append(result)
+
+        segment_obs_files = [obs for obs, _nav in segment_results]
+        merged_obs = merge_rinex_obs(segment_obs_files, output_dir / (segment_obs_files[-1].name))
+        if merged_obs is None:
+            return None
+
+        nav_file = next((nav for _obs, nav in segment_results if nav is not None), None)
+        logger.info(f"✓ Merged OBS ({len(ordered)} segments): {merged_obs.name}")
+        return (merged_obs, nav_file)
+
+
+def merge_rinex_obs(obs_files: List[Path], output_path: Path) -> Optional[Path]:
+    """
+    Merge multiple RINEX 3/4 observation files, already in CHRONOLOGICAL
+    order (oldest first - caller's responsibility, see
+    convert_raw_files_to_rinex_obs()), into one continuous obs file: the
+    FIRST file's complete header (through its own "END OF HEADER" line) is
+    kept as-is, then every file's data body (everything AFTER its own "END
+    OF HEADER" line) is appended in order.
+
+    This is a plain text concatenation, not a validating RINEX merge - no
+    epoch-level deduplication is attempted beyond that. file_overlap_time
+    defaults to '0' in settings.conf (no overlap between consecutive raw
+    segments), so back-to-back segments should not produce duplicate
+    epochs in practice; if file_overlap_time is ever configured non-zero,
+    pdp3 seeing a few duplicate/out-of-order epoch lines at a segment
+    boundary is a far smaller risk than silently processing only a
+    fraction of the survey's actual observation window (the bug this
+    function exists to fix).
+
+    Args:
+        obs_files: >= 1 RINEX obs file paths, oldest first.
+        output_path: where to write the merged result. Overwritten if it
+            already exists (e.g. the last segment's own output path -
+            see convert_raw_files_to_rinex_obs()).
+
+    Returns:
+        output_path on success, None on failure (never raises).
+    """
+    if not obs_files:
+        logger.error("merge_rinex_obs: no obs files given")
+        return None
+
+    if len(obs_files) == 1:
+        if obs_files[0].resolve() != output_path.resolve():
+            shutil.copyfile(obs_files[0], output_path)
+        return output_path
+
+    try:
+        with open(output_path, 'w', errors='replace') as out:
+            # First file: header + body, verbatim.
+            with open(obs_files[0], 'r', errors='replace') as f:
+                out.write(f.read())
+
+            # Every subsequent file: skip through its own "END OF HEADER"
+            # line, then append everything after it.
+            for obs_file in obs_files[1:]:
+                with open(obs_file, 'r', errors='replace') as f:
+                    past_header = False
+                    for line in f:
+                        if not past_header:
+                            if line[60:].rstrip('\r\n') == 'END OF HEADER':
+                                past_header = True
+                            continue
+                        out.write(line)
+                    if not past_header:
+                        logger.warning(f"merge_rinex_obs: {obs_file.name} has no "
+                                       f"'END OF HEADER' line - nothing appended from it")
+
+        logger.info(f"merge_rinex_obs: merged {len(obs_files)} files -> {output_path.name}")
+        return output_path
+
+    except Exception as e:
+        logger.error(f"merge_rinex_obs: failed: {e}", exc_info=True)
+        return None

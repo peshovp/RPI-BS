@@ -1659,14 +1659,27 @@ class SurveyController:
           or - in the older, no-longer-default overwrite mode - layered on
           top of an already-run rnx2rtkp result).
 
-        Independently re-locates/re-converts the latest raw GNSS log to
-        RINEX rather than threading obs_file state through
-        _perform_update() - both self.rtkbase.get_data_file() and
-        self.rinex.convert_raw_to_rinex_obs() are idempotent lookups
-        against the same latest raw file / rinex_dir, so redoing them
-        here is cheap and keeps this method fully self-contained (also
-        needed since, with ppp_ar_enabled=True, _perform_update() never
-        runs at all - see _finalize_survey()/_run_ppp_ar_interim()).
+        Independently re-locates/re-converts EVERY raw GNSS log segment
+        covering [survey start, now] to RINEX (rather than threading
+        obs_file state through _perform_update()) - self.rtkbase.
+        get_data_files_since() and self.rinex.convert_raw_files_to_rinex_obs()
+        are idempotent lookups/conversions against the same window each
+        time, so redoing them here on every call is cheap and keeps this
+        method fully self-contained (also needed since, with
+        ppp_ar_enabled=True, _perform_update() never runs at all - see
+        _finalize_survey()/_run_ppp_ar_interim()).
+
+        RAW-LOG ROTATION (fix for a confirmed-live bug): str2str rotates
+        its raw log file every file_rotate_time (typically '24' = UTC
+        midnight), starting a brand-new file and leaving the previous one
+        closed in data_dir (or later zipped by archive_and_clean.sh).
+        get_data_files_since() follows the window across any number of
+        such rotations - and extracts a matching zipped segment back out
+        if archive_and_clean.sh already ran - so each attempt still
+        converts the WHOLE survey-so-far window into one continuous RINEX
+        obs file (via rinex_converter.merge_rinex_obs() when more than one
+        segment is involved), instead of silently processing only the
+        data written since the most recent rotation.
 
         Args:
             slot_label: identifies which slot/attempt this is ("0h", "4h",
@@ -1711,15 +1724,43 @@ class SurveyController:
             logger.warning(f"_run_ppp_ar: PPP-AR enabled but pdp3 not available - skipping this run: {e}")
             return None
 
-        raw_file = self.rtkbase.get_data_file()
-        if not raw_file or not raw_file.exists():
+        # Window = [survey start, now] - the WHOLE survey so far, not just
+        # since the latest str2str rotation. get_data_file() (single
+        # latest file only) used to be used here: after a UTC-midnight
+        # raw-log rotation (file_rotate_time, typically '24'), every
+        # interim slot running after that point would silently process
+        # only the data written since the rotation, not the full window
+        # this slot/finalize step is actually supposed to cover - see
+        # get_data_files_since()'s own docstring for the full reasoning,
+        # including the archive_and_clean.sh zip-extraction case.
+        status = self.state.get_status()
+        survey_start_raw = status.get('start_time')
+        survey_start_time = datetime.fromisoformat(survey_start_raw) if survey_start_raw else datetime.utcnow()
+
+        # Isolated per-attempt rinex_dir (own run_id, independent of the
+        # pdp3 work dir's run_id further below - same scheme, different
+        # timestamp, both unique) - the old self.work_dir / "rinex" was a
+        # SINGLE directory shared across
+        # every _run_ppp_ar() call for the entire survey; converting
+        # multiple raw segments per call (now routine whenever a rotation
+        # falls inside the window) makes that an active hazard, not just
+        # a latent one: convert_raw_to_rinex_obs() picks the newest *.obs
+        # file in whatever directory it's given BY MTIME, so a shared
+        # directory could pick up a previous call's leftover output
+        # instead of this call's own result.
+        safe_slot_label = re.sub(r'[^A-Za-z0-9_.-]', '_', str(slot_label))
+        run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
+        rinex_dir = self.work_dir / "rinex" / f"slot_{safe_slot_label}_{run_id}"
+
+        extract_dir = rinex_dir / "_extracted_from_zip"
+        raw_files = self.rtkbase.get_data_files_since(survey_start_time, extract_dir=extract_dir)
+        if not raw_files:
             logger.warning("_run_ppp_ar: no raw data file found - skipping this run")
             return None
 
-        logger.debug(f"_run_ppp_ar: raw_file={raw_file}")
+        logger.debug(f"_run_ppp_ar: raw_files={raw_files}")
 
-        rinex_dir = self.work_dir / "rinex"
-        rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
+        rinex_result = self.rinex.convert_raw_files_to_rinex_obs(raw_files, rinex_dir)
         if not rinex_result:
             logger.warning("_run_ppp_ar: RINEX conversion failed - skipping this run")
             return None
@@ -1763,6 +1804,15 @@ class SurveyController:
         # pass, and always runs regardless of outcome so failed-attempt
         # directories don't escape the retention limit either.
         self._cleanup_old_ppp_ar_slot_dirs(ppp_ar_root, keep_dir=ppp_ar_dir)
+        # Same pruning for the per-attempt rinex_dir created above
+        # (work_dir/rinex/slot_<label>_<run_id>/) - this is a SEPARATE
+        # accumulation point from ppp_ar_root (added by the
+        # get_data_files_since()/convert_raw_files_to_rinex_obs()
+        # rotation fix) that would otherwise grow unbounded across a
+        # multi-day survey exactly like ppp_ar_root once did before this
+        # same generic cleanup existed - reused here rather than adding a
+        # second, near-identical pruning method.
+        self._cleanup_old_ppp_ar_slot_dirs(rinex_dir.parent, keep_dir=rinex_dir)
 
         if not pos_file:
             logger.warning(
