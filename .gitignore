@@ -18,11 +18,13 @@ test.conf
 **/venv*/*
 **/build/
 /rtkbase
-.continue/# GeoMaxima runtime data written inside the checkout on stations (by the
+.continue/
+# GeoMaxima runtime data written inside the checkout on stations (by the
 # root web service or the OTA updater). Ignored so an OTA leaves `git
 # status` clean; ownership is normalized by the updater before every
 # reset (tools/repo_update.sh).
 /geomaxima_survey/
+/geomaxima_geoid/
 /geomaxima_ppp/
 /archives/
 # Legacy OTA runtime files - moved to /var/lib/rtkbase/ota by the updater
@@ -30,3 +32,8 @@ test.conf
 /.update_status.json
 /.github_token
 /.git_askpass.sh
+# Confirmed-live debris from a manual diagnostic curl/wget command run
+# directly in the checkout (an FTP directory listing redirected to a file
+# literally named "wum") - no code in this repo creates this; ignored
+# purely as a safety net in case it recurs during manual debugging.
+/wum

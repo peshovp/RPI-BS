@@ -37,6 +37,7 @@ import os
 import requests
 
 from .rtkbase_config import RTKBaseConfig
+from .runtime_paths import GM_RUNTIME_DIR
 from .rinex_converter import RINEXConverter
 from .ppp_processor import PPPProcessor
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
@@ -151,7 +152,43 @@ class SurveyController:
       РД-02-20-25, Чл.22, ал.1)
     - Updates RTKBase config hourly
     """
-    
+
+    def _migrate_runtime_dir_from_repo_root(self, old_name: str, new_name: str) -> Path:
+        """
+        One-time move of a runtime data directory from its old location
+        directly under the git checkout (self.rtkbase.rtkbase_root /
+        old_name) to its new home under GM_RUNTIME_DIR / new_name.
+
+        Idempotent: if the old directory doesn't exist, or the new one
+        already exists, nothing is moved. A destination that already has
+        content is never merged into or overwritten - the old directory is
+        left in place (logged) so nothing already-migrated could be lost.
+
+        Returns the directory the CALLER should actually use: the new
+        location once migrated (or if there was nothing to migrate), or
+        the old in-repo location if the move itself failed (e.g. a
+        cross-filesystem move, a permissions issue) - never silently
+        switches to a fresh, empty new_dir while real data sits orphaned
+        in the old one. A failed migration is retried on the next start.
+        """
+        old_dir = self.rtkbase.rtkbase_root / old_name
+        new_dir = GM_RUNTIME_DIR / new_name
+        if not old_dir.exists():
+            return new_dir
+        if new_dir.exists():
+            if any(new_dir.iterdir()):
+                logger.warning(f"Both {old_dir} (old) and {new_dir} (new, non-empty) exist - "
+                               f"leaving {old_dir} in place; merge it into {new_dir} manually if needed.")
+            return new_dir
+        try:
+            GM_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_dir), str(new_dir))
+            logger.info(f"Migrated runtime data: {old_dir} -> {new_dir} (no longer inside the git checkout)")
+            return new_dir
+        except OSError as e:
+            logger.warning(f"Could not migrate {old_dir} to {new_dir}: {e} - using {old_dir} for this run, will retry on next start")
+            return old_dir
+
     def __init__(self,
                  settings_file: str = None,
                  state_file: str = "/var/lib/rtkbase/survey_state.json",
@@ -189,12 +226,26 @@ class SurveyController:
         # instance reused across the whole survey so the authenticated
         # session (Earthdata Login cookies) persists across interim
         # updates instead of re-authenticating every 15 minutes/hour.
+        #
+        # NOTE: geomaxima_ppp/ (ANTEX + this products/ cache) still lives
+        # under rtkbase_root - ppp_processor.py's DEFAULT_ANTEX_RELATIVE_PATH
+        # and the OTA updater's ANTEX download both hardcode that location
+        # too, so moving only the products/ subdirectory here would split
+        # one logical directory across two locations. Left as-is; a full
+        # geomaxima_ppp/ move needs those call sites changed together
+        # (tracked separately, not part of this fix).
         self.ppp_products_dir = self.rtkbase.rtkbase_root / "geomaxima_ppp" / "products"
         self.ppp_products_dir.mkdir(parents=True, exist_ok=True)
         self.ppp_downloader = PPPDownloader(products_dir=self.ppp_products_dir)
 
-        # Geoid config (upload directory + persisted config)
-        self.geoid_dir = self.rtkbase.rtkbase_root / "geomaxima_geoid"
+        # Geoid config (upload directory + persisted config). GeoMaxima:
+        # moved OUT of the git checkout to GM_RUNTIME_DIR (/var/lib/rtkbase
+        # by default) - confirmed live, this was being created directly
+        # under rtkbase_root (the repo root), showing up as untracked
+        # clutter in `git status` on every station. See runtime_paths.py's
+        # module docstring. Existing data from the old in-repo location is
+        # moved on first start so no station loses its uploaded geoid model.
+        self.geoid_dir = self._migrate_runtime_dir_from_repo_root("geomaxima_geoid", "geoid")
         self.geoid_dir.mkdir(parents=True, exist_ok=True)
         self.geoid_config_path = self.geoid_dir / "geoid_config.json"
         self._load_geoid_model()
@@ -230,8 +281,10 @@ class SurveyController:
             'later_interval': 1        # 1 hour after 6 hours
         }
         
-        # Working directory for temp files
-        self.work_dir = self.rtkbase.rtkbase_root / "geomaxima_survey"
+        # Working directory for temp files. GeoMaxima: moved OUT of the git
+        # checkout to GM_RUNTIME_DIR - same reasoning/migration as geoid_dir
+        # above.
+        self.work_dir = self._migrate_runtime_dir_from_repo_root("geomaxima_survey", "survey")
         self.work_dir.mkdir(parents=True, exist_ok=True)
         
         # Control flags
