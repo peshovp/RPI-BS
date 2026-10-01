@@ -601,6 +601,354 @@ def select_frequency_combination(obs_file: Path) -> Dict:
 
 
 
+# Per-constellation prefixes used by write_ambcon.f90's cst_<yyyyddd>_<site>
+# output (the file ACF%flncon points at) - confirmed against real output
+# (BaseStation, doy 272: "6 4 0 ... G   AMB FIXING (T/W/N)", GPS-only
+# run). NOT the same prefixes as arsig.f90's stdout "Wide/Narrow-lane
+# FR(ind)" lines (G_/E_/C2Wide/C3Wide/mG) - these are two independently
+# written outputs with different per-constellation labels; do not
+# conflate them (see _parse_fix_rate_line()'s own module-docstring note
+# and this function's docstring below).
+_CST_CONSTELLATION_PREFIXES = {
+    'G': 'GPS', 'E': 'Galileo', 'C2': 'BeiDou-2', 'C3': 'BeiDou-3', 'J': 'QZSS',
+}
+
+
+def _sibling_ppp_ar_file(pos_file: Path, prefix: str) -> Path:
+    """
+    pdp3 writes pos_<yyyyddd>_<site>, cst_<yyyyddd>_<site> (write_ambcon.f90's
+    ACF%flncon) and amb_<yyyyddd>_<site> (the write_file='amb' header, same
+    subroutine as pos's own header) all into the SAME directory with the
+    SAME <yyyyddd>_<site> suffix, differing only in their 3-letter prefix -
+    confirmed live (BaseStation, doy 272: pos_2026272_base, cst_2026272_base,
+    amb_2026272_base side by side). Derives the cst_*/amb_* sibling path
+    from pos_file's own name/parent rather than hardcoding yyyyddd/site
+    separately, so this never drifts out of sync with wherever
+    process_ppp_ar() actually found pos_file (which itself already handles
+    the day-spanning doy_s-doy_e directory naming - see that method).
+    """
+    suffix = pos_file.name[len('pos_'):] if pos_file.name.startswith('pos_') else pos_file.name
+    return pos_file.parent / f"{prefix}_{suffix}"
+
+
+def parse_cst_file(cst_file: Path) -> Optional[Dict]:
+    """
+    Parse pdp3's cst_<yyyyddd>_<site> ambiguity-constraint file
+    (write_ambcon.f90's ACF%flncon) for the PER-CONSTELLATION and combined
+    ambiguity-fixing T(otal)/W(ide-lane-fixed)/N(arrow-lane-fixed) counts -
+    NOT present anywhere in the pos_* file itself (confirmed by reading
+    write_ambcon.f90 AND a real pos_2026272_base header, which has none of
+    this - only a YES/NO constraint-count-style "AMB FIXING" line, parsed
+    separately by parse_amb_file_header() below).
+
+    Field order CONFIRMED against real output (BaseStation, doy 272,
+    GPS-only run): "     6     4     0                                 G   AMB FIXING (T/W/N)"
+    matches write_ambcon.f90's `write (..., ACF%ntot_G, ACF%nwlfx_G,
+    ACF%nwnfx_G, 'G AMB FIXING (T/W/N)')` exactly - i.e. the label's own
+    "(T/W/N)" is the TRUE printed order: Total resolvable ambiguities,
+    Wide-lane-fixed count, Narrow-lane-fixed count. (This superseded an
+    earlier, WRONG assumption based on arsig.f90's SEPARATE stdout
+    "Wide/Narrow-lane FR(ind)" line, which has the same three integers in
+    a DIFFERENT order (narrow,wide,total) - that line is parsed
+    separately by _parse_fix_rate_line() and is not a reliable guide to
+    this file's own field order.)
+
+    Returns None if cst_file doesn't exist (e.g. AR was never attempted
+    for this run, or pdp3 failed before reaching the constraint-writing
+    step) - callers must report this explicitly ("AR not attempted"), not
+    silently substitute zeros, which would be indistinguishable from a
+    genuine "0 ambiguities fixed" result.
+
+    Returns (on success): {
+        'per_constellation': {'G': {'total': 6, 'wide_fixed': 4, 'narrow_fixed': 0}, ...},
+        'combined': {'algorithm': 'LAMBDA'|'ROUNDING', 'total': .., 'wide_fixed': .., 'narrow_fixed': ..},
+        'ar_result': 'SUCESS'|'FAIL' (pdp3's own spelling, kept verbatim
+            rather than "corrected" to "SUCCESS" - this is pdp3's literal
+            output and a corrected value would no longer grep-match it),
+    }
+    """
+    if not cst_file.exists():
+        return None
+
+    try:
+        lines = cst_file.read_text(errors='replace').splitlines()
+    except Exception as e:
+        logger.warning(f"parse_cst_file: failed to read {cst_file}: {e}")
+        return None
+
+    per_constellation: Dict[str, Dict] = {}
+    combined = None
+    ar_result = None
+
+    for line in lines:
+        label = line[60:].strip() if len(line) > 60 else ''
+        if label.endswith('AMB FIXING (T/W/N)') and not label.startswith('IND'):
+            prefix = label.split()[0]
+            if prefix not in _CST_CONSTELLATION_PREFIXES:
+                continue
+            parts = line[:60].split()
+            if len(parts) < 3:
+                continue
+            try:
+                per_constellation[prefix] = {
+                    'total': int(parts[0]),
+                    'wide_fixed': int(parts[1]),
+                    'narrow_fixed': int(parts[2]),
+                }
+            except ValueError:
+                logger.warning(f"parse_cst_file: could not parse {prefix} AMB FIXING line: {line!r}")
+        elif label == 'IND AMB FIXING (T/W/N)':
+            parts = line[:60].split()
+            if len(parts) < 4:
+                continue
+            try:
+                combined = {
+                    'algorithm': parts[3],
+                    'total': int(parts[0]),
+                    'wide_fixed': int(parts[1]),
+                    'narrow_fixed': int(parts[2]),
+                }
+            except ValueError:
+                logger.warning(f"parse_cst_file: could not parse IND AMB FIXING line: {line!r}")
+        elif label == 'AR RESULT':
+            ar_result = line[:60].strip()
+
+    return {
+        'per_constellation': per_constellation,
+        'combined': combined,
+        'ar_result': ar_result,
+    }
+
+
+def parse_amb_file_header(amb_file: Path) -> Optional[Dict]:
+    """
+    Parse pdp3's amb_<yyyyddd>_<site> file's header for the GENUINE
+    "# OF AMB RESOLVABLE SAT" / "AMB RESOLVABLE SATELLITES" lines and the
+    "AMB FIXING" YES/NO (+ per-constellation CONSTRAINT counts, when YES)
+    line - lsq_wrt_header.f90, confirmed by reading that source AND real
+    output (BaseStation, doy 272, amb_2026272_base: "NO ... AMB FIXING",
+    "9 ... # OF AMB RESOLVABLE SAT", "G06 G11 G12 G13 G17 G24 G25 G29 G32
+    ... AMB RESOLVABLE SATELLITES").
+
+    These lines do NOT exist in pos_<yyyyddd>_<site>'s own header
+    (confirmed: pos_2026272_base's header ends at "NO ... AMB FIXING"
+    with no resolvable-satellite lines at all - lsq_wrt_header.f90 only
+    writes them `if (write_file .eq. 'amb')`), and are NOT the same as
+    parse_cst_file()'s T/W/N counts (a different file, a different
+    question: "which satellites were ambiguity-RESOLVABLE candidates"
+    here, vs "how many were actually WIDE/NARROW-lane FIXED" there).
+
+    The satellite list wraps at 15 PRNs per line (lsq_wrt_header.f90's
+    `15(a3,1x)` format, no continuation marker other than the repeated
+    "AMB RESOLVABLE SATELLITES" label) - handled here by reading exactly
+    ceil(count/15) consecutive such lines after the count line, matching
+    the writer's own wrapping loop exactly rather than scanning for an
+    unbounded number of label-matching lines.
+
+    Returns None if amb_file doesn't exist (AR never attempted) - same
+    "report explicitly, don't substitute a default" rule as
+    parse_cst_file().
+
+    Returns: {
+        'amb_fixing': 'YES'|'NO' (the file's own literal flag),
+        'resolvable_sat_count': 9,
+        'resolvable_satellites': ['G06', 'G11', ...],
+    }
+    """
+    if not amb_file.exists():
+        return None
+
+    try:
+        lines = amb_file.read_text(errors='replace').splitlines()
+    except Exception as e:
+        logger.warning(f"parse_amb_file_header: failed to read {amb_file}: {e}")
+        return None
+
+    amb_fixing = None
+    resolvable_sat_count = None
+    resolvable_satellites: List[str] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        label = line[60:].strip() if len(line) > 60 else ''
+        if label == 'END OF HEADER':
+            break
+        if label == 'AMB FIXING':
+            amb_fixing = line[:60].strip().split()[0] if line[:60].strip() else None
+        elif label == '# OF AMB RESOLVABLE SAT':
+            try:
+                resolvable_sat_count = int(line[:60].strip())
+            except ValueError:
+                logger.warning(f"parse_amb_file_header: could not parse resolvable-sat count: {line!r}")
+            if resolvable_sat_count is not None:
+                n_lines = -(-resolvable_sat_count // 15)  # ceil division, matches the 15-per-line writer loop
+                for j in range(1, n_lines + 1):
+                    if i + j >= len(lines):
+                        break
+                    sat_label = lines[i + j][60:].strip() if len(lines[i + j]) > 60 else ''
+                    if sat_label != 'AMB RESOLVABLE SATELLITES':
+                        logger.warning(f"parse_amb_file_header: expected a satellite-list "
+                                       f"continuation line, got: {lines[i + j]!r}")
+                        break
+                    resolvable_satellites.extend(lines[i + j][:60].split())
+                i += n_lines
+        i += 1
+
+    return {
+        'amb_fixing': amb_fixing,
+        'resolvable_sat_count': resolvable_sat_count,
+        'resolvable_satellites': resolvable_satellites,
+    }
+
+
+# pdp3 tries multiple precise-product tiers/mirrors (pdp3.sh's
+# fetch-orbit/fetch-clock functions): WUM0MGXRAP_ ("rapid", WUM/Wuhan
+# University's rapid MGEX orbit/clock combination) and WUM0MGXRTS_
+# ("real-time service" - same naming convention PRIDE-PPPAR's own
+# scripts use, confirmed by reading pdp3.sh's fetch_orbit/fetch_clock
+# functions directly, not inferred). This is a SEPARATE tier concept
+# from ppp_tier (ultra-rapid/rapid/final, ppp_downloader.py's CDDIS
+# products for the rnx2rtkp path) - PRIDE-PPPAR decides this itself per
+# run based on product availability, with no equivalent of
+# ppp_downloader's "no fallback, no silent start" guarantee, so it is
+# worth recording per-attempt rather than assumed from any setting.
+_PRODUCT_TIER_RE = re.compile(r'WUM0MGX(RAP|RTS)_')
+
+
+def parse_product_tier(pos_file: Path) -> Optional[str]:
+    """
+    Parse the actual precise-product tier pdp3 used for this run from the
+    pos_* file's own header "SAT ORBIT"/"SAT CLOCK" lines
+    (lsq_wrt_header.f90 writes these unconditionally, confirmed present in
+    both pos_* and amb_* - unlike the AMB-related lines, this one IS in
+    pos_*'s own header). Confirmed live (BaseStation, doy 272):
+    "WUM0MGXRTS_20262720000_01D_05M_ORB.SP3                      SAT ORBIT".
+
+    Returns 'rapid' | 'real-time-service' | None (header present but the
+    filename doesn't match a known tier infix, or no SAT ORBIT/SAT CLOCK
+    line was found at all - e.g. pos_file missing or truncated). Never
+    raises.
+    """
+    if not pos_file.exists():
+        return None
+    try:
+        lines = pos_file.read_text(errors='replace').splitlines()
+    except Exception as e:
+        logger.warning(f"parse_product_tier: failed to read {pos_file}: {e}")
+        return None
+
+    for line in lines:
+        label = line[60:].strip() if len(line) > 60 else ''
+        if label not in ('SAT ORBIT', 'SAT CLOCK'):
+            continue
+        m = _PRODUCT_TIER_RE.search(line[:60])
+        if m:
+            return {'RAP': 'rapid', 'RTS': 'real-time-service'}[m.group(1)]
+    return None
+
+
+# lsq_wrt_header.f90: write (lfn, '(i4,4i3,f6.2,38x,a)') iy, imon, id, ih,
+# imin, sec, 'OBS FIRST/LAST EPOCH' - confirmed column widths against
+# real output (BaseStation, doy 272, amb_2026272_base: "2026  9 29 16 36
+# 34.00                                      OBS FIRST EPOCH").
+_OBS_EPOCH_RE = re.compile(r'^\s*(\d{4})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+([\d.]+)')
+
+
+def parse_processed_window(pos_file: Path) -> Optional[Dict]:
+    """
+    Parse pdp3's own stated "OBS FIRST EPOCH"/"OBS LAST EPOCH" header
+    lines - the window pdp3 ACTUALLY processed, which can differ from
+    the full observation span of the RINEX obs file handed to it (e.g.
+    pdp3 trims leading/trailing low-quality data, or - the case this
+    exists to catch - a bug upstream hands it a window far shorter than
+    intended and nothing else would surface that).
+
+    Returns None if pos_file is missing or neither header line is found
+    (never raises).
+
+    Returns: {
+        'first_epoch': datetime, 'last_epoch': datetime,
+        'processed_minutes': float (last - first, in minutes),
+    }
+    """
+    if not pos_file.exists():
+        return None
+    try:
+        lines = pos_file.read_text(errors='replace').splitlines()
+    except Exception as e:
+        logger.warning(f"parse_processed_window: failed to read {pos_file}: {e}")
+        return None
+
+    first_epoch = None
+    last_epoch = None
+    for line in lines:
+        label = line[60:].strip() if len(line) > 60 else ''
+        if label not in ('OBS FIRST EPOCH', 'OBS LAST EPOCH'):
+            continue
+        m = _OBS_EPOCH_RE.match(line[:60])
+        if not m:
+            logger.warning(f"parse_processed_window: could not parse {label} line: {line!r}")
+            continue
+        try:
+            year, month, day, hour, minute = (int(g) for g in m.groups()[:5])
+            sec = float(m.group(6))
+            epoch = datetime(year, month, day, hour, minute, int(sec),
+                             int((sec % 1) * 1e6))
+        except ValueError as e:
+            logger.warning(f"parse_processed_window: invalid {label} values: {line!r} ({e})")
+            continue
+        if label == 'OBS FIRST EPOCH':
+            first_epoch = epoch
+        else:
+            last_epoch = epoch
+
+    if first_epoch is None or last_epoch is None:
+        return None
+
+    return {
+        'first_epoch': first_epoch,
+        'last_epoch': last_epoch,
+        'processed_minutes': (last_epoch - first_epoch).total_seconds() / 60.0,
+    }
+
+
+# Part 5: if pdp3 actually processed less than this fraction of the obs
+# file's own full span, something is silently truncating the window
+# (upstream bug, a stricter-than-expected internal data-quality cutoff,
+# etc) - worth a visible warning rather than only being discoverable by
+# manually comparing two header fields after the fact.
+PROCESSED_WINDOW_WARN_RATIO = 0.5
+
+
+def check_processed_window_coverage(processed_minutes: Optional[float],
+                                     obs_duration_minutes: Optional[float]) -> Optional[Dict]:
+    """
+    Compare pdp3's own actually-processed window (parse_processed_window()'s
+    'processed_minutes') against the full observation span the obs file
+    offered it (obs_duration_minutes - already computed elsewhere from the
+    RINEX header by extract_observation_duration_minutes(), independently
+    of pdp3). Flags < PROCESSED_WINDOW_WARN_RATIO as a warning.
+
+    Returns None if either value is unavailable (nothing to compare) -
+    never fabricates a ratio from a missing half.
+
+    Returns: {
+        'processed_minutes': .., 'obs_duration_minutes': ..,
+        'ratio': 0.0-1.0+, 'warning': bool,
+    }
+    """
+    if processed_minutes is None or obs_duration_minutes is None or obs_duration_minutes <= 0:
+        return None
+    ratio = processed_minutes / obs_duration_minutes
+    return {
+        'processed_minutes': processed_minutes,
+        'obs_duration_minutes': obs_duration_minutes,
+        'ratio': ratio,
+        'warning': ratio < PROCESSED_WINDOW_WARN_RATIO,
+    }
+
+
 def _parse_fix_rate_line(stdout: str) -> Dict[str, Optional[float]]:
     """
     Parse PRIDE-PPPAR's "Integer rounding" wide-lane/narrow-lane fix-rate
@@ -1126,7 +1474,67 @@ class PridePpparProcessor:
 
         geodetic = _ecef_to_geodetic(x, y, z)
 
-        fix_rates = _parse_fix_rate_line(getattr(self, '_last_stdout', ''))
+        stdout = getattr(self, '_last_stdout', '')
+        fix_rates = _parse_fix_rate_line(stdout)
+
+        # Log every raw "Wide/Narrow-lane FR" stdout line at INFO (not
+        # just the two percentages _parse_fix_rate_line() extracts from
+        # them) - this stdout is only otherwise captured at DEBUG and old
+        # slot dirs get pruned, so without this an attempt's full AR
+        # context is unrecoverable after the fact (confirmed gap: this
+        # exact data had to be re-derived from a still-surviving old slot
+        # dir plus source-reading, rather than from any retained log).
+        fr_lines = [l for l in stdout.splitlines() if 'Wide/Narrow-lane FR' in l]
+        if fr_lines:
+            logger.info(f"parse_ppp_ar_result: pdp3 stdout Wide/Narrow-lane FR line(s):\n" +
+                       "\n".join(fr_lines))
+
+        # Part 5: T/W/N ambiguity-fixing counts (cst_*) and resolvable-
+        # satellite/AMB-FIXING-flag info (amb_* header) - see
+        # parse_cst_file()/parse_amb_file_header() for exactly which file
+        # carries which field (NEITHER lives in pos_file's own header).
+        # Both are None when their source file doesn't exist (AR was
+        # never attempted for this run, e.g. pdp3 failed earlier) -
+        # reported as such, never silently defaulted to zeros/empty.
+        cst_file = _sibling_ppp_ar_file(pos_file, 'cst')
+        amb_file = _sibling_ppp_ar_file(pos_file, 'amb')
+        cst_info = parse_cst_file(cst_file)
+        amb_info = parse_amb_file_header(amb_file)
+        if cst_info is None:
+            logger.info(f"parse_ppp_ar_result: no cst_* file at {cst_file} - "
+                       f"AR ambiguity-fixing counts unavailable for this run")
+        else:
+            # Raw AMB FIXING (T/W/N) lines (per-constellation + IND +
+            # AR RESULT) from cst_file, at INFO - same reasoning as the
+            # stdout FR lines above: the slot dir these files live in
+            # eventually gets pruned (PPP_AR_SLOT_DIRS_TO_KEEP), so the
+            # raw evidence must be in the log too, not only in the
+            # already-parsed cst_info dict.
+            cst_raw_lines = [l for l in cst_file.read_text(errors='replace').splitlines()
+                             if 'AMB FIXING (T/W/N)' in l or l[60:].strip() == 'AR RESULT']
+            logger.info(f"parse_ppp_ar_result: {cst_file.name} raw AMB FIXING line(s):\n" +
+                       "\n".join(cst_raw_lines))
+        if amb_info is None:
+            logger.info(f"parse_ppp_ar_result: no amb_* file at {amb_file} - "
+                       f"resolvable-satellite info unavailable for this run")
+        else:
+            # Raw AMB FIXING flag + resolvable-satellite lines from
+            # amb_file's header, at INFO - same reasoning as above.
+            amb_raw_lines = [l for l in amb_file.read_text(errors='replace').splitlines()
+                             if l[60:].strip() in ('AMB FIXING', '# OF AMB RESOLVABLE SAT',
+                                                   'AMB RESOLVABLE SATELLITES')]
+            logger.info(f"parse_ppp_ar_result: {amb_file.name} raw AMB header line(s):\n" +
+                       "\n".join(amb_raw_lines))
+
+        product_tier = parse_product_tier(pos_file)
+        if product_tier is None:
+            logger.info(f"parse_ppp_ar_result: could not determine product_tier "
+                       f"from {pos_file}'s SAT ORBIT/SAT CLOCK header lines")
+
+        processed_window = parse_processed_window(pos_file)
+        if processed_window is None:
+            logger.info(f"parse_ppp_ar_result: could not determine the actually-"
+                       f"processed window from {pos_file}'s OBS FIRST/LAST EPOCH lines")
 
         result = {
             'lat': geodetic['lat'],
@@ -1136,6 +1544,10 @@ class PridePpparProcessor:
             'nobs': nobs,
             'wl_fix_rate': fix_rates['wl_fix_rate'],
             'nl_fix_rate': fix_rates['nl_fix_rate'],
+            'amb_fixing': cst_info,   # None if AR was never attempted (no cst_* file)
+            'amb_resolvable': amb_info,  # None if AR was never attempted (no amb_* file)
+            'product_tier': product_tier,  # 'rapid' | 'real-time-service' | None
+            'processed_window': processed_window,  # {'first_epoch','last_epoch','processed_minutes'} | None
             # Diagnostics - raw fields from the pos_* data line, not
             # required by any downstream consumer yet but cheap to keep.
             'name': name,
@@ -1150,6 +1562,7 @@ class PridePpparProcessor:
             f"x={x} y={y} z={z} sx={sx} sy={sy} sz={sz} "
             f"rxy={rxy} rxz={rxz} ryz={ryz} sig0={sig0} nobs={nobs} "
             f"wl_fix_rate={fix_rates['wl_fix_rate']} nl_fix_rate={fix_rates['nl_fix_rate']} "
+            f"amb_fixing={cst_info} amb_resolvable={amb_info} "
             f"-> lat={geodetic['lat']} lon={geodetic['lon']} height={geodetic['height']}"
         )
 

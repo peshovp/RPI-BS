@@ -41,7 +41,9 @@ from .runtime_paths import GM_RUNTIME_DIR
 from .rinex_converter import RINEXConverter
 from .ppp_processor import PPPProcessor
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
-from .pride_pppar_processor import PridePpparProcessor, Pdp3NotFoundError
+from .pride_pppar_processor import (
+    PridePpparProcessor, Pdp3NotFoundError, check_processed_window_coverage,
+)
 from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
@@ -1942,6 +1944,11 @@ class SurveyController:
 
         result['obs_file'] = obs_file
         result['obs_duration_minutes'] = obs_duration_minutes
+        # Part 1's per-run frequency-combination choice (select_frequency_
+        # combination(), called inside process_ppp_ar() itself) - stashed
+        # on the SAME PridePpparProcessor instance that just ran, so no
+        # second obs-file read is needed to recover it.
+        result['frequency_selection'] = getattr(pride, '_last_freq_selection', None)
         return result
 
     def _ppp_ar_fix_rate_ok(self, ppp_ar_result: Dict) -> bool:
@@ -1957,6 +1964,31 @@ class SurveyController:
             wl >= self.PPP_AR_MIN_FIX_RATE_PERCENT and
             nl >= self.PPP_AR_MIN_FIX_RATE_PERCENT
         )
+
+    def _ppp_ar_extra_position_fields(self, ppp_ar_result: Dict) -> Dict:
+        """
+        Part 5 quality-evidence fields merged into position/
+        applied_position for an ACCEPTED PPP-AR update
+        (_apply_geodetic_position()'s extra_position_fields) - the SAME
+        fields _build_ppp_ar_attempt_record() persists for every attempt
+        regardless of outcome, kept here as the single place both an
+        accepted update's audit trail and the attempt-history record
+        pull from, so the two can never drift apart on what "the
+        evidence for this result" actually means.
+        """
+        return {
+            'ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+            'ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+            'ar_product_tier': ppp_ar_result.get('product_tier'),
+            'ar_amb_fixing': ppp_ar_result.get('amb_fixing'),
+            'ar_amb_resolvable': ppp_ar_result.get('amb_resolvable'),
+            'ar_frequency_selection': ppp_ar_result.get('frequency_selection'),
+            'ar_processed_window': ({
+                'first_epoch': ppp_ar_result['processed_window']['first_epoch'].isoformat(),
+                'last_epoch': ppp_ar_result['processed_window']['last_epoch'].isoformat(),
+                'processed_minutes': ppp_ar_result['processed_window']['processed_minutes'],
+            } if ppp_ar_result.get('processed_window') is not None else None),
+        }
 
     def _log_ppp_ar_attempt(self, slot_label: str, result: str, reason: str,
                              ppp_ar_result: Optional[Dict] = None) -> None:
@@ -1976,6 +2008,16 @@ class SurveyController:
         exactly the diagnostic gap that made investigating today's 1h
         test survey require raw journalctl digging instead of being
         obvious from the final error alone.
+
+        PART 5: also persists a full per-attempt quality-evidence record
+        (StateManager.record_ppp_ar_attempt()) regardless of outcome -
+        product_tier, processed-window-vs-obs-span coverage, AMB
+        resolvable-satellite/fixing counts, and the frequency combination
+        Part 1 chose - covering FAILED/SKIPPED attempts too, not just
+        accepted ones, since current_position is only ever updated on
+        success and a run that never got applied would otherwise leave no
+        quality evidence behind at all (exactly the gap Pesho's "we need
+        it most for attempts that FAIL" requirement calls out).
 
         Args:
             slot_label: "0h", "4h", ... or "final" - identifies which
@@ -2019,6 +2061,87 @@ class SurveyController:
         # to surface the actual cause instead of a generic message - see
         # that method.
         self._last_ppp_ar_attempt_summary = summary
+
+        try:
+            self.state.record_ppp_ar_attempt(
+                self._build_ppp_ar_attempt_record(slot_label, result, reason, ppp_ar_result)
+            )
+        except Exception as e:
+            logger.error(f"_log_ppp_ar_attempt: failed to persist attempt record: {e}", exc_info=True)
+
+    def _build_ppp_ar_attempt_record(self, slot_label: str, result: str, reason: str,
+                                      ppp_ar_result: Optional[Dict]) -> Dict:
+        """
+        Build the Part 5 per-attempt quality-evidence dict persisted by
+        StateManager.record_ppp_ar_attempt(). Separated from
+        _log_ppp_ar_attempt() so its own, fairly dense field-mapping logic
+        doesn't crowd that method's primary (logging) responsibility.
+
+        Every field here defaults to None (never a fabricated zero/empty
+        value) - see pride_pppar_processor.py's parse_cst_file()/
+        parse_amb_file_header() docstrings for why 0 would be
+        indistinguishable from a genuine "zero ambiguities fixed" result.
+        """
+        now_iso = datetime.utcnow().isoformat()
+        record = {
+            'slot_label': slot_label,
+            'timestamp': now_iso,
+            'result': result,
+            'reason': reason,
+            'product_tier': None,
+            'processed_window': None,
+            'amb_fixing': None,
+            'amb_resolvable': None,
+            'frequency_selection': None,
+            'wl_fix_rate': None,
+            'nl_fix_rate': None,
+            'sig0': None,
+            'obs_duration_minutes': None,
+        }
+        if ppp_ar_result is None:
+            return record
+
+        obs_duration_minutes = ppp_ar_result.get('obs_duration_minutes')
+        processed_window = ppp_ar_result.get('processed_window')
+        coverage = None
+        if processed_window is not None:
+            coverage = check_processed_window_coverage(
+                processed_window.get('processed_minutes'), obs_duration_minutes)
+            if coverage is not None and coverage['warning']:
+                logger.warning(
+                    f"PPP-AR ATTEMPT slot={slot_label}: pdp3 processed only "
+                    f"{coverage['processed_minutes']:.1f}min of the "
+                    f"{coverage['obs_duration_minutes']:.1f}min obs file offered to it "
+                    f"({coverage['ratio']*100:.0f}%, below the "
+                    f"{self.PPP_AR_PROCESSED_WINDOW_WARN_PERCENT:.0f}% threshold) - "
+                    f"a silent window truncation upstream of pdp3 itself."
+                )
+
+        record.update({
+            'product_tier': ppp_ar_result.get('product_tier'),
+            'processed_window': {
+                'first_epoch': processed_window['first_epoch'].isoformat(),
+                'last_epoch': processed_window['last_epoch'].isoformat(),
+                'processed_minutes': processed_window['processed_minutes'],
+                'obs_duration_minutes': obs_duration_minutes,
+                'coverage_ratio': coverage['ratio'] if coverage else None,
+                'coverage_warning': coverage['warning'] if coverage else None,
+            } if processed_window is not None else None,
+            'amb_fixing': ppp_ar_result.get('amb_fixing'),  # {'per_constellation', 'combined', 'ar_result'} | None
+            'amb_resolvable': ppp_ar_result.get('amb_resolvable'),  # {'amb_fixing', 'resolvable_sat_count', 'resolvable_satellites'} | None
+            'frequency_selection': ppp_ar_result.get('frequency_selection'),  # select_frequency_combination()'s own dict | None
+            'wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+            'nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+            'sig0': ppp_ar_result.get('sig0'),
+            'obs_duration_minutes': obs_duration_minutes,
+        })
+        return record
+
+    # Part 5: if pdp3 actually processed less than this fraction of the
+    # obs file's own full span, warn - see pride_pppar_processor.py's
+    # PROCESSED_WINDOW_WARN_RATIO (the actual threshold value; this is
+    # only its percent-form for the warning log message above).
+    PPP_AR_PROCESSED_WINDOW_WARN_PERCENT = 50.0
 
     def _run_ppp_ar_interim(self, elapsed_hours: float, slot_hours: float) -> bool:
         """
@@ -2112,10 +2235,7 @@ class SurveyController:
                 'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
                 'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
             },
-            extra_position_fields={
-                'ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
-                'ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
-            },
+            extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
         )
 
         if not applied:
@@ -2215,10 +2335,7 @@ class SurveyController:
                                 'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
                                 'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
                             },
-                            extra_position_fields={
-                                'ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
-                                'ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
-                            },
+                            extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
                         )
                         if final_applied:
                             self._log_ppp_ar_attempt("final", "SUCCESS", "applied successfully", ppp_ar_result)

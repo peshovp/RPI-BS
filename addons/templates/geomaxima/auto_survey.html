@@ -284,7 +284,101 @@
             {% endif %}
         </div>
     </div>
-    
+
+    {# GeoMaxima Part 5: per-attempt PPP-AR quality evidence
+       (status.ppp_ar_attempts, bounded history - see
+       StateManager.record_ppp_ar_attempt()). Shown for EVERY attempt,
+       not just accepted ones - current_position only ever reflects a
+       successful update, so a failed/skipped attempt's own evidence
+       (product tier, processed-window coverage, AMB fixing) would
+       otherwise be invisible. #}
+    {% if status.ppp_ar_attempts %}
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-satellite-dish"></i> PPP-AR Attempt History</h5>
+                </div>
+                <div class="card-body table-responsive">
+                    <table class="table table-sm table-hover">
+                        <thead>
+                            <tr>
+                                <th>Slot</th>
+                                <th>Result</th>
+                                <th>Reason</th>
+                                <th>Product Tier</th>
+                                <th>Processed / Obs Span</th>
+                                <th>AMB Fixing (T/W/N)</th>
+                                <th>Resolvable Sats</th>
+                                <th>Frequencies</th>
+                                <th>WL/NL Fix %</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for a in status.ppp_ar_attempts|reverse %}
+                            <tr>
+                                <td>{{ a.slot_label }}</td>
+                                <td>
+                                    <span class="badge {{ 'badge-success' if a.result == 'SUCCESS' else ('badge-secondary' if a.result == 'SKIPPED' else 'badge-danger') }}">
+                                        {{ a.result }}
+                                    </span>
+                                </td>
+                                <td><small>{{ a.reason }}</small></td>
+                                <td>{{ a.product_tier or '—' }}</td>
+                                <td>
+                                    {% if a.processed_window %}
+                                        <span class="{{ 'text-danger' if a.processed_window.coverage_warning else '' }}">
+                                            {{ "%.1f"|format(a.processed_window.processed_minutes) }}min
+                                            {% if a.processed_window.obs_duration_minutes %}
+                                                / {{ "%.1f"|format(a.processed_window.obs_duration_minutes) }}min
+                                                ({{ "%.0f"|format(a.processed_window.coverage_ratio * 100) }}%)
+                                                {% if a.processed_window.coverage_warning %}<i class="fas fa-exclamation-triangle" title="Processed window covers less than 50% of the observation span"></i>{% endif %}
+                                            {% endif %}
+                                        </span>
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if a.amb_fixing %}
+                                        {% for sys_code, counts in a.amb_fixing.per_constellation.items() %}
+                                            {{ sys_code }}: {{ counts.total }}/{{ counts.wide_fixed }}/{{ counts.narrow_fixed }}<br>
+                                        {% endfor %}
+                                        {% if a.amb_fixing.combined %}
+                                            <small class="text-muted">{{ a.amb_fixing.combined.algorithm }}: {{ a.amb_fixing.combined.total }}/{{ a.amb_fixing.combined.wide_fixed }}/{{ a.amb_fixing.combined.narrow_fixed }} ({{ a.amb_fixing.ar_result }})</small>
+                                        {% endif %}
+                                    {% else %}
+                                        AR not attempted
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if a.amb_resolvable %}
+                                        {{ a.amb_resolvable.resolvable_sat_count }}: <small>{{ a.amb_resolvable.resolvable_satellites|join(' ') }}</small>
+                                    {% else %}
+                                        AR not attempted
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if a.frequency_selection %}
+                                        {{ a.frequency_selection.frq|join(' ') }}{% if a.frequency_selection.fallback %} <small class="text-warning">(fallback)</small>{% endif %}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {{ "%.1f"|format(a.wl_fix_rate) if a.wl_fix_rate is not none else 'n/a' }}% /
+                                    {{ "%.1f"|format(a.nl_fix_rate) if a.nl_fix_rate is not none else 'n/a' }}%
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Information Panel -->
     <div class="row mt-4">
         <div class="col-12">

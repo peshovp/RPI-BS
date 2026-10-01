@@ -93,6 +93,10 @@ class StateManager:
                 state['ppp_ar_enabled'] = False
             if 'ppp_ar_completed_slots' not in state:
                 state['ppp_ar_completed_slots'] = []
+            if 'last_ppp_ar_attempt' not in state:
+                state['last_ppp_ar_attempt'] = None
+            if 'ppp_ar_attempts' not in state:
+                state['ppp_ar_attempts'] = []
 
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
@@ -167,6 +171,11 @@ class StateManager:
             # the rnx2rtkp path's floating last_success+interval schedule
             # instead - see _survey_loop()).
             'ppp_ar_completed_slots': [],
+            # Part 5: per-attempt quality evidence (product_tier,
+            # processed-window coverage, AMB resolvable/fixing counts,
+            # frequency combination) - see record_ppp_ar_attempt().
+            'last_ppp_ar_attempt': None,
+            'ppp_ar_attempts': [],
         }
     
     def _convert_numpy(self, obj):
@@ -313,6 +322,53 @@ class StateManager:
         logger.error(f"Raw GNSS logging incident: {detail}")
         return self.save_state()
 
+    # How many PPP-AR attempts' quality-evidence records to keep in
+    # ppp_ar_attempts (oldest dropped first). ~3 days of history at the
+    # 4h interim schedule (6/day) - generous enough to diagnose a bad
+    # run after the fact without the list growing unbounded over a
+    # long-running survey.
+    PPP_AR_ATTEMPTS_HISTORY_LIMIT = 20
+
+    def record_ppp_ar_attempt(self, record: dict) -> bool:
+        """
+        Persist one PPP-AR attempt's Part 5 quality-evidence record
+        (product_tier, processed-window-vs-obs-span coverage, AMB
+        resolvable-satellite/fixing counts, frequency combination),
+        REGARDLESS of whether the attempt succeeded, was skipped, or
+        failed - current_position/applied_position are only ever updated
+        on an ACCEPTED result, so without this, a failed/skipped attempt
+        (often the more interesting case to diagnose) would leave no
+        quality evidence behind at all.
+
+        Called from SurveyController._log_ppp_ar_attempt() - see
+        _build_ppp_ar_attempt_record() for exactly how `record` is built.
+
+        Writes BOTH:
+        - 'last_ppp_ar_attempt': the single most recent record, for a
+          quick "what just happened" read without scanning history.
+        - 'ppp_ar_attempts': a bounded history (oldest dropped past
+          PPP_AR_ATTEMPTS_HISTORY_LIMIT), for the Autosurvey page's
+          per-attempt table.
+
+        When an attempt IS accepted (see SurveyController's own
+        _apply_geodetic_position()/mark_applied() call sites), the SAME
+        quality-evidence fields are also copied into
+        current_position/applied_position directly, so the accepted
+        coordinate carries its own quality evidence without a separate
+        lookup into this history - that copy happens at the call site,
+        not here, since this method only ever appends to the attempt
+        log itself.
+        """
+        self._state['last_ppp_ar_attempt'] = record
+        history = self._state.get('ppp_ar_attempts')
+        if not isinstance(history, list):
+            history = []
+        history.append(record)
+        if len(history) > self.PPP_AR_ATTEMPTS_HISTORY_LIMIT:
+            history = history[-self.PPP_AR_ATTEMPTS_HISTORY_LIMIT:]
+        self._state['ppp_ar_attempts'] = history
+        return self.save_state()
+
     def get_ppp_ar_completed_slots(self) -> list:
         """
         Fixed PPP-AR interim slot_hours values already ATTEMPTED this
@@ -400,6 +456,11 @@ class StateManager:
             # _default_state()'s comment for why this is separate from
             # last_update_time.
             'ppp_ar_completed_slots': [],
+            # Part 5 attempt history is per-survey - a fresh survey starts
+            # with no attempts of its own yet, same reasoning as
+            # ppp_ar_completed_slots above.
+            'last_ppp_ar_attempt': None,
+            'ppp_ar_attempts': [],
         })
 
         logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier}, "
