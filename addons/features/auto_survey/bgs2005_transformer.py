@@ -238,4 +238,114 @@ def itrf2020_to_bgs2005(point: GeodeticPoint, t_obs: float) -> dict:
             "Инструкция № РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1 - "
             "изходни данни за относителни ГНСС методи (вкл. RTK) в БГС 2005"
         ),
+        # Geocentric (ECEF) of the OUTPUT point (lat2/lon2/h2 above, i.e.
+        # the CORRECT - ellipsoidal-height - broadcast coordinate), exposed
+        # so survey_controller.py's apply-time invariant check
+        # (verify_rtcm_broadcast_ecef()) can verify, right before writing
+        # anything to RTCM, that what is ACTUALLY about to be broadcast
+        # still matches this point - without recomputing this transform a
+        # second time from scratch.
+        "output_ecef": (X2, Y2, Z2),
     }
+
+
+# Maximum 3D ECEF discrepancy, in meters, allowed between
+# bgs2005['output_ecef'] (computed ONCE, inside itrf2020_to_bgs2005()) and
+# the ECEF recomputed here from the lat/lon/height about to be written.
+# These two are meant to be the SAME physical point run through the SAME
+# geodetic<->geocentric transform twice - this is a write-precision
+# round-trip check, NOT a comparison against an independent measurement or
+# a different transform/grid. It does NOT involve the ITRF2020->BGS2005
+# Helmert shift (that shift already happened once, identically, on both
+# sides - see itrf2020_to_bgs2005()) and does NOT involve the ~5cm
+# residual against АГКК's official BGSTrans grid documented at the top of
+# this module (that residual is between OUR transform and a DIFFERENT,
+# independent grid-based method - it has no bearing on this round-trip).
+# The only legitimate source of difference here is the precision
+# update_position() actually writes: settings.conf's position= line uses
+# "{lat:.8f} {lon:.8f} {height:.3f}" (rtkbase_config.py) - 8 decimal
+# degrees (~1.1mm at this latitude) and 3 decimal meters (1mm). 1cm is
+# comfortably above that rounding floor while remaining two to three
+# orders of magnitude below any error this check is meant to catch: a
+# geoid-height mix-up (tens of meters) or a future ARP/antenna-offset bug
+# (Part 6 - decimeter-to-meter scale, e.g. a wrong antenna height entered
+# in cm vs. m). See verify_rtcm_broadcast_ecef()'s docstring for the full
+# reasoning.
+RTCM_ECEF_SANITY_THRESHOLD_M = 0.01
+
+
+def verify_rtcm_broadcast_ecef(point: GeodeticPoint, bgs2005: dict,
+                               broadcast_lat: float, broadcast_lon: float,
+                               broadcast_height: float) -> dict:
+    """
+    Defensive invariant, checked immediately before writing anything that
+    feeds RTCM 1005/1006 (settings.conf's position=): recompute the ECEF
+    of the EXACT lat/lon/height about to be broadcast (broadcast_lat/lon/
+    height - the actual arguments the caller is about to pass to
+    update_position(), NOT assumed to equal bgs2005['lat_dd']/['height_m']),
+    and compare it against bgs2005['output_ecef'] - the ECEF that
+    itrf2020_to_bgs2005() itself computed for `point` (the original PPP
+    result), i.e. what SHOULD be broadcast.
+
+    This makes a future height-system mix-up (e.g. some later change
+    reintroducing a geoid-corrected height, exactly the confirmed-live
+    52028a3 regression this check exists to make impossible to ship
+    silently again) impossible to miss: if broadcast_height is ever
+    anything other than bgs2005['height_m'] (ellipsoidal), the recomputed
+    ECEF will be off by the full local geoid separation - tens of meters,
+    not the sub-millimeter write-rounding floor this comparison actually
+    has (see RTCM_ECEF_SANITY_THRESHOLD_M's own comment for exactly why:
+    this is a round-trip of the SAME point through the SAME transform, not
+    a comparison against any independent measurement or grid - the ~5cm
+    АГКК/BGSTrans residual documented elsewhere in this module does not
+    apply here). Since broadcast_lat/lon are expected to be bit-identical
+    to bgs2005['lat_dd']/['lon_dd'] (nothing transforms them again between
+    itrf2020_to_bgs2005() and update_position()), this check is in
+    practice a pure height-consistency check - exactly the failure mode
+    that matters here.
+
+    FUTURE EXTENSION (Part 6, ARP/antenna offset): once an antenna
+    height/offset correction is applied between the PPP-AR ECEF and the
+    broadcast point, this check should be extended to verify the WHOLE
+    chain end to end (PPP-AR ECEF -> antenna/ARP correction -> BGS2005
+    transform -> written values), still within
+    RTCM_ECEF_SANITY_THRESHOLD_M - not just the transform step in
+    isolation as it does today.
+
+    Args:
+        point: the ORIGINAL PPP result (ITRF2020 lat/lon/ELLIPSOIDAL height)
+            - the same GeodeticPoint passed to itrf2020_to_bgs2005(). Not
+            directly used (bgs2005['output_ecef'] already reflects it) -
+            accepted for a clear call signature and so a future version of
+            this check could cross-verify bgs2005['input_ecef'] against it
+            if ever needed.
+        bgs2005: the dict itrf2020_to_bgs2005() returned for `point` - must
+            contain 'output_ecef' (the ECEF of the CORRECT, ellipsoidal-
+            height broadcast point).
+        broadcast_lat, broadcast_lon, broadcast_height: the EXACT values
+            the caller is about to pass to update_position() - this is
+            what actually gets checked.
+
+    Returns:
+        {'ok': bool, 'distance_m': float, 'detail': str} - 'ok' is True
+        only if the 3D ECEF distance is within RTCM_ECEF_SANITY_THRESHOLD_M.
+        Never raises - a transform failure here is itself reported as
+        ok=False with the exception text in 'detail', since "the check
+        itself couldn't run" must block the broadcast exactly like a
+        genuine mismatch would, not silently pass it through.
+    """
+    try:
+        X_broadcast, Y_broadcast, Z_broadcast = _geodetic_to_geocentric.transform(
+            broadcast_lon, broadcast_lat, broadcast_height)
+        X_expected, Y_expected, Z_expected = bgs2005['output_ecef']
+        dist_m = ((X_broadcast - X_expected) ** 2 +
+                  (Y_broadcast - Y_expected) ** 2 +
+                  (Z_broadcast - Z_expected) ** 2) ** 0.5
+        ok = dist_m <= RTCM_ECEF_SANITY_THRESHOLD_M
+        detail = (f"ECEF 3D distance between the expected (ellipsoidal) broadcast point "
+                  f"and the point actually about to be written: {dist_m:.3f}m "
+                  f"(threshold {RTCM_ECEF_SANITY_THRESHOLD_M}m)")
+        return {'ok': ok, 'distance_m': dist_m, 'detail': detail}
+    except Exception as e:
+        return {'ok': False, 'distance_m': float('inf'),
+                'detail': f"verify_rtcm_broadcast_ecef: check itself failed: {e}"}

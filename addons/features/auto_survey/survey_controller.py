@@ -42,7 +42,7 @@ from .rinex_converter import RINEXConverter
 from .ppp_processor import PPPProcessor
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
 from .pride_pppar_processor import PridePpparProcessor, Pdp3NotFoundError
-from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes
+from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
 from .config_manager import ConfigManager
@@ -984,11 +984,42 @@ class SurveyController:
         )
 
         try:
-            # Step 6: Compute orthometric (MSL) height via geoid model.
-            # Per АГКК's official requirement, this IS the height broadcast
-            # via RTCM 1005/1006 below (not ellipsoidal) - see the
-            # fallback behavior below when no geoid model is loaded / the
-            # position is outside grid bounds.
+            # Step 6: Compute orthometric (MSL/BGR2005 normal) height via
+            # geoid model, for DISPLAY/REPORT purposes only.
+            #
+            # CORRECTED (reverting a confirmed-live regression - see commit
+            # history on this block): RTCM 1005/1006 (Stationary RTK
+            # Reference Station ARP) carries the station's ECEF X/Y/Z,
+            # derived from lat/lon/ELLIPSOIDAL height. Every connected
+            # rover computes its own position as a baseline vector added to
+            # this ECEF reference point. Feeding an orthometric
+            # (geoid-corrected) height into that reference point - instead
+            # of ellipsoidal - adds the full local geoid separation
+            # (confirmed ~40m near this station: PPP ellipsoidal height
+            # 208.306m vs. BGR2005 normal height ~168m) as a SYSTEMATIC
+            # vertical error to every rover's RTK fix, independent of
+            # baseline length or observation quality. This is a wire-
+            # protocol/ECEF-geometry fact, independent of which horizontal
+            # datum (BGS2005, ITRF2020, ...) the lat/lon are expressed in -
+            # Инструкция № РД-02-20-25, Чл.22, ал.1 (cited below, Step 7)
+            # governs the horizontal reference SYSTEM (BGS2005 vs. raw
+            # ITRF/WGS84), not the RTCM height convention, and does not
+            # require or imply broadcasting a geoid-corrected height.
+            #
+            # This was fixed once before (commit ac3d1f6, "stop writing
+            # geoid-corrected height into RTCM base reference position")
+            # and later reverted (commit 52028a3) on the unsupported claim
+            # of an "official АГКК requirement" with no cited source
+            # document anywhere in this repo or this change's own commit
+            # message - confirmed by searching the whole repo for any
+            # АГКК/RD-02-20-25 reference that discusses height convention;
+            # none exists beyond this comment's own now-corrected claim.
+            #
+            # h_ortho (BGR2005 normal height) is still computed and fully
+            # recorded (height_msl, below) for display and surveying
+            # reports, per Инструкция № РД-02-20-25's actual requirement
+            # for a NORMAL height record - it must simply never be the
+            # value handed to update_position()/RTCM.
             h_ortho = self.geoid.ellipsoidal_to_orthometric(lat, lon, height)
 
             if h_ortho is None:
@@ -1027,36 +1058,49 @@ class SurveyController:
                          f"output={bgs2005}")
 
             # Step 8: Update RTKBase configuration
-            # CRITICAL: broadcast the BGS2005-transformed, ORTHOMETRIC
-            # (MSL/geoid) height (h_ortho from Step 6), never
-            # bgs2005['height_m'] (ellipsoidal) or the raw input height.
-            # This is the value str2str -p embeds into RTCM 1005/1006 for
-            # rover baseline calculations. Per АГКК's official requirement,
-            # base station RTCM broadcast positions must carry orthometric
-            # height computed from the .ggf geoid model, not
-            # ellipsoidal/WGS84 height.
-            #
-            # Fallback: if no geoid model is loaded / the position is
-            # outside the loaded grid's bounds (h_ortho is None), fall back
-            # to ellipsoidal height for this update with an explicit
-            # warning - not a hard failure, since a temporarily-unavailable
-            # geoid correction should not stop the survey from broadcasting
-            # a usable (if height-type-inconsistent) position.
-            broadcast_height_type = 'orthometric'
-            if h_ortho is not None:
-                broadcast_height = h_ortho
-            else:
-                broadcast_height = bgs2005['height_m']
-                broadcast_height_type = 'ellipsoidal'
-                logger.warning(
-                    "No geoid model loaded / position is outside grid "
-                    "bounds - falling back to ellipsoidal height for this "
-                    "update (cannot broadcast orthometric height without a "
-                    "geoid correction to compute it from)."
-                )
+            # CORRECTED (see Step 6's comment for the full reasoning):
+            # ALWAYS broadcast the BGS2005-transformed ELLIPSOIDAL height
+            # (bgs2005['height_m']) - never h_ortho (orthometric/BGR2005
+            # normal height). This is the value str2str -p embeds into
+            # RTCM 1005/1006 for rover baseline calculations, and the only
+            # height type that correctly reconstructs ECEF X/Y/Z from
+            # lat/lon/height. broadcast_height_type is now a CONSTANT, not
+            # a computed branch - there is no legitimate case where
+            # orthometric height should be broadcast, so there is no
+            # fallback-vs-default distinction left to make.
+            broadcast_height_type = 'ellipsoidal'
+            broadcast_height = bgs2005['height_m']
 
-            logger.info(f"RTCM broadcast height type this session: {broadcast_height_type} "
-                        f"({broadcast_height:.3f}m)")
+            logger.info(f"RTCM broadcast height type: {broadcast_height_type} "
+                        f"({broadcast_height:.3f}m) - BGR2005 normal height "
+                        f"{'unavailable' if h_ortho is None else f'{h_ortho:.3f}m'} "
+                        f"recorded for display/reports only, never broadcast")
+
+            # DEFENSIVE INVARIANT - the last line of defense against ever
+            # repeating the 52028a3 regression (or any future mix-up):
+            # verify, right before writing anything that feeds RTCM
+            # 1005/1006, that the ECEF computed from what is ACTUALLY about
+            # to be written matches the ECEF of the PPP-AR result's own
+            # (correct, ellipsoidal-height) point within
+            # RTCM_ECEF_SANITY_THRESHOLD_M. A mismatch here means
+            # broadcast_height is no longer bgs2005['height_m'] for some
+            # reason that got past the constant assignment above (a future
+            # edit, an unexpected code path) - refuse to apply rather than
+            # ship a silently-wrong base position to every connected rover.
+            ecef_check = verify_rtcm_broadcast_ecef(
+                GeodeticPoint(lat=lat, lon=lon, height=height), bgs2005,
+                bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height
+            )
+            if not ecef_check['ok']:
+                error_msg = (f"REFUSED to apply RTCM broadcast position - ECEF sanity check failed: "
+                            f"{ecef_check['detail']}. This would have broadcast a position "
+                            f"{ecef_check['distance_m']:.3f}m away from the PPP-AR result's own "
+                            f"ellipsoidal-height point - almost certainly a height-system mix-up "
+                            f"(see survey_controller.py's Step 6/8 comment). Nothing was written "
+                            f"to settings.conf/RTCM.")
+                logger.error(error_msg)
+                self.state.record_update_failure(error_msg)
+                return False
 
             if is_final:
                 logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
@@ -1094,24 +1138,23 @@ class SurveyController:
             # the JSON-serialized state - kept here since this method now
             # owns that serialization boundary for both backends.
             #
-            # position['height'] holds the height TYPE ACTUALLY BROADCAST
-            # this update (broadcast_height, computed above - ellipsoidal
-            # by default, or orthometric if broadcast_height_type ==
-            # 'orthometric') - the value actually written to
-            # settings.conf/RTCM. 'height_ellipsoidal' and 'height_msl' are
-            # both always recorded alongside it (regardless of which was
-            # broadcast) for audit purposes, so it is always possible to
-            # tell after the fact which height type a given update
-            # actually sent, and what the other one would have been. The
+            # position['height'] holds the height ACTUALLY BROADCAST this
+            # update (broadcast_height, Step 8 above - ALWAYS ellipsoidal,
+            # see that step's comment) - the value actually written to
+            # settings.conf/RTCM. 'height_ellipsoidal' is the same value,
+            # kept as an explicitly-named duplicate so a consumer never has
+            # to assume what 'height' means; 'height_msl' (BGR2005 normal
+            # height, display/report only, never broadcast) is recorded
+            # alongside it whenever the geoid model could compute it. The
             # raw ITRF2020 estimate is likewise kept for display/
             # diagnostics only, never re-broadcast.
             position = {
                 'lat': float(bgs2005['lat_dd']),
                 'lon': float(bgs2005['lon_dd']),
-                'height': float(broadcast_height),  # ACTUALLY BROADCAST this update - orthometric (MSL), or ellipsoidal fallback if no geoid model - see broadcast_height_type
-                'broadcast_height_type': broadcast_height_type,  # 'orthometric' (standard) | 'ellipsoidal' (fallback when no geoid model loaded) - audit trail
-                'height_ellipsoidal': float(bgs2005['height_m']),  # BGS2005 ellipsoidal, always recorded regardless of what was broadcast
-                'height_msl': float(h_ortho) if h_ortho is not None else None,  # orthometric (MSL) of the ITRF2020 estimate, always recorded regardless of what was broadcast
+                'height': float(broadcast_height),  # ACTUALLY BROADCAST - always ellipsoidal (GRS80), see Step 8
+                'broadcast_height_type': broadcast_height_type,  # always 'ellipsoidal' - kept as an explicit audit-trail field, not a runtime choice
+                'height_ellipsoidal': float(bgs2005['height_m']),  # BGS2005 ellipsoidal (GRS80) - identical to 'height' above; named explicitly to avoid ambiguity
+                'height_msl': float(h_ortho) if h_ortho is not None else None,  # BGR2005 normal height - DISPLAY/REPORT ONLY, never broadcast
                 'coordinate_system': 'BGS2005',
                 'itrf2020_lat': float(lat),
                 'itrf2020_lon': float(lon),
@@ -1881,11 +1924,9 @@ class SurveyController:
                 logger.info("✓ SURVEY COMPLETED SUCCESSFULLY")
                 # pos['lat']/lon are the BGS2005-transformed broadcast
                 # coordinate (see _perform_update() Step 7/9), and
-                # pos['height'] is whichever height type was actually
-                # broadcast (pos['broadcast_height_type']) per the АГКК
-                # requirement - orthometric by default, ellipsoidal only as
-                # fallback when no geoid model is available - not the raw
-                # ITRF2020 PPP estimate either way.
+                # pos['height'] is ALWAYS ellipsoidal (GRS80) - see Step 8's
+                # comment for why RTCM broadcast height must never be
+                # geoid-corrected - never the raw ITRF2020 PPP estimate.
                 logger.info(f"Final Position (BGS2005, {pos.get('broadcast_height_type', 'ellipsoidal')} height): "
                             f"{pos['lat']:.8f}°, {pos['lon']:.8f}°, {pos['height']:.3f}m")
                 logger.info(f"Horizontal Accuracy: {std.get('std_h_meters', 0)*1000:.1f}mm")
@@ -1973,9 +2014,8 @@ class SurveyController:
 
         # Auto-apply coordinates if survey is completed but not yet applied.
         # pos['lat']/lon are the BGS2005-transformed broadcast coordinate,
-        # and pos['height'] is whichever height type was actually
-        # broadcast for this survey (pos['broadcast_height_type']) - see
-        # _perform_update()'s Step 7/8/9 - not raw ITRF2020 either way, no
+        # and pos['height'] is ALWAYS ellipsoidal (GRS80) - see
+        # _perform_update()'s Step 8 - not raw ITRF2020 either way, no
         # re-transformation needed here.
         try:
             if status.get('survey_state') == SurveyState.COMPLETED.value and not status.get('applied'):

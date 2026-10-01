@@ -100,7 +100,7 @@
                             {% elif status.survey_state == 'completed' %}
                                 Survey completed successfully
                             {% elif status.survey_state == 'failed' %}
-                                Survey failed - check logs
+                                Survey failed{% if status.last_failure_reason %}: {{ status.last_failure_reason }}{% else %} - check logs{% endif %}
                             {% endif %}
                         </p>
                     </div>
@@ -169,9 +169,24 @@
                             <td><span id="currentLon">{{ "%.8f"|format(status.current_position.lon) }}</span>°</td>
                         </tr>
                         <tr>
-                            <th>Height (MSL):</th>
+                            <th>Elevation h (GRS80 ellipsoidal):</th>
                             <td><span id="currentHeight">{{ "%.3f"|format(status.current_position.height) }}</span> m</td>
                         </tr>
+                        {# GeoMaxima: status.current_position.height is ALWAYS the
+                           ellipsoidal (GRS80) height actually broadcast via RTCM -
+                           see survey_controller.py's _apply_geodetic_position()
+                           Step 6/8. Mislabeled "Height (MSL)" here before this fix,
+                           which was simply wrong regardless of which height type
+                           was actually being broadcast at any given time - this row
+                           and the one below must stay unambiguous per Инструкция №
+                           РД-02-20-25: "h" (ellipsoidal) is a different quantity
+                           from "H" (normal/orthometric height). #}
+                        {% if status.current_position.height_msl is not none %}
+                        <tr>
+                            <th>Normal height H (BGR2005):</th>
+                            <td><span id="currentHeightMsl">{{ "%.3f"|format(status.current_position.height_msl) }}</span> m</td>
+                        </tr>
+                        {% endif %}
                     </table>
                     
                     {% if status.position_std %}
@@ -251,7 +266,7 @@
                         <li>Filtering quality epochs (Q=1, ratio ≥3.0, 3D std ≤5cm)</li>
                         <li>Removing outliers using Modified Z-Score (MAD-based)</li>
                         <li>Computing weighted average position (inverse variance weighting)</li>
-                        <li>Applying geoid correction for orthometric height (MSL)</li>
+                        <li>Computing normal height H (BGR2005 geoid) for display/reports only - the RTCM broadcast always uses ellipsoidal height h (GRS80)</li>
                         <li>Updating RTKBase configuration hourly</li>
                     </ol>
                     
@@ -486,7 +501,7 @@ $('#btnRestartServices').click(function() {
                 const msg = `✓ Coordinates applied successfully!\n\n` +
                            `Latitude:  ${pos.lat.toFixed(8)}°\n` +
                            `Longitude: ${pos.lon.toFixed(8)}°\n` +
-                           `Height:    ${pos.height.toFixed(3)} m\n\n` +
+                           `Elevation h (GRS80 ellipsoidal): ${pos.height.toFixed(3)} m\n\n` +
                            `Services restarted: ${data.services_restarted ? 'Yes' : 'No'}`;
                 alert(msg);
                 location.reload();
