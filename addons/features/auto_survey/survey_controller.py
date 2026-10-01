@@ -336,7 +336,161 @@ class SurveyController:
         except Exception as e:
             logger.error(f"Failed to enable file logging: {e}")
             return False
-    
+
+    # Raw log must have grown within this many seconds to count as "alive" -
+    # str2str_file.service can stay systemd-active while the receiver has
+    # stopped sending data entirely (cable unplugged, receiver power loss,
+    # serial port wedged), which `systemctl is-active` alone cannot detect.
+    FILE_LOGGING_STALE_SECONDS = 180
+
+    # After this many consecutive restart attempts (success OR failure - a
+    # receiver that keeps dropping and reconnecting is a real problem even
+    # if each individual restart technically "succeeds"), stop backing off
+    # silently and raise a clear, persistent incident instead.
+    FILE_LOGGING_INCIDENT_THRESHOLD = 5
+
+    # Cap on the exponential back-off between restart attempts. Raw GNSS
+    # data IS the entire point of a running survey - once a receiver is
+    # re-plugged/powered back on, waiting up to an hour for the next retry
+    # (the original cap) would needlessly stall data collection; 10 minutes
+    # still comfortably avoids a restart storm while staying short enough
+    # that a human re-plugging a cable sees it recovered quickly.
+    FILE_LOGGING_BACKOFF_CAP_SECONDS = 600
+
+    def _is_file_logging_alive(self) -> Tuple[bool, str]:
+        """
+        True only if str2str_file.service is BOTH systemd-active AND its
+        raw log file has grown within FILE_LOGGING_STALE_SECONDS. Returns
+        (alive, detail) - detail explains which check failed, for logging/
+        the UI, never raises (a failure to even check counts as not alive,
+        so a transient inspection error doesn't mask a real outage).
+        """
+        try:
+            result = subprocess.run(
+                ['systemctl', 'is-active', 'str2str_file.service'],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                return False, f"systemctl is-active: {result.stdout.strip() or 'inactive'}"
+        except Exception as e:
+            return False, f"systemctl is-active check failed: {e}"
+
+        try:
+            raw_file = self.rtkbase.get_data_file()
+            if raw_file is None or not raw_file.exists():
+                return False, "no raw log file found"
+            age = time.time() - raw_file.stat().st_mtime
+            if age > self.FILE_LOGGING_STALE_SECONDS:
+                return False, (f"service active but raw log {raw_file.name} has not grown in "
+                               f"{age:.0f}s (receiver may have stopped sending data)")
+        except Exception as e:
+            return False, f"raw log liveness check failed: {e}"
+
+        return True, ""
+
+    def _check_file_logging_health(self) -> None:
+        """
+        Periodic health check for str2str_file.service while this survey
+        OWNS it (file_service_owned - see _ensure_file_logging()). Checks
+        BOTH that the service is active AND that the raw log is actually
+        growing (see _is_file_logging_alive()) - "active but not writing"
+        (receiver stopped sending, service itself still up) is otherwise
+        invisible to a plain `systemctl is-active` check.
+
+        _ensure_file_logging() only ran once, at survey start - nothing
+        re-checked the service for the rest of a 24h survey, so a crash
+        mid-survey went unnoticed and the raw log simply stopped growing
+        until the survey's own update-timeout eventually fired for an
+        unrelated-looking reason. ONE owner rule: Watchdog explicitly
+        never restarts a disabled service (see ServiceMonitor), and
+        str2str_file.service is never in Watchdog's default monitored
+        list - so when this survey owns the service, nothing else will
+        ever restart it; this method is that owner's health check. When
+        the survey does NOT own it (file_service_owned is False - either
+        logging was already active before start_survey(), or this
+        survey's own attempt to start it never succeeded), this method
+        does nothing: whoever actually owns the service is responsible
+        for it, not this survey.
+
+        Restart storm protection: a hardware-level problem (receiver
+        unplugged, serial device gone) would otherwise get a fresh
+        `systemctl start` call every single check interval forever. Back
+        off exponentially between attempts (base interval doubled per
+        consecutive failure, capped), and once
+        FILE_LOGGING_INCIDENT_THRESHOLD consecutive restarts have been
+        needed, raise a persistent incident
+        (state.record_file_logging_incident() - a dedicated field, kept
+        separate from record_update_failure()'s own failure tracking, see
+        the comment at that call below) while still continuing to retry at
+        the capped backed-off interval rather than giving up entirely - a
+        receiver that comes back after 20 minutes should still get picked
+        back up automatically.
+
+        The consecutive-failure counter is state (persisted to disk, see
+        StateManager.record_file_logging_restart()), not an in-process
+        variable, so back-off and the incident threshold both survive an
+        app restart mid-survey (e.g. an OTA update restarting
+        rtkbase_web.service) exactly like every other piece of survey
+        progress already does.
+
+        Never raises; failures here must not take down the survey loop.
+        """
+        if not self.state.get_file_service_owned():
+            return
+
+        try:
+            alive, detail = self._is_file_logging_alive()
+            if alive:
+                self.state.record_file_logging_healthy()
+                return
+
+            failures_so_far = self.state.get_status().get('file_logging_consecutive_failures', 0)
+            backoff_seconds = min(
+                self.FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS * (2 ** failures_so_far),
+                self.FILE_LOGGING_BACKOFF_CAP_SECONDS
+            )
+            last_restart = self.state.get_status().get('file_logging_last_restart')
+            if last_restart:
+                since_last = (datetime.utcnow() - datetime.fromisoformat(last_restart['timestamp'])).total_seconds()
+                if since_last < backoff_seconds:
+                    logger.debug(f"_check_file_logging_health: {detail} - backing off, "
+                                f"next attempt in {backoff_seconds - since_last:.0f}s "
+                                f"(consecutive failures: {failures_so_far})")
+                    return
+
+            logger.warning(f"str2str_file.service (owned by this survey) is not healthy: {detail} - "
+                           f"attempting restart (consecutive failures so far: {failures_so_far})")
+            restart = subprocess.run(
+                ['systemctl', 'start', 'str2str_file.service'],
+                capture_output=True, text=True
+            )
+            if restart.returncode == 0:
+                self.state.record_file_logging_restart(success=True, detail=f"systemctl start succeeded ({detail})")
+            else:
+                self.state.record_file_logging_restart(
+                    success=False, detail=restart.stderr.strip() or f"systemctl start failed ({detail})")
+
+            new_failure_count = self.state.get_status().get('file_logging_consecutive_failures', 0)
+            if new_failure_count >= self.FILE_LOGGING_INCIDENT_THRESHOLD:
+                # Deliberately NOT record_update_failure(): that field feeds
+                # the survey-wide hard-timeout's displayed failure reason
+                # (last_failure_reason) and a SEPARATE, position-update
+                # consecutive_failures counter - conflating a raw-logging
+                # incident with those would both corrupt an unrelated
+                # counter and show a misleading reason if the real timeout
+                # ever fires for a different cause later. This incident
+                # lives entirely in its own field
+                # (file_logging_incident_active, surfaced on the Autosurvey
+                # page same as file_logging_last_restart), and retries
+                # continue at the capped backed-off interval regardless -
+                # raising it is visibility, not a stop condition.
+                self.state.record_file_logging_incident(
+                    f"{new_failure_count} consecutive restart attempts needed. "
+                    f"Check the receiver connection. Last: {detail}"
+                )
+        except Exception as e:
+            logger.error(f"_check_file_logging_health: unexpected error: {e}", exc_info=True)
+
     def _stop_file_logging(self, reason: str = "unknown") -> bool:
         """
         Stop RTKBase file logging service to prevent disk space issues
@@ -659,6 +813,8 @@ class SurveyController:
             logger.info("Progressive updates: 15min (0-6h) → 1h (6-24h) → final (24h)")
             logger.info(f"Using RINEX conversion workflow (RTKBase raw logs → RINEX → PPP-static, tier={self.ppp_tier})")
 
+        last_file_logging_check = datetime.min
+
         try:
             while self._running:
                 # Stop doing work if state is not RUNNING (e.g., paused/reset from UI)
@@ -668,6 +824,15 @@ class SurveyController:
 
                 now = datetime.utcnow()
                 elapsed_hours = (now - start_time).total_seconds() / 3600
+
+                # str2str_file.service crash check (only acts if this survey
+                # owns the service - see _check_file_logging_health()'s
+                # docstring). Gated to once per
+                # FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS, not every 10s
+                # tick, to avoid polling systemctl needlessly.
+                if (now - last_file_logging_check).total_seconds() >= self.FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS:
+                    self._check_file_logging_health()
+                    last_file_logging_check = now
 
                 # Hard timeout: fail if no successful update for too long.
                 # PPP-AR mode uses PPP_AR_UPDATE_TIMEOUT_MINUTES instead of
@@ -882,6 +1047,13 @@ class SurveyController:
     # slot (target_hours) is handled separately by _finalize_survey(),
     # never by this interim schedule.
     PPP_AR_SLOT_INTERVAL_HOURS = 4.0
+
+    # How often _survey_loop() re-checks str2str_file.service's health (one
+    # `systemctl is-active` call) while this survey owns it - the loop
+    # itself ticks every 10s, but polling systemctl that often for a
+    # service that essentially never needs attention is wasteful; a crash
+    # is just as recoverable checked once a minute.
+    FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS = 60
 
     # Hard-timeout threshold (minutes) used INSTEAD OF
     # update_timeout_minutes when self.ppp_ar_enabled - the normal

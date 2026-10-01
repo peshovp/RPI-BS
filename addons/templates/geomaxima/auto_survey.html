@@ -249,6 +249,39 @@
                 </small>
             </div>
             {% endif %}
+
+            {# GeoMaxima: str2str_file.service (raw GNSS logging) is owned by
+               this survey (file_service_owned) while it runs - Watchdog never
+               touches it (see ServiceMonitor). If it crashes mid-survey, the
+               survey's own periodic check (_check_file_logging_health())
+               restarts it and records the attempt here. #}
+            {% if status.file_logging_incident_active %}
+            <div class="alert alert-danger mt-3">
+                <small>
+                    <i class="fas fa-exclamation-circle"></i>
+                    <strong>Raw GNSS logging keeps failing</strong> - the receiver connection likely
+                    needs attention. Retries continue automatically at an increasing interval.<br>
+                    <span class="text-muted">
+                        Since {{ status.file_logging_incident_active.since }} -
+                        last attempt {{ status.file_logging_incident_active.last_updated }}:
+                        {{ status.file_logging_incident_active.last_detail }}
+                    </span>
+                </small>
+            </div>
+            {% elif status.file_logging_last_restart %}
+            <div class="alert {{ 'alert-warning' if status.file_logging_last_restart.success else 'alert-danger' }} mt-3">
+                <small>
+                    <i class="fas fa-exclamation-triangle"></i>
+                    File logging (<code>str2str_file.service</code>) crashed during this survey and
+                    {% if status.file_logging_last_restart.success %}
+                        was automatically restarted.
+                    {% else %}
+                        <strong>could not be restarted</strong> - raw data logging may be stopped.
+                    {% endif %}<br>
+                    <span class="text-muted">{{ status.file_logging_last_restart.timestamp }} - {{ status.file_logging_last_restart.detail }}</span>
+                </small>
+            </div>
+            {% endif %}
         </div>
     </div>
     

@@ -244,6 +244,75 @@ class StateManager:
         """Whether this survey session started str2str_file.service"""
         return bool(self._state.get('file_service_owned', False))
 
+    def record_file_logging_restart(self, success: bool, detail: str = "") -> bool:
+        """
+        Record a periodic-health-check-triggered restart attempt of
+        str2str_file.service (only called while this survey OWNS that
+        service - see SurveyController._check_file_logging_health()).
+
+        Surfaced on the Autosurvey page via get_status()'s
+        'file_logging_last_restart' field (a single dict: the most recent
+        attempt only - this is a crash-recovery signal for the operator to
+        notice, not a full audit log; addons/features/watchdog's own
+        incident log is a separate, general-purpose facility for that).
+
+        file_logging_consecutive_failures counts restart attempts that were
+        needed at all (both successful and failed ones - a receiver that
+        keeps dropping out is a real problem worth flagging even if each
+        individual restart "succeeds"), and is the input to
+        SurveyController's back-off/incident-threshold logic. It is
+        persisted to disk (this is a plain dict write, same as every other
+        _state field - see save_state()), so it survives an app restart
+        mid-survey, not just an in-process retry loop.
+        """
+        self._state['file_logging_last_restart'] = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'success': bool(success),
+            'detail': detail,
+        }
+        self._state['file_logging_consecutive_failures'] = self._state.get('file_logging_consecutive_failures', 0) + 1
+        logger.warning(f"str2str_file.service crashed during survey and restart "
+                       f"{'succeeded' if success else 'FAILED'}: {detail} "
+                       f"(consecutive failure count: {self._state['file_logging_consecutive_failures']})")
+        return self.save_state()
+
+    def record_file_logging_healthy(self) -> bool:
+        """
+        Reset the consecutive-failure counter and clear any active incident
+        once str2str_file.service is confirmed healthy again (active AND
+        the raw log is actively growing) - called by SurveyController.
+        _check_file_logging_health() on every check that finds no problem,
+        so an old crash doesn't keep counting toward the incident
+        threshold forever, and a resolved incident stops being shown.
+        """
+        if self._state.get('file_logging_consecutive_failures', 0) == 0 \
+                and self._state.get('file_logging_incident_active') is None:
+            return True  # nothing to reset - avoid a disk write on every healthy check
+        self._state['file_logging_consecutive_failures'] = 0
+        self._state['file_logging_incident_active'] = None
+        return self.save_state()
+
+    def record_file_logging_incident(self, detail: str) -> bool:
+        """
+        Raise (or refresh) a persistent "raw logging keeps failing"
+        incident - deliberately separate from record_update_failure()'s
+        last_failure_reason/consecutive_failures (see
+        SurveyController._check_file_logging_health()'s comment for why
+        conflating the two would be wrong). Cleared automatically by
+        record_file_logging_healthy() once the service recovers. Surfaced
+        on the Autosurvey page via get_status()'s
+        'file_logging_incident_active' field.
+        """
+        existing = self._state.get('file_logging_incident_active')
+        since = existing['since'] if existing else datetime.utcnow().isoformat()
+        self._state['file_logging_incident_active'] = {
+            'since': since,
+            'last_detail': detail,
+            'last_updated': datetime.utcnow().isoformat(),
+        }
+        logger.error(f"Raw GNSS logging incident: {detail}")
+        return self.save_state()
+
     def get_ppp_ar_completed_slots(self) -> list:
         """
         Fixed PPP-AR interim slot_hours values already ATTEMPTED this
