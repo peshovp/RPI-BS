@@ -260,6 +260,22 @@ def _ecef_to_geodetic(x: float, y: float, z: float) -> Dict[str, float]:
 # total-ish counters) are not otherwise parsed here, only the two percent
 # values, which are what _run_ppp_ar()'s fix-rate threshold check (in
 # survey_controller.py) actually consumes.
+#
+# MULTI-CONSTELLATION CAVEAT (Part 9, confirmed by reading arsig.f90
+# directly): this EXACT literal prefix, "mGWide/Narrow-lane FR(ind): ",
+# is printed TWICE when QZSS is in use - once for QZSS's own per-
+# constellation fix rate (`if (ACF%ntot_J .ne. 0) write(...)`), and once,
+# unconditionally and ALWAYS LAST, for the true COMBINED multi-GNSS
+# aggregate the 90% gate is actually meant to check
+# (`write(*,...) QN%nfix, QN%indp, ACF%ntot_ind, ...` right after the
+# QZSS block, with no gating condition). A naive first-match .search()
+# would silently grab QZSS's own fix rate instead of the combined one
+# whenever QZSS satellites are present - see _parse_fix_rate_line(),
+# which takes the LAST match for exactly this reason. Low real-world
+# risk for this project specifically (QZSS, a Japan-regional system, is
+# not normally visible from Bulgaria/BGS2005 operations) but a genuine,
+# confirmed-from-source latent bug regardless of how often it would
+# actually trigger.
 _FIX_RATE_LINE_RE = re.compile(
     r'Wide/Narrow-lane\s+FR\(ind\):\s*\d+\s+\d+\s+\d+\s+'
     r'([\d.]+)%\s+([\d.]+)%',
@@ -970,8 +986,13 @@ def _parse_fix_rate_line(stdout: str) -> Dict[str, Optional[float]]:
         (not an error; callers must treat None as "fix rate unknown for
         this run", not as 0%).
     """
-    match = _FIX_RATE_LINE_RE.search(stdout)
-    if not match:
+    # LAST match, not first - see _FIX_RATE_LINE_RE's own comment: the
+    # true combined multi-GNSS aggregate line is always printed LAST,
+    # after QZSS's own identically-prefixed per-constellation line (when
+    # QZSS is in use at all) - taking the first match would silently
+    # return QZSS's fix rate instead of the combined one in that case.
+    matches = list(_FIX_RATE_LINE_RE.finditer(stdout))
+    if not matches:
         logger.warning(
             "Could not find PRIDE-PPPAR's 'Wide/Narrow-lane FR(ind)' fix-"
             "rate line in pdp3 stdout - wl_fix_rate/nl_fix_rate will be "
@@ -979,6 +1000,14 @@ def _parse_fix_rate_line(stdout: str) -> Dict[str, Optional[float]]:
         )
         return {'wl_fix_rate': None, 'nl_fix_rate': None}
 
+    if len(matches) > 1:
+        logger.info(
+            f"_parse_fix_rate_line: {len(matches)} 'Wide/Narrow-lane FR(ind)' "
+            f"lines found in stdout (QZSS in use) - using the LAST one (the "
+            f"combined multi-GNSS aggregate, not QZSS's own per-constellation line)."
+        )
+
+    match = matches[-1]
     return {
         'wl_fix_rate': float(match.group(1)),
         'nl_fix_rate': float(match.group(2)),

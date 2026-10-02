@@ -657,8 +657,9 @@ class SurveyController:
                 update, to stay within this station's RAM budget) via
                 _run_ppp_ar(); its result replaces the rnx2rtkp broadcast
                 position only if its wide-lane/narrow-lane fix rates clear
-                PPP_AR_MIN_FIX_RATE_PERCENT, otherwise the existing
-                rnx2rtkp result is used unchanged (never a hard failure).
+                PPP_AR_MIN_WL_FIX_RATE_PERCENT/PPP_AR_MIN_NL_FIX_RATE_PERCENT,
+                otherwise the existing rnx2rtkp result is used unchanged
+                (never a hard failure).
 
         Returns:
             True if started successfully
@@ -1161,7 +1162,18 @@ class SurveyController:
     # wl_fix_rate/nl_fix_rate distributions from actual BaseStation PPP-AR
     # runs. Revisit once real fix-rate data has been logged from live
     # finalize-time PPP-AR runs (see _run_ppp_ar()'s logging below).
-    PPP_AR_MIN_FIX_RATE_PERCENT = 90.0
+    #
+    # Part 9: split into two SEPARATE named constants (wide-lane vs
+    # narrow-lane) instead of one shared PPP_AR_MIN_FIX_RATE_PERCENT -
+    # both still 90.0 (the value itself is UNCHANGED, per explicit
+    # instruction), but WL and NL fix rates are not the same quantity
+    # (narrow-lane resolution is strictly harder and typically converges
+    # slower than wide-lane - see pride_pppar_processor.py's AR FIX RATE
+    # section), so a future recalibration of one independently of the
+    # other no longer requires touching a name that implies they're
+    # always the same threshold.
+    PPP_AR_MIN_WL_FIX_RATE_PERCENT = 90.0
+    PPP_AR_MIN_NL_FIX_RATE_PERCENT = 90.0
 
     # Fixed PPP-AR interim slot interval (hours) - 0h, 4h, 8h, ... up to
     # (but excluding) target_hours, per Pesho's explicit "fixed absolute
@@ -2230,16 +2242,80 @@ class SurveyController:
     def _ppp_ar_fix_rate_ok(self, ppp_ar_result: Dict) -> bool:
         """
         Whether a PRIDE-PPPAR result's wide-lane/narrow-lane fix rates
-        both clear PPP_AR_MIN_FIX_RATE_PERCENT - shared threshold check
-        used by both _run_ppp_ar_interim() and _finalize_survey().
+        both clear their respective PPP_AR_MIN_WL_FIX_RATE_PERCENT /
+        PPP_AR_MIN_NL_FIX_RATE_PERCENT thresholds - shared check used by
+        both _run_ppp_ar_interim() and _finalize_survey().
+
+        wl_fix_rate/nl_fix_rate come from _parse_fix_rate_line()'s
+        combined multi-GNSS aggregate stdout line, now confirmed
+        (Part 9) to correctly take the LAST such line rather than the
+        first, which matters specifically for multi-constellation AR
+        (QZSS prints an identically-prefixed line of its own before the
+        true aggregate - see that function's own comment).
+
+        Part 9 reconciliation: also cross-checks these percentages
+        against Part 5's amb_fixing (cst_* T/W/N) data, when available,
+        as a sanity check that the two independent parses of pdp3's
+        output agree - cst_file's 'combined' dict carries the SAME
+        underlying counts (total/wide_fixed/narrow_fixed) the stdout
+        line's percentages are themselves computed from (see arsig.f90:
+        wl_pct = wide_fixed/total*100, nl_pct = narrow_fixed/wide_fixed*100),
+        so a mismatch here would mean one of the two parsers has a bug,
+        not a real AR discrepancy. Logged, AND recorded into
+        ppp_ar_result['fix_rate_mismatch'] (mutated in place - this
+        method's caller holds the same dict reference and passes it on
+        to _log_ppp_ar_attempt()/_build_ppp_ar_attempt_record(), so the
+        mismatch shows up in that attempt's persisted Part 5 record and
+        on the Autosurvey page) - but NEVER itself gates the accept/
+        reject decision (that stays wl_fix_rate/nl_fix_rate from the
+        stdout line, unchanged) - amb_fixing can legitimately be absent
+        (AR not attempted this run) when wl_fix_rate/nl_fix_rate still
+        exist from the stdout line, so it is corroborating evidence
+        only, not a second independent gate.
         """
         wl = ppp_ar_result.get('wl_fix_rate')
         nl = ppp_ar_result.get('nl_fix_rate')
-        return (
+        ok = (
             wl is not None and nl is not None and
-            wl >= self.PPP_AR_MIN_FIX_RATE_PERCENT and
-            nl >= self.PPP_AR_MIN_FIX_RATE_PERCENT
+            wl >= self.PPP_AR_MIN_WL_FIX_RATE_PERCENT and
+            nl >= self.PPP_AR_MIN_NL_FIX_RATE_PERCENT
         )
+
+        reconciliation = ""
+        amb_fixing = ppp_ar_result.get('amb_fixing')
+        combined = amb_fixing.get('combined') if amb_fixing else None
+        if combined and combined.get('total'):
+            total, wide_fixed, narrow_fixed = combined['total'], combined['wide_fixed'], combined['narrow_fixed']
+            cst_wl_pct = wide_fixed * 100.0 / total
+            cst_nl_pct = (narrow_fixed * 100.0 / wide_fixed) if wide_fixed else 0.0
+            reconciliation = (
+                f" | cst_* cross-check: T={total} W={wide_fixed} N={narrow_fixed} "
+                f"-> wl={cst_wl_pct:.1f}% nl={cst_nl_pct:.1f}%"
+            )
+            if wl is not None and nl is not None and \
+               (abs(cst_wl_pct - wl) > 0.1 or abs(cst_nl_pct - nl) > 0.1):
+                logger.warning(
+                    f"_ppp_ar_fix_rate_ok: stdout fix rate (wl={wl}%, nl={nl}%) "
+                    f"disagrees with cst_* file's own counts (wl={cst_wl_pct:.1f}%, "
+                    f"nl={cst_nl_pct:.1f}%) by more than 0.1% - one of the two "
+                    f"parsers likely has a bug (see this method's docstring); "
+                    f"the stdout-derived values are still what gates this decision."
+                )
+                ppp_ar_result['fix_rate_mismatch'] = {
+                    'stdout_wl_fix_rate': wl,
+                    'stdout_nl_fix_rate': nl,
+                    'cst_wl_fix_rate': cst_wl_pct,
+                    'cst_nl_fix_rate': cst_nl_pct,
+                }
+
+        logger.info(
+            f"_ppp_ar_fix_rate_ok: wl={wl if wl is not None else 'n/a'}% "
+            f"(need >= {self.PPP_AR_MIN_WL_FIX_RATE_PERCENT}%), "
+            f"nl={nl if nl is not None else 'n/a'}% "
+            f"(need >= {self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) -> "
+            f"{'OK' if ok else 'BELOW THRESHOLD'}{reconciliation}"
+        )
+        return ok
 
     def _ppp_ar_extra_position_fields(self, ppp_ar_result: Dict) -> Dict:
         """
@@ -2264,6 +2340,7 @@ class SurveyController:
                 'last_epoch': ppp_ar_result['processed_window']['last_epoch'].isoformat(),
                 'processed_minutes': ppp_ar_result['processed_window']['processed_minutes'],
             } if ppp_ar_result.get('processed_window') is not None else None),
+            'ar_fix_rate_mismatch': ppp_ar_result.get('fix_rate_mismatch'),
         }
 
     def _log_ppp_ar_attempt(self, slot_label: str, result: str, reason: str,
@@ -2373,6 +2450,7 @@ class SurveyController:
             'nl_fix_rate': None,
             'sig0': None,
             'obs_duration_minutes': None,
+            'fix_rate_mismatch': None,
         }
         if ppp_ar_result is None:
             return record
@@ -2410,6 +2488,13 @@ class SurveyController:
             'nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
             'sig0': ppp_ar_result.get('sig0'),
             'obs_duration_minutes': obs_duration_minutes,
+            # Part 9: set by _ppp_ar_fix_rate_ok() (mutates ppp_ar_result
+            # in place) when the stdout fix rate disagrees with cst_*'s
+            # own T/W/N-computed percentages by more than 0.1% - a parser
+            # bug signal, never itself a reason this attempt was
+            # accepted/rejected. None when the two agree (or cst_* data
+            # wasn't available to compare against at all).
+            'fix_rate_mismatch': ppp_ar_result.get('fix_rate_mismatch'),
         })
         return record
 
@@ -2425,7 +2510,8 @@ class SurveyController:
         schedule (_survey_loop(), when self.ppp_ar_enabled) - the
         PRIDE-PPPAR analogue of _perform_interim_update()/_perform_update(),
         but using _run_ppp_ar() instead of rnx2rtkp/CDDIS, and applied only
-        if the fix rate clears PPP_AR_MIN_FIX_RATE_PERCENT.
+        if the fix rate clears PPP_AR_MIN_WL_FIX_RATE_PERCENT/
+        PPP_AR_MIN_NL_FIX_RATE_PERCENT.
 
         Never raises. This method itself does not retry - _survey_loop()
         (the caller) wraps this call in a small, bounded retry loop
@@ -2467,9 +2553,10 @@ class SurveyController:
         if not self._ppp_ar_fix_rate_ok(ppp_ar_result):
             logger.info(
                 f"PPP-AR interim slot={slot_hours}h: fix rate below threshold "
-                f"(WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                f"(WL={ppp_ar_result.get('wl_fix_rate')}%, need >= "
+                f"{self.PPP_AR_MIN_WL_FIX_RATE_PERCENT}%; "
                 f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
-                f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - skipping this slot"
+                f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) - skipping this slot"
             )
             self._log_ppp_ar_attempt(slot_label, "SKIPPED", "fix rate below threshold", ppp_ar_result)
             return False
@@ -2540,7 +2627,8 @@ class SurveyController:
         overwritten afterward (that was the OLD behavior, before this was
         made a full architectural switch rather than an overlay). Only
         _run_ppp_ar() runs, and only if its wide-lane/narrow-lane fix
-        rates both clear PPP_AR_MIN_FIX_RATE_PERCENT is its result applied
+        rates clear PPP_AR_MIN_WL_FIX_RATE_PERCENT/
+        PPP_AR_MIN_NL_FIX_RATE_PERCENT is its result applied
         via _apply_geodetic_position() (the same shared broadcast/state
         pipeline _perform_update() uses). If PRIDE-PPPAR is unavailable,
         fails, or its fix rate doesn't clear the threshold, this survey's
@@ -2576,9 +2664,10 @@ class SurveyController:
                     elif not self._ppp_ar_fix_rate_ok(ppp_ar_result):
                         logger.warning(
                             f"PPP-AR final run: fix rate below threshold "
-                            f"(WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                            f"(WL={ppp_ar_result.get('wl_fix_rate')}%, need >= "
+                            f"{self.PPP_AR_MIN_WL_FIX_RATE_PERCENT}%; "
                             f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
-                            f"{self.PPP_AR_MIN_FIX_RATE_PERCENT}%) - no final update this run"
+                            f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) - no final update this run"
                         )
                         self._log_ppp_ar_attempt("final", "SKIPPED", "fix rate below threshold", ppp_ar_result)
                     else:

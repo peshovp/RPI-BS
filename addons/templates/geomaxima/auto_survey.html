@@ -368,6 +368,12 @@
                                 <td>
                                     {{ "%.1f"|format(a.wl_fix_rate) if a.wl_fix_rate is not none else 'n/a' }}% /
                                     {{ "%.1f"|format(a.nl_fix_rate) if a.nl_fix_rate is not none else 'n/a' }}%
+                                    {% if a.fix_rate_mismatch %}
+                                    <br><small class="text-danger" title="stdout fix rate disagrees with cst_* file's own T/W/N-computed percentages by more than 0.1% - likely a parser bug, not a real AR discrepancy">
+                                        <i class="fas fa-exclamation-triangle"></i> mismatch vs cst_*:
+                                        {{ "%.1f"|format(a.fix_rate_mismatch.cst_wl_fix_rate) }}% / {{ "%.1f"|format(a.fix_rate_mismatch.cst_nl_fix_rate) }}%
+                                    </small>
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
