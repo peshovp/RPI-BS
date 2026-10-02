@@ -94,6 +94,47 @@ class RTKBaseConfig:
             'firmware': self.config.get('main', 'receiver_firmware', fallback=''),
             'antenna': self.config.get('main', 'antenna_info', fallback=''),
         }
+
+    def get_antenna_arp_offset(self) -> Dict[str, float]:
+        """
+        GeoMaxima Part 6a: the per-station Antenna Reference Point (ARP)
+        offset from the survey marker, read from settings.conf's
+        antenna_arp_height_m/antenna_arp_east_m/antenna_arp_north_m keys
+        (added to settings.conf.default so the OTA settings merge brings
+        them to every existing station - see RTKBaseConfigManager.
+        merge_default_and_user()).
+
+        This offset is used ONLY to recover the marker position for
+        reports/RTCM 1006 from a PPP/PPP-AR result that is itself
+        computed AT THE ARP - never to adjust the RTCM 1005/1006
+        broadcast position itself, which IS the ARP by definition (see
+        survey_controller.py's _apply_geodetic_position() Step 6/8
+        comment, and ppp_processor.py's/pride_pppar_processor.py's own
+        "always process at the ARP, zero delta" convention).
+
+        All three default to 0.0 (marker and ARP coincide - no offset
+        configured/measured yet) via settings.conf.default, so a station
+        that hasn't been through the new antenna-setup UI step still
+        gets a well-defined, harmless value rather than a missing key.
+
+        Returns:
+            {'height_m': .., 'east_m': .., 'north_m': ..} - all floats.
+            Falls back to 0.0 for any key that's missing or unparseable
+            (logged as a warning) rather than raising - a malformed
+            settings.conf value must not block a survey update.
+        """
+        result = {}
+        for key, field in (('antenna_arp_height_m', 'height_m'),
+                           ('antenna_arp_east_m', 'east_m'),
+                           ('antenna_arp_north_m', 'north_m')):
+            raw = self.config.get('main', key, fallback='0.0').strip("'\" ")
+            try:
+                result[field] = float(raw)
+            except ValueError:
+                logger.warning(f"get_antenna_arp_offset: could not parse {key}={raw!r} as a "
+                               f"float - using 0.0")
+                result[field] = 0.0
+        return result
     
     def get_com_port(self) -> Tuple[str, str]:
         """

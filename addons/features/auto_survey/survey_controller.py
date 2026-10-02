@@ -39,12 +39,12 @@ import requests
 from .rtkbase_config import RTKBaseConfig
 from .runtime_paths import GM_RUNTIME_DIR
 from .rinex_converter import RINEXConverter
-from .ppp_processor import PPPProcessor
+from .ppp_processor import PPPProcessor, antenna_type_in_antex
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
 from .pride_pppar_processor import (
     PridePpparProcessor, Pdp3NotFoundError, check_processed_window_coverage,
 )
-from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef
+from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef, arp_to_marker, verify_arp_to_marker_offset
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
 from .config_manager import ConfigManager
@@ -1244,6 +1244,63 @@ class SurveyController:
     # step and _protect_ppp_ar_dirs()/_unprotect_ppp_ar_dir().
     PROTECTED_SLOT_MARKER = '.protected'
 
+    def _resolve_antenna_calibration(self) -> Dict:
+        """
+        Part 6a: resolve this station's antenna_info (settings.conf)
+        against the ANTEX file currently in use (igs20.atx by default,
+        or Part 6b's custom one), shared by both PPP backends
+        (_perform_update()'s rnx2rtkp path and _run_ppp_ar()'s
+        PRIDE-PPPAR path) so they can never disagree on calibration
+        status for the same physical antenna.
+
+        antenna_calibrated is DERIVED, never a separate manually-set
+        config key (per explicit instruction) - "ADVNULLANTENNA", empty,
+        or any string not found verbatim as a TYPE/SERIAL NO record in
+        the ANTEX file all mean uncalibrated. This also means a station
+        whose antenna_info is wrong/stale (e.g. still the settings.conf.
+        default placeholder) is automatically treated as uncalibrated,
+        not silently given a calibration that doesn't exist.
+
+        Returns: {
+            'antenna_type': the configured antenna_info string, as-is
+                (not normalized - ANTEX matching is column-exact, so the
+                caller passing this straight to _generate_ppp_conf()/
+                convbin -ha needs the exact configured string, not a
+                "cleaned up" one that might no longer match),
+            'antenna_calibrated': bool,
+            'antex_path': the ANTEX file path actually checked against,
+            'arp_offset': RTKBaseConfig.get_antenna_arp_offset()'s own
+                dict ({'height_m', 'east_m', 'north_m'}) - included here
+                too since callers resolving antenna calibration
+                virtually always also need the ARP offset in the same
+                place (both feed the same "process/report at the ARP"
+                pipeline).
+        }
+
+        Never raises - an ANTEX read failure is treated as "cannot
+        verify -> uncalibrated" (see antenna_type_in_antex()'s own
+        fail-safe default), since a broken/missing ANTEX file must
+        degrade to the safe NONE/uncalibrated path, not block a survey
+        update.
+        """
+        antenna_type = self.rtkbase.get_receiver_info().get('antenna', '')
+        antex_path = self.spp.default_antex_path()
+        calibrated = antenna_type_in_antex(antex_path, antenna_type)
+        if not calibrated and antenna_type and antenna_type != 'ADVNULLANTENNA':
+            logger.warning(
+                f"_resolve_antenna_calibration: configured antenna_info "
+                f"{antenna_type!r} was NOT found in {antex_path} - "
+                f"treating as uncalibrated (PCO/PCV correction unavailable). "
+                f"Verify the exact 20-character IGS/NGS type+radome string, "
+                f"or see Part 6b for adding a custom ANTEX entry."
+            )
+        return {
+            'antenna_type': antenna_type,
+            'antenna_calibrated': calibrated,
+            'antex_path': antex_path,
+            'arp_offset': self.rtkbase.get_antenna_arp_offset(),
+        }
+
     def _apply_geodetic_position(self,
                                   lat: float, lon: float, height: float,
                                   obs_file: Path,
@@ -1498,6 +1555,35 @@ class SurveyController:
                 # _finalize_survey() callers.
                 'ppp_backend': ppp_backend,
             }
+
+            # Part 6a: recover the MARKER position (survey point) from
+            # this ARP-computed broadcast result, for reports/display
+            # ONLY - see arp_to_marker()'s own docstring and bgs2005_
+            # transformer.py's "PART 6a RESOLUTION" comment for why this
+            # never feeds back into the broadcast position itself. A
+            # zero ARP offset (not yet configured/measured, or a genuine
+            # zero-offset antenna mount) makes marker == ARP exactly, so
+            # this is always safe to compute and report even before an
+            # operator has entered a real offset.
+            try:
+                arp_offset = self.rtkbase.get_antenna_arp_offset()
+                marker = arp_to_marker(position['lat'], position['lon'], position['height'], arp_offset)
+                marker_check = verify_arp_to_marker_offset(
+                    position['lat'], position['lon'], position['height'], arp_offset, marker)
+                if not marker_check['ok']:
+                    logger.warning(f"_apply_geodetic_position: ARP-to-marker reconciliation "
+                                   f"check failed: {marker_check['detail']} - marker position "
+                                   f"below may not be trustworthy for reports (broadcast "
+                                   f"position is unaffected - this never touches RTCM).")
+                position['marker_lat'] = marker['lat']
+                position['marker_lon'] = marker['lon']
+                position['marker_height'] = marker['height']
+                position['antenna_arp_offset'] = arp_offset
+            except Exception as e:
+                logger.warning(f"_apply_geodetic_position: failed to compute marker position "
+                               f"from ARP offset: {e} - marker_lat/lon/height omitted from this "
+                               f"update (broadcast position is unaffected)")
+
             if extra_position_fields:
                 position.update(extra_position_fields)
 
@@ -1582,7 +1668,22 @@ class SurveyController:
             run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
             rinex_root = self.work_dir / "rinex"
             rinex_dir = rinex_root / f"slot_{update_label}_{run_id}"
-            rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
+            # Part 6a: populate ANT # / TYPE and REC # / TYPE / VERS in
+            # the RINEX header for completeness/audit trail, even though
+            # rnx2rtkp itself reads ant1-anttype from its own -k conf
+            # (see ppp_processor.py's _generate_ppp_conf()), not this
+            # header - no zero_antenna_delta here, since that same -k
+            # conf's ant1-antdel{e,n,u}=0 already guarantees the ARP-only
+            # processing convention for this path independently of
+            # whatever this header's own delta says.
+            antenna = self._resolve_antenna_calibration()
+            receiver_info = self.rtkbase.get_receiver_info()
+            receiver_hr = f"/{receiver_info.get('model', '')}/{receiver_info.get('firmware', '')}"
+            rinex_result = self.rinex.convert_raw_to_rinex_obs(
+                raw_file, rinex_dir,
+                antenna_type=antenna['antenna_type'] if antenna['antenna_calibrated'] else None,
+                receiver_info=receiver_hr,
+            )
             self._cleanup_old_ppp_ar_slot_dirs(rinex_root, keep_dir=rinex_dir)
 
             if not rinex_result:
@@ -1616,7 +1717,15 @@ class SurveyController:
             logger.info(f"✓ Precise products ready: sp3={sp3_file.name if sp3_file else 'N/A'}, "
                         f"clk={clk_file.name if clk_file else '(none - ultra-rapid, SP3-embedded clocks)'}")
 
-            pos_file = self.spp.process_ppp(obs_file, sp3_file, nav_file=nav_file, clk_file=clk_file)
+            # Part 6a: reuses the SAME antenna calibration resolved at
+            # Step 2 above (for convbin's -ha header population) - never
+            # re-resolved per sub-step, so both halves of this update
+            # (RINEX header, rnx2rtkp -k conf) can never disagree on
+            # whether this station's antenna is calibrated.
+            pos_file = self.spp.process_ppp(
+                obs_file, sp3_file, nav_file=nav_file, clk_file=clk_file,
+                antenna_type=antenna['antenna_type'] if antenna['antenna_calibrated'] else None,
+            )
 
             if not pos_file:
                 logger.error("PPP-static processing failed")
@@ -2143,7 +2252,22 @@ class SurveyController:
 
         logger.debug(f"_run_ppp_ar: raw_files={raw_files}")
 
-        rinex_result = self.rinex.convert_raw_files_to_rinex_obs(raw_files, rinex_dir)
+        # Part 6a: antenna type (ANTEX-verified) + receiver model/firmware
+        # populated into the RINEX header for pdp3, which reads ANT # /
+        # TYPE directly from it (confirmed: pdp3.sh's CheckAntennaInAtx
+        # pre-flight check, and no separate antenna-delta CLI override
+        # exists for pdp3 at all) - zero_antenna_delta=True so pdp3
+        # always processes at the antenna's own ARP, never a stale/wrong
+        # marker-offset value that happened to already be in the header.
+        antenna = self._resolve_antenna_calibration()
+        receiver_info = self.rtkbase.get_receiver_info()
+        receiver_hr = f"/{receiver_info.get('model', '')}/{receiver_info.get('firmware', '')}"
+        rinex_result = self.rinex.convert_raw_files_to_rinex_obs(
+            raw_files, rinex_dir,
+            antenna_type=antenna['antenna_type'] if antenna['antenna_calibrated'] else None,
+            receiver_info=receiver_hr,
+            zero_antenna_delta=True,
+        )
         if not rinex_result:
             logger.warning("_run_ppp_ar: RINEX conversion failed - skipping this run")
             return None
@@ -2841,6 +2965,19 @@ class SurveyController:
             logger.error(f"Auto-apply check failed: {auto_apply_err}")
 
         status['is_running'] = self._running
+
+        # Part 6a: current antenna calibration status, for the Autosurvey
+        # page's uncalibrated-antenna note - resolved fresh on every
+        # status call (cheap: one ANTEX file read) rather than cached,
+        # so a mid-survey antenna_info/ANTEX change is reflected
+        # immediately rather than only at the next update.
+        try:
+            antenna = self._resolve_antenna_calibration()
+            status['antenna_type'] = antenna['antenna_type']
+            status['antenna_calibrated'] = antenna['antenna_calibrated']
+        except Exception as e:
+            logger.warning(f"get_status: failed to resolve antenna calibration: {e}")
+
         return status
 
     def _load_geoid_model(self):

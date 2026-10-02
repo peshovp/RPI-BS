@@ -122,6 +122,15 @@ class RTKBaseConfigManager:
         ordered_main = [{"source_section" : "main"}]
         for key in ("position", "com_port", "com_port_settings", "receiver", "receiver_firmware", "receiver_format", "antenna_info", "tcp_host_addr", "tcp_port", "gnss_rcv_web_ip", "gnss_rcv_web_proxy_port"):
             ordered_main.append({key : self.config.get('main', key).strip("'")})
+        # GeoMaxima Part 6a: APPENDED at the end, not inserted among the
+        # existing keys above - main_settings[N] is accessed by POSITIONAL
+        # index in settings.html (e.g. main_settings[6].antenna_info), so
+        # inserting a new key earlier in the tuple would silently shift
+        # every index after it and break those existing template
+        # references. New fields always go here, at the end, never
+        # mid-tuple.
+        for key in ("antenna_arp_height_m", "antenna_arp_east_m", "antenna_arp_north_m"):
+            ordered_main.append({key : self.config.get('main', key, fallback="0.0").strip("'")})
         return ordered_main
 
     def get_ntrip_A_settings(self):

@@ -242,7 +242,10 @@ pos1-sateph        =precise
 pos2-armode        =off
 file-satantfile    ={satantfile}
 file-rcvantfile    ={rcvantfile}
-ant1-anttype       =NONE
+ant1-anttype       ={anttype}
+ant1-antdele       =0
+ant1-antdeln       =0
+ant1-antdelu       =0
 out-solstatic      =all
 """
 
@@ -257,6 +260,64 @@ class AntexNotFoundError(PPPProcessorError):
     Raised instead of letting rnx2rtkp fail cryptically on a bad/missing
     trailing argument - this points the operator at the actual fix.
     """
+
+
+def antenna_type_in_antex(antex_file: Path, antenna_type: str) -> bool:
+    """
+    GeoMaxima Part 6a: whether antex_file has a TYPE/SERIAL NO record for
+    the given 20-character antenna type (IGS/NGS convention: 16-char
+    antenna name + 4-char radome, space-padded to exactly 20 columns) -
+    the Python equivalent of pdp3.sh's own AntexHasAntenna() bash
+    function (same ANTEX column convention: columns 1-20 are the
+    antenna/radome type, columns 61-76 are the record-type label),
+    ported here rather than shelling out to that script so the rnx2rtkp
+    path (this module) can make the identical calibrated/uncalibrated
+    determination pdp3's own pre-flight check already makes for the
+    PRIDE-PPPAR path.
+
+    This is also what Part 6a's antenna_calibrated status is DERIVED
+    from (no separate manually-set config key - see RTKBaseConfig.
+    get_antenna_arp_offset()'s sibling settings and the UI's own
+    validation) - an antenna_info value that doesn't match a verbatim
+    TYPE/SERIAL NO record in the ANTEX file currently in use (igs20.atx
+    by default, or Part 6b's custom ANTEX once that exists) means
+    "uncalibrated" for all PPP purposes, regardless of what string is
+    configured.
+
+    Args:
+        antex_file: path to the ANTEX file to search (igs20.atx, or a
+            custom one per Part 6b).
+        antenna_type: the 20-character antenna type string to look for -
+            NOT stripped/reformatted here, since ANTEX type matching is
+            column-exact (a caller passing an unpadded/mis-cased string
+            will correctly get False, matching pdp3.sh's own strict
+            `substr($0, 1, 20) == ant` comparison).
+
+    Returns:
+        True if found, False if not found OR if antenna_type is empty/
+        whitespace-only (an empty type can never legitimately match any
+        real ANTEX record) OR if antex_file doesn't exist/can't be read
+        (logged as a warning, not raised - "cannot verify calibration"
+        is treated the same as "not calibrated", the safer assumption).
+    """
+    if not antenna_type or not antenna_type.strip():
+        return False
+    if not antex_file.exists():
+        logger.warning(f"antenna_type_in_antex: ANTEX file not found at {antex_file} - "
+                       f"treating {antenna_type!r} as uncalibrated (cannot verify)")
+        return False
+    try:
+        with open(antex_file, 'r', errors='replace') as f:
+            for line in f:
+                if len(line) < 76:
+                    continue
+                if line[60:76] == 'TYPE / SERIAL NO' and line[0:20] == antenna_type:
+                    return True
+    except Exception as e:
+        logger.warning(f"antenna_type_in_antex: failed to read {antex_file}: {e} - "
+                       f"treating {antenna_type!r} as uncalibrated (cannot verify)")
+        return False
+    return False
 
 
 def _normalize_precise_product_extension(source_path: Path, expected_suffix: str,
@@ -359,7 +420,8 @@ class PPPProcessor:
             )
         return path
 
-    def _generate_ppp_conf(self, antex_path: Path, work_dir: Path) -> Path:
+    def _generate_ppp_conf(self, antex_path: Path, work_dir: Path,
+                           antenna_type: Optional[str] = None) -> Path:
         """
         Write a minimal -k options file (see _PPP_CONF_TEMPLATE) into
         work_dir, with the real ANTEX path filled into file-satantfile/
@@ -368,11 +430,32 @@ class PPPProcessor:
         antenna models (the bundled igs20.atx), not separate files per
         RTKLIB's more general two-file option.
 
-        Also bakes in ant1-anttype=NONE (hardcoded in _PPP_CONF_TEMPLATE,
-        not parameterized here) - required to avoid a hard-blocking "no
-        receiver antenna pcv" failure on this station's uncalibrated
-        antenna hardware; see the module docstring's "NO RECEIVER ANTENNA
-        PCV" section.
+        ant1-anttype (Part 6a): the caller's job to resolve to either a
+        REAL, ANTEX-verified 20-char antenna type (antenna_type_in_antex()
+        confirmed it) or the literal "NONE" fallback (this station's own
+        confirmed-live default before Part 6a - see the module
+        docstring's "NO RECEIVER ANTENNA PCV" section) - this method
+        itself does not look anything up, just writes whatever string it
+        is given. Falls back to "NONE" here only if antenna_type is None/
+        empty, as a defensive default matching the pre-6a behavior.
+
+        ant1-antdel{e,n,u}=0 (Part 6a, ALWAYS, regardless of antenna
+        type/calibration status): RTKLIB's -k conf antenna-delta keys
+        take precedence over whatever the RINEX header's own "ANTENNA:
+        DELTA H/E/N" says (standard RTKLIB convention - "command line
+        options precede options in the configuration file", confirmed
+        elsewhere in this codebase for other flags). Explicitly zeroing
+        them here guarantees the PPP-static position this produces is
+        always the antenna's own ARP (Antenna Reference Point) - with
+        PCO/PCV correction applied when antenna_type is a real, ANTEX-
+        matched calibration, none when it's NONE - never a further,
+        separately-tracked marker offset. Recovering the MARKER position
+        (for reports/RTCM 1006) from this ARP result is done once,
+        downstream, via RTKBaseConfig.get_antenna_arp_offset() - never
+        by touching this delta. See survey_controller.py's
+        _apply_geodetic_position() Step 6/8 comment for the broadcast-
+        side half of this same "always process/broadcast at the ARP"
+        convention.
 
         Returns the path to the generated conf file. NOT automatically
         deleted by this method - see process_ppp()'s cleanup handling for
@@ -382,6 +465,7 @@ class PPPProcessor:
         conf_content = _PPP_CONF_TEMPLATE.format(
             satantfile=str(antex_path),
             rcvantfile=str(antex_path),
+            anttype=antenna_type if antenna_type else "NONE",
         )
         conf_path.write_text(conf_content)
         return conf_path
@@ -392,7 +476,8 @@ class PPPProcessor:
                      nav_file: Optional[Path] = None,
                      clk_file: Optional[Path] = None,
                      antex_file: Optional[Path] = None,
-                     output_file: Optional[Path] = None) -> Optional[Path]:
+                     output_file: Optional[Path] = None,
+                     antenna_type: Optional[str] = None) -> Optional[Path]:
         """
         Process RINEX observation for PPP-static.
 
@@ -418,6 +503,20 @@ class PPPProcessor:
                 fixed install-time default path - raises AntexNotFoundError
                 if missing there.
             output_file: Output position file (default: obs_file with .pos extension)
+            antenna_type: Part 6a - the station's configured antenna_info
+                (settings.conf), ALREADY VERIFIED by the caller against
+                antex_file via antenna_type_in_antex() (this method does
+                NOT re-verify it - a caller passing an unverified string
+                would silently fall back to rnx2rtkp's own "unknown
+                antenna" handling, not this module's explicit NONE
+                convention). None/empty falls back to "NONE" (this
+                station's pre-6a default - see the module docstring's
+                "NO RECEIVER ANTENNA PCV" section), matching the
+                PCO/PCV-correction-unavailable case for an uncalibrated
+                antenna. The PPP-static result is ALWAYS computed at the
+                antenna's own ARP regardless of which branch this takes -
+                see _generate_ppp_conf()'s own comment on
+                ant1-antdel{e,n,u}=0.
 
         Returns:
             Path to position file (.pos) or None on failure - same
@@ -481,7 +580,7 @@ class PPPProcessor:
             if clk_file:
                 clk_file = _normalize_precise_product_extension(clk_file, ".clk", work_dir)
 
-            conf_path = self._generate_ppp_conf(antex_path, work_dir)
+            conf_path = self._generate_ppp_conf(antex_path, work_dir, antenna_type=antenna_type)
 
             # Build rnx2rtkp command for PPP-static.
             #

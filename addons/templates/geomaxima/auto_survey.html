@@ -188,6 +188,54 @@
                         </tr>
                         {% endif %}
                     </table>
+
+                    {# GeoMaxima Part 6a: reference-point consistency report -
+                       the lat/lon/height above are the ANTENNA REFERENCE POINT
+                       (ARP, broadcast via RTCM, never offset), while marker_lat/
+                       lon/height (when present) is the survey MARKER recovered
+                       from it via the configured ARP offset - shown side by
+                       side so an operator can see both without computing one
+                       from the other manually. Absent entirely (not just 0)
+                       only if marker computation itself failed - see
+                       _apply_geodetic_position()'s own try/except. #}
+                    {% if status.current_position.marker_lat is defined %}
+                    <hr>
+                    <p class="mb-1"><strong>Reference point:</strong></p>
+                    <table class="table table-sm mb-0">
+                        <tr>
+                            <th style="width: 150px;">Broadcast (ARP):</th>
+                            <td>{{ "%.8f"|format(status.current_position.lat) }}°, {{ "%.8f"|format(status.current_position.lon) }}°, {{ "%.3f"|format(status.current_position.height) }}m</td>
+                        </tr>
+                        <tr>
+                            <th>Survey marker:</th>
+                            <td>{{ "%.8f"|format(status.current_position.marker_lat) }}°, {{ "%.8f"|format(status.current_position.marker_lon) }}°, {{ "%.3f"|format(status.current_position.marker_height) }}m</td>
+                        </tr>
+                        {% if status.current_position.antenna_arp_offset %}
+                        <tr>
+                            <th>ARP offset used:</th>
+                            <td>
+                                H={{ "%.3f"|format(status.current_position.antenna_arp_offset.height_m) }}m,
+                                E={{ "%.3f"|format(status.current_position.antenna_arp_offset.east_m) }}m,
+                                N={{ "%.3f"|format(status.current_position.antenna_arp_offset.north_m) }}m
+                                <small class="text-muted">(settings &rarr; Main Service &rarr; Antenna Reference Point offset)</small>
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </table>
+                    <small class="text-muted">The marker position is for reports/display only - the RTCM broadcast above is always the ARP itself.</small>
+                    {% endif %}
+
+                    {% if status.antenna_calibrated is defined and not status.antenna_calibrated %}
+                    <hr>
+                    <div class="alert alert-warning mb-0">
+                        <small>
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <strong>Antenna uncalibrated</strong> - "{{ status.antenna_type or '(not set)' }}" was not found in the
+                            ANTEX file in use. No PCO/PCV phase-center correction is applied for this antenna; ARP height
+                            processing (the offset above) is still applied independently of calibration status.
+                        </small>
+                    </div>
+                    {% endif %}
                     
                     {% if status.position_std %}
                     <hr>

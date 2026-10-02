@@ -87,10 +87,63 @@
       <label for="antenna_info" class="col-sm-3 col-form-label">Antenna info: </label>
       <div class="col-sm-9">
           <input id="antenna_info" type="text" name="antenna_info" class="form-control" aria-describedby="antenna_infoHelp" placeholder="ADVNULLANTENNA" value="{{ main_settings[6].antenna_info }}" pattern="\w[^\|><\/\s]*" required>
-          <small class="form-text text-muted" id="antenna_infoHelp">ADVNULLANTENNA or information (model,serial number) for IGS calibrated antenna</small>
-
+          <small class="form-text text-muted" id="antenna_infoHelp">
+              Must be the EXACT 20-character IGS/NGS antenna type + 4-character radome string
+              (space-padded, as it appears in the ANTEX file's own "TYPE / SERIAL NO" record) -
+              this is both what Auto Survey-In's PPP processing uses to look up the antenna's
+              phase-center calibration AND what RTCM 1033 broadcasts for rovers to use for the
+              same lookup. ADVNULLANTENNA (the IGS generic placeholder, zero PCO/PCV correction)
+              if the real antenna has no calibration entry in any ANTEX file in use (e.g. a
+              generic/unbranded model) - this is normal, not an error, and Auto Survey-In will
+              label the antenna uncalibrated automatically rather than silently applying a
+              correction that doesn't exist for it.
+          </small>
       </div>
 
+  </div>
+
+  {# GeoMaxima Part 6a: Antenna Reference Point (ARP) offset from the
+     survey marker. Used ONLY to recover the marker position for
+     reports - Auto Survey-In's PPP/PPP-AR processing is ALWAYS done at
+     the ARP itself (zero antenna delta applied during processing), and
+     the RTCM 1005/1006 broadcast position IS the ARP by definition -
+     this offset never touches that broadcast. See
+     addons/features/auto_survey/bgs2005_transformer.py's
+     arp_to_marker()/survey_controller.py's _apply_geodetic_position()
+     Step 6/8 comment for the full reasoning. #}
+  <div class="form-group row">
+      <label class="col-sm-3 col-form-label">Antenna Reference Point (ARP) offset: </label>
+      <div class="col-sm-9">
+          <small class="form-text text-muted mb-2 d-block">
+              Vertical height and horizontal east/north offset from the survey marker to the
+              antenna's own Antenna Reference Point, in meters - from the antenna's own
+              calibration sheet/manufacturer drawing, or a direct measurement at install time.
+              Leave all three at 0.0 if not yet measured (marker and ARP will be treated as
+              coincident) - this never blocks a survey, it only means reported marker positions
+              will be identical to the broadcast ARP position until a real offset is entered.
+          </small>
+      </div>
+  </div>
+  <div class="form-group row">
+      <label for="antenna_arp_height_m" class="col-sm-3 col-form-label">&nbsp;&nbsp;ARP height (m): </label>
+      <div class="col-sm-9">
+          <input id="antenna_arp_height_m" type="number" step="0.001" min="-5" max="5" name="antenna_arp_height_m" class="form-control" aria-describedby="antenna_arp_height_mHelp" placeholder="0.0" value="{{ main_settings[12].antenna_arp_height_m }}" required>
+          <small class="form-text text-muted" id="antenna_arp_height_mHelp">Marker-to-ARP vertical height, in meters (typically 0.05-2m for a surveying antenna on a pole/mount).</small>
+      </div>
+  </div>
+  <div class="form-group row">
+      <label for="antenna_arp_east_m" class="col-sm-3 col-form-label">&nbsp;&nbsp;ARP east offset (m): </label>
+      <div class="col-sm-9">
+          <input id="antenna_arp_east_m" type="number" step="0.001" min="-1" max="1" name="antenna_arp_east_m" class="form-control" aria-describedby="antenna_arp_east_mHelp" placeholder="0.0" value="{{ main_settings[13].antenna_arp_east_m }}" required>
+          <small class="form-text text-muted" id="antenna_arp_east_mHelp">Marker-to-ARP horizontal east offset, in meters - normally 0.0 for a centered antenna mount.</small>
+      </div>
+  </div>
+  <div class="form-group row">
+      <label for="antenna_arp_north_m" class="col-sm-3 col-form-label">&nbsp;&nbsp;ARP north offset (m): </label>
+      <div class="col-sm-9">
+          <input id="antenna_arp_north_m" type="number" step="0.001" min="-1" max="1" name="antenna_arp_north_m" class="form-control" aria-describedby="antenna_arp_north_mHelp" placeholder="0.0" value="{{ main_settings[14].antenna_arp_north_m }}" required>
+          <small class="form-text text-muted" id="antenna_arp_north_mHelp">Marker-to-ARP horizontal north offset, in meters - normally 0.0 for a centered antenna mount.</small>
+      </div>
   </div>
 
     <div class="form-group row">

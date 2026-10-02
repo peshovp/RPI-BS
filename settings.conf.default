@@ -44,6 +44,18 @@ receiver_firmware=''
 receiver_carrier=''
 #Antenna info, id, serial number. Without space inside the strings
 antenna_info='ADVNULLANTENNA'
+#GeoMaxima Part 6a: Antenna Reference Point (ARP) offset from the survey
+#marker to the antenna's own reference point - vertical height and
+#east/north horizontal offset, in meters. Used ONLY to recover the
+#marker position for reports/RTCM 1006 from a PPP/PPP-AR result that is
+#itself computed AT THE ARP (antenna_arp_height_m/east_m/north_m = 0,0,0
+#means the marker and the ARP coincide - e.g. no offset or not yet
+#measured). Never applied to the RTCM 1005/1006 broadcast position
+#itself, which IS the ARP by definition (see survey_controller.py's
+#_apply_geodetic_position() Step 6/8 comment).
+antenna_arp_height_m='0.0'
+antenna_arp_east_m='0.0'
+antenna_arp_north_m='0.0'
 #Tcp host address to bind the tcp stream
 tcp_host_addr='127.0.0.1'
 #tcp port for RAW stream. If you change this value, edit gpsd conf file to reflect the port in DEVICES.

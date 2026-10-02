@@ -304,13 +304,22 @@ def verify_rtcm_broadcast_ecef(point: GeodeticPoint, bgs2005: dict,
     practice a pure height-consistency check - exactly the failure mode
     that matters here.
 
-    FUTURE EXTENSION (Part 6, ARP/antenna offset): once an antenna
-    height/offset correction is applied between the PPP-AR ECEF and the
-    broadcast point, this check should be extended to verify the WHOLE
-    chain end to end (PPP-AR ECEF -> antenna/ARP correction -> BGS2005
-    transform -> written values), still within
-    RTCM_ECEF_SANITY_THRESHOLD_M - not just the transform step in
-    isolation as it does today.
+    PART 6a RESOLUTION of the "future extension" note this comment used
+    to carry: the ARP/antenna offset was deliberately designed to NEVER
+    enter this chain at all, rather than being inserted into it. The
+    PPP/PPP-AR result is processed AT THE ARP from the start (rnx2rtkp's
+    -k conf sets ant1-antdel{e,n,u}=0 explicitly; pdp3 reads a RINEX
+    header zeroed the same way via convbin -hd 0/0/0 - see
+    ppp_processor.py's _generate_ppp_conf()/rinex_converter.py's
+    build_convbin_args() for both halves), so `point` here already IS
+    the ARP, and this function's existing PPP-AR-ECEF -> BGS2005-
+    transform -> written-values chain already covers the broadcast path
+    end to end exactly as originally envisioned - there is no separate
+    "antenna/ARP correction" step to insert, because inserting one here
+    is precisely the mistake this design avoids (see
+    verify_arp_to_marker_offset() below for the SEPARATE, one-way-only
+    ARP -> marker conversion used for reports/RTCM 1006, which never
+    feeds back into this function's own broadcast chain).
 
     Args:
         point: the ORIGINAL PPP result (ITRF2020 lat/lon/ELLIPSOIDAL height)
@@ -349,3 +358,91 @@ def verify_rtcm_broadcast_ecef(point: GeodeticPoint, bgs2005: dict,
     except Exception as e:
         return {'ok': False, 'distance_m': float('inf'),
                 'detail': f"verify_rtcm_broadcast_ecef: check itself failed: {e}"}
+
+
+def arp_to_marker(arp_lat: float, arp_lon: float, arp_height: float,
+                  arp_offset: dict) -> dict:
+    """
+    Part 6a: recover the survey MARKER position from a PPP/PPP-AR result
+    that is itself computed at the antenna's own ARP (Antenna Reference
+    Point) - see verify_rtcm_broadcast_ecef()'s own "PART 6a RESOLUTION"
+    comment for why the broadcast chain is never touched by this: this
+    function is used ONLY for reports/display (e.g. a future RTCM 1006
+    stationary-antenna-height message, or an on-screen "marker position"
+    field) - never to adjust what gets written to settings.conf/RTCM.
+
+    arp_offset = {'height_m', 'east_m', 'north_m'} - the vector FROM the
+    marker TO the ARP (RTKBaseConfig.get_antenna_arp_offset()'s own
+    shape), so marker = ARP - offset. Implemented as an exact ECEF
+    round-trip (geodetic -> local ENU at arp's own lat/lon -> subtract
+    the offset -> back to ECEF -> geodetic), not a small-angle lat/lon
+    approximation - reuses the SAME _geodetic_to_geocentric/
+    _geocentric_to_geodetic transforms the rest of this module already
+    uses, so there is exactly one geodetic<->geocentric implementation
+    in this codebase, not two that could silently drift apart.
+
+    Returns: {'lat': .., 'lon': .., 'height': ..} - the marker's own
+    geodetic position, same datum/epoch as the input (this is a pure
+    local-frame translation, it does not re-run any Helmert/epoch
+    transform - call this AFTER itrf2020_to_bgs2005() if a BGS2005
+    marker position is wanted, same as the ARP position itself).
+    """
+    import math
+    lat_r = math.radians(arp_lat)
+    lon_r = math.radians(arp_lon)
+    # ECEF of the ARP.
+    X, Y, Z = _geodetic_to_geocentric.transform(arp_lon, arp_lat, arp_height)
+    # Local ENU unit vectors at the ARP's own lat/lon (standard ENU-at-a-
+    # point basis - exact, not a flat-Earth approximation of the offset
+    # itself, only of treating ARP's own tangent plane as locally flat,
+    # which is the standard and appropriate approximation for a
+    # millimeter-to-meter-scale antenna offset).
+    e = (-math.sin(lon_r), math.cos(lon_r), 0.0)
+    n = (-math.sin(lat_r) * math.cos(lon_r), -math.sin(lat_r) * math.sin(lon_r), math.cos(lat_r))
+    u = (math.cos(lat_r) * math.cos(lon_r), math.cos(lat_r) * math.sin(lon_r), math.sin(lat_r))
+    east_m = arp_offset.get('east_m', 0.0)
+    north_m = arp_offset.get('north_m', 0.0)
+    height_m = arp_offset.get('height_m', 0.0)
+    # marker = ARP - offset (offset points FROM marker TO ARP).
+    X_m = X - (e[0] * east_m + n[0] * north_m + u[0] * height_m)
+    Y_m = Y - (e[1] * east_m + n[1] * north_m + u[1] * height_m)
+    Z_m = Z - (e[2] * east_m + n[2] * north_m + u[2] * height_m)
+    lon_m, lat_m, h_m = _geocentric_to_geodetic.transform(X_m, Y_m, Z_m)
+    return {'lat': lat_m, 'lon': lon_m, 'height': h_m}
+
+
+def verify_arp_to_marker_offset(arp_lat: float, arp_lon: float, arp_height: float,
+                                arp_offset: dict, marker: dict) -> dict:
+    """
+    Defensive invariant for arp_to_marker() (Part 6a) - mirrors
+    verify_rtcm_broadcast_ecef()'s own round-trip-sanity pattern: recomputes
+    the 3D distance between the ARP-minus-offset point this function
+    SHOULD produce and the marker dict a caller is about to report/log,
+    catching a future refactor accidentally passing the wrong sign, the
+    wrong offset dict, or an un-recovered ARP value as if it were already
+    the marker. Uses the SAME RTCM_ECEF_SANITY_THRESHOLD_M (0.01m) as the
+    broadcast-side invariant - this is likewise a round-trip of values
+    through the same local-ENU transform, not an independent measurement
+    comparison, so the same write-precision-floor reasoning applies.
+
+    Never raises; never gates anything on its own (informational/
+    defensive only, same as the broadcast invariant is the thing that
+    actually refuses to apply - this one is for catching a reporting bug,
+    not a broadcast safety issue, since nothing here ever reaches RTCM).
+    """
+    try:
+        expected = arp_to_marker(arp_lat, arp_lon, arp_height, arp_offset)
+        X_exp, Y_exp, Z_exp = _geodetic_to_geocentric.transform(
+            expected['lon'], expected['lat'], expected['height'])
+        X_got, Y_got, Z_got = _geodetic_to_geocentric.transform(
+            marker['lon'], marker['lat'], marker['height'])
+        dist_m = ((X_exp - X_got) ** 2 + (Y_exp - Y_got) ** 2 + (Z_exp - Z_got) ** 2) ** 0.5
+        ok = dist_m <= RTCM_ECEF_SANITY_THRESHOLD_M
+        return {
+            'ok': ok, 'distance_m': dist_m,
+            'detail': (f"ECEF 3D distance between the expected ARP-to-marker result and the "
+                      f"reported marker value: {dist_m:.3f}m (threshold {RTCM_ECEF_SANITY_THRESHOLD_M}m)"),
+        }
+    except Exception as e:
+        return {'ok': False, 'distance_m': float('inf'),
+                'detail': f"verify_arp_to_marker_offset: check itself failed: {e}"}

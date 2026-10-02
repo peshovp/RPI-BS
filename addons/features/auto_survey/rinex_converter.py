@@ -85,9 +85,60 @@ def _convbin_time(flag: str, t: datetime) -> List[str]:
 def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver_format: str,
                        marker_name: Optional[str] = None,
                        time_start: Optional[datetime] = None,
-                       time_end: Optional[datetime] = None) -> List[str]:
+                       time_end: Optional[datetime] = None,
+                       antenna_type: Optional[str] = None,
+                       receiver_type: Optional[str] = None,
+                       zero_antenna_delta: bool = False) -> List[str]:
     """
     convbin argument list for one raw log.
+
+    antenna_type (Part 6a): if given, passed as convbin's "-ha ant" (RINEX
+    header "ANT # / TYPE" field). Confirmed this field was previously
+    LEFT BLANK by this project's RINEX conversion entirely (see
+    ppp_processor.py's "NO RECEIVER ANTENNA PCV" section - the exact gap
+    this closes) - without it, neither rnx2rtkp nor pdp3 (which reads
+    ANT # / TYPE directly from the obs header, unlike rnx2rtkp's own -k
+    conf override) has any antenna type string to attempt an ANTEX
+    lookup against, from either backend. Callers MUST have already
+    verified this string against the ANTEX file in use (see
+    ppp_processor.py's antenna_type_in_antex()) - this function does not
+    re-verify it, it only passes through whatever it is given. None
+    (uncalibrated / not yet configured) omits -ha entirely, leaving the
+    field blank exactly as before Part 6a - for the rnx2rtkp path this
+    is harmless (ant1-anttype=NONE is set independently in its own -k
+    conf, not read from this header), but for the PRIDE-PPPAR path, an
+    omitted -ha means pdp3's own CheckAntennaInAtx pre-flight check logs
+    its own "ZERO antenna model" warning rather than finding the
+    calibration pdp3_processor.py's caller already confirmed exists -
+    always pass antenna_type here when it IS calibrated, for both
+    backends, not only for rnx2rtkp.
+
+    receiver_type (Part 6a): convbin's "-hr rec" (RINEX header "REC # /
+    TYPE / VERS" field) - number/type/version separated by "/", per
+    convbin's own documented format. Reuses RTKBaseConfig.
+    get_receiver_info()'s existing 'model'/'firmware' fields (no new
+    receiver_type_version config key, per explicit instruction) -
+    callers build this string as "/{model}/{firmware}" (empty receiver
+    number - this project doesn't track a separate receiver serial
+    number anywhere). None omits -hr, leaving the field however convbin
+    defaults it (same as before Part 6a).
+
+    zero_antenna_delta (Part 6a): if True, adds "-hd 0/0/0" (RINEX header
+    "ANTENNA: DELTA H/E/N"). Part 6a's "always process at the ARP"
+    convention sets the antenna delta via the rnx2rtkp "-k" conf's own
+    ant1-antdel{e,n,u}=0 for that path (see ppp_processor.py's
+    _generate_ppp_conf(), which takes precedence over whatever this
+    header says per RTKLIB's own documented CLI-over-conf-file
+    precedence) - so rnx2rtkp callers should leave this False, the
+    header value is irrelevant to that path. pdp3 has NO separate
+    antenna-delta override mechanism at all (confirmed: its CLI only
+    takes -m/-frq/-sys plus the obs file) - for PRIDE-PPPAR, the RINEX
+    header's own delta genuinely IS what pdp3 uses (SITE%enu0 in its own
+    output header, read directly from this field), so
+    pride_pppar_processor.py's caller MUST pass True here, or pdp3 would
+    otherwise process at whatever stale/wrong delta (commonly 0.0000 by
+    coincidence, per this project's prior confirmed-live inspection, but
+    never guaranteed) happens to already be in the header.
 
     - NO frequency limit. The former "-f 2" (commented "Force overwrite")
       is convbin's number-of-frequencies option: RTKLIB v2.5.0 turns -f N
@@ -116,6 +167,12 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
     args = [str(convbin), "-r", receiver_format, "-v", RINEX_VERSION, "-d", str(output_dir)]
     if marker_name:
         args += ["-hm", marker_name]
+    if antenna_type:
+        args += ["-ha", f"/{antenna_type}"]
+    if receiver_type:
+        args += ["-hr", receiver_type]
+    if zero_antenna_delta:
+        args += ["-hd", "0/0/0"]
     if receiver_format == 'rtcm3':
         tr, source = rtcm_time_reference(raw_file)
         args += _convbin_time("-tr", tr)
@@ -268,7 +325,10 @@ class RINEXConverter:
                                  output_dir: Optional[Path] = None,
                                  marker_name: str = "BASE",
                                  time_start: Optional[datetime] = None,
-                                 time_end: Optional[datetime] = None) -> Optional[Tuple[Path, Path]]:
+                                 time_end: Optional[datetime] = None,
+                                 antenna_type: Optional[str] = None,
+                                 receiver_info: Optional[str] = None,
+                                 zero_antenna_delta: bool = False) -> Optional[Tuple[Path, Path]]:
         """
         Convert raw data to RINEX observation and navigation files
 
@@ -282,6 +342,18 @@ class RINEXConverter:
                 file" (confirmed live).
             time_start, time_end: optional UTC window (convbin -ts/-te) -
                 only data inside it is converted. None = whole file.
+            antenna_type: Part 6a - see build_convbin_args()'s own
+                antenna_type docstring for the full reasoning (ANTEX-
+                verified calibrated antenna type, or None for
+                uncalibrated/not yet configured).
+            receiver_info: Part 6a - see build_convbin_args()'s own
+                receiver_type docstring (passed through under a
+                different parameter name here only to avoid colliding
+                with this method's own unrelated `receiver_type` local
+                variable below, which is actually the raw-log FORMAT -
+                rtcm3/ubx/etc - not the receiver model/version string).
+            zero_antenna_delta: Part 6a - see build_convbin_args()'s own
+                docstring. Pass True ONLY for PRIDE-PPPAR callers.
 
         Returns:
             Tuple of (obs_file, nav_file) or None on failure
@@ -292,13 +364,15 @@ class RINEXConverter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        receiver_type = receiver_format_for(raw_file)
+        receiver_format = receiver_format_for(raw_file)
 
         try:
             # convbin writes both .obs and .nav without explicit flags
-            cmd = build_convbin_args(self.convbin, raw_file, output_dir, receiver_type,
+            cmd = build_convbin_args(self.convbin, raw_file, output_dir, receiver_format,
                                      marker_name=marker_name,
-                                     time_start=time_start, time_end=time_end)
+                                     time_start=time_start, time_end=time_end,
+                                     antenna_type=antenna_type, receiver_type=receiver_info,
+                                     zero_antenna_delta=zero_antenna_delta)
 
             logger.info(f"Converting to RINEX {RINEX_VERSION} obs+nav: {raw_file.name}"
                         + (f" (window {time_start} .. {time_end} UTC)" if time_start or time_end else ""))
@@ -334,7 +408,10 @@ class RINEXConverter:
     def convert_raw_files_to_rinex_obs(self,
                                        raw_files: List[Path],
                                        output_dir: Path,
-                                       marker_name: str = "BASE") -> Optional[Tuple[Path, Path]]:
+                                       marker_name: str = "BASE",
+                                       antenna_type: Optional[str] = None,
+                                       receiver_info: Optional[str] = None,
+                                       zero_antenna_delta: bool = False) -> Optional[Tuple[Path, Path]]:
         """
         Convert MULTIPLE raw log segments (e.g. a window spanning a
         UTC-midnight str2str rotation, or an older segment that
@@ -367,7 +444,13 @@ class RINEXConverter:
                 process_ppp_ar() never uses nav_file, see
                 pride_pppar_processor.py, so which segment's nav survives
                 does not matter).
-            marker_name: see convert_raw_to_rinex_obs().
+            marker_name, antenna_type, receiver_info: see
+                convert_raw_to_rinex_obs(). Applied identically to EVERY
+                segment (same physical antenna/receiver covers the whole
+                window by construction), so the merged obs file's header
+                (taken from the first segment - see merge_rinex_obs())
+                carries the same, consistent values regardless of which
+                segment happened to be first.
 
         Returns:
             (merged_obs_file, nav_file) or None on failure. nav_file may be
@@ -382,7 +465,9 @@ class RINEXConverter:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if len(raw_files) == 1:
-            return self.convert_raw_to_rinex_obs(raw_files[0], output_dir, marker_name=marker_name)
+            return self.convert_raw_to_rinex_obs(raw_files[0], output_dir, marker_name=marker_name,
+                                                 antenna_type=antenna_type, receiver_info=receiver_info,
+                                                 zero_antenna_delta=zero_antenna_delta)
 
         ordered = sorted(raw_files, key=lambda p: parse_log_start_time(p) or
                          datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None))
@@ -392,7 +477,9 @@ class RINEXConverter:
         segment_results = []
         for i, raw_file in enumerate(ordered):
             segment_dir = output_dir / f"_segment_{i}"
-            result = self.convert_raw_to_rinex_obs(raw_file, segment_dir, marker_name=marker_name)
+            result = self.convert_raw_to_rinex_obs(raw_file, segment_dir, marker_name=marker_name,
+                                                   antenna_type=antenna_type, receiver_info=receiver_info,
+                                                   zero_antenna_delta=zero_antenna_delta)
             if not result:
                 logger.error(f"convert_raw_files_to_rinex_obs: segment {i} ({raw_file.name}) "
                             f"failed to convert - aborting merge (a partial/wrong-window obs "
