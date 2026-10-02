@@ -689,6 +689,24 @@ class SurveyController:
         if ppp_ar_enabled:
             self._cleanup_ppp_ar_root_stray_files()
 
+        # Retention follow-up (condition 2 of the approved proposal):
+        # one-time cleanup of LEGACY loose .obs/.nav files directly in
+        # work_dir/rinex/ (the root, not inside a slot_*/ subdirectory) -
+        # left over from before this fix gave rnx2rtkp's own interim-
+        # update path its own isolated+pruned slot dirs (that fix only
+        # covers conversions FROM NOW ON, same limitation
+        # _cleanup_ppp_ar_root_stray_files() above already has for the
+        # PPP-AR side). Unlike that cleanup, this one is AGE-GATED (only
+        # files older than LEGACY_RINEX_FILE_AGE_DAYS) rather than
+        # unconditional, since these are derived data (reproducible from
+        # the raw archives in data/, never the only copy of anything) but
+        # a loose file younger than that could still legitimately belong
+        # to a survey running RIGHT NOW on a station that hasn't yet
+        # fully migrated every in-flight file to a slot dir. Runs
+        # unconditionally (not gated on ppp_ar_enabled) since BOTH the
+        # rnx2rtkp and PRIDE-PPPAR paths write into work_dir/rinex/.
+        self._cleanup_legacy_rinex_root_files()
+
         # Ensure file logging is enabled
         if self.auto_mode:
             if not self._ensure_file_logging():
@@ -1196,6 +1214,12 @@ class SurveyController:
     PPP_AR_SLOT_RETRY_MAX_ATTEMPTS = 3
     PPP_AR_SLOT_RETRY_DELAY_SECONDS = 120
 
+    # Marker file name dropped into a slot_* directory to protect it from
+    # _cleanup_old_ppp_ar_slot_dirs()'s count-based pruning, regardless of
+    # age/count - see _apply_geodetic_position()'s "mark as protected"
+    # step and _protect_ppp_ar_dirs()/_unprotect_ppp_ar_dir().
+    PROTECTED_SLOT_MARKER = '.protected'
+
     def _apply_geodetic_position(self,
                                   lat: float, lon: float, height: float,
                                   obs_file: Path,
@@ -1204,7 +1228,8 @@ class SurveyController:
                                   position_std: Dict[str, float],
                                   num_epochs: int,
                                   quality_metrics: Dict,
-                                  extra_position_fields: Optional[Dict] = None) -> bool:
+                                  extra_position_fields: Optional[Dict] = None,
+                                  ppp_ar_dir: Optional[Path] = None) -> bool:
         """
         Shared geoid-correction / ITRF2020->BGS2005 transform / RTCM
         broadcast / state-update pipeline - extracted from _perform_update()'s
@@ -1243,6 +1268,19 @@ class SurveyController:
                 position dict before it's persisted (e.g. PRIDE-PPPAR's
                 ar_wl_fix_rate/ar_nl_fix_rate) - None for the plain
                 rnx2rtkp path.
+            ppp_ar_dir: the pdp3 work directory (cst_*/amb_*/pos_* - Part
+                5's evidence files) this PPP-AR result came from, if any
+                (None for the rnx2rtkp path, which has no separate pdp3
+                work dir). On success, BOTH this directory and obs_file's
+                own parent (the rinex slot dir) are marked protected (see
+                PROTECTED_SLOT_MARKER) so _cleanup_old_ppp_ar_slot_dirs()
+                never prunes the slot(s) that produced the currently-
+                applied result, however old they get relative to newer
+                slots' count-based retention - the previously-protected
+                slot(s), if any, are unprotected first (retrieved from
+                the PRIOR applied_position's own recorded dir, if the
+                state had one), so protection always tracks exactly the
+                CURRENT applied result, not every result ever applied.
 
         Returns:
             True on success (broadcast applied, state updated), False on
@@ -1446,6 +1484,23 @@ class SurveyController:
                 quality_metrics=quality_metrics
             )
 
+            # Protect the slot dir(s) that produced this ACCEPTED result
+            # from _cleanup_old_ppp_ar_slot_dirs()'s count-based pruning -
+            # see PROTECTED_SLOT_MARKER's own comment and this method's
+            # ppp_ar_dir docstring. obs_file.parent is the rinex slot dir
+            # for BOTH backends; ppp_ar_dir (cst_*/amb_*/pos_* evidence)
+            # only exists for the PRIDE-PPPAR path. Best-effort: a
+            # protection failure must never fail the update itself, it
+            # only means a future prune pass might remove this evidence
+            # sooner than ideal.
+            try:
+                self._protect_slot_dir(obs_file.parent)
+                if ppp_ar_dir is not None:
+                    self._protect_slot_dir(ppp_ar_dir)
+            except Exception as e:
+                logger.warning(f"_apply_geodetic_position: failed to protect slot dir(s) "
+                               f"for this accepted result: {e}")
+
             if is_final:
                 logger.info(f"✓ FINAL UPDATE complete ({ppp_backend}) - Epochs: {num_epochs}")
             else:
@@ -1487,8 +1542,24 @@ class SurveyController:
             logger.info(f"Processing raw file: {raw_file.name} ({raw_file.stat().st_size / 1024:.1f} KB)")
 
             # Step 2: Convert to RINEX
-            rinex_dir = self.work_dir / "rinex"
+            #
+            # RETENTION (rule 1 of the Part 4b/5-era retention proposal):
+            # isolated per-attempt directory, same reasoning/pattern as
+            # _run_ppp_ar()'s own rinex_dir/pride_pppar_dir - this path
+            # (rnx2rtkp, run on every progressive interim update, 15min
+            # intervals for the first 6h of a survey) used to share ONE
+            # directory across every call for the entire survey, with no
+            # pruning at all: convert_raw_to_rinex_obs() picks the newest
+            # *.obs file in whatever directory it's given BY MTIME, so old
+            # obs/nav files just accumulated silently forever (the one
+            # unpruned accumulation point left after ca1dfc3 gave the
+            # PPP-AR path its own isolated+pruned directories).
+            update_label = "final" if is_final else "interim"
+            run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
+            rinex_root = self.work_dir / "rinex"
+            rinex_dir = rinex_root / f"slot_{update_label}_{run_id}"
             rinex_result = self.rinex.convert_raw_to_rinex_obs(raw_file, rinex_dir)
+            self._cleanup_old_ppp_ar_slot_dirs(rinex_root, keep_dir=rinex_dir)
 
             if not rinex_result:
                 logger.error("RINEX conversion failed")
@@ -1628,6 +1699,32 @@ class SurveyController:
                 pass
             return False
     
+    # How many PROTECTED slot dirs (see PROTECTED_SLOT_MARKER) to allow to
+    # accumulate before the OLDEST protected ones are pruned too - a
+    # protected dir is never removed by the normal count/age rule, so
+    # without SOME cap, every survey's worth of accepted interim updates
+    # (potentially dozens over a multi-day survey) would pile up
+    # protected forever. A handful is enough to always have the CURRENT
+    # applied result's evidence (and the immediately preceding one or
+    # two, useful when comparing a just-superseded result) without ever
+    # approaching the unbounded growth this whole retention effort exists
+    # to prevent.
+    PROTECTED_SLOT_DIRS_TO_KEEP = 3
+
+    def _protect_slot_dir(self, slot_dir: Path) -> None:
+        """
+        Drop PROTECTED_SLOT_MARKER into slot_dir, exempting it from
+        _cleanup_old_ppp_ar_slot_dirs()'s count/age-based pruning - see
+        _apply_geodetic_position()'s "protect the slot dir(s)" step.
+        A no-op (logged, not raised) if slot_dir doesn't exist - the
+        caller's own update already succeeded by this point; a failure
+        to protect its evidence afterward must never undo that.
+        """
+        if not slot_dir.is_dir():
+            logger.warning(f"_protect_slot_dir: {slot_dir} is not a directory - cannot protect")
+            return
+        (slot_dir / self.PROTECTED_SLOT_MARKER).touch()
+
     # Number of past per-slot PRIDE-PPPAR work directories to retain (see
     # _run_ppp_ar()'s isolated-work_dir scheme) - kept around for
     # postmortem debugging of a failed slot (obs file, downloaded
@@ -1643,33 +1740,98 @@ class SurveyController:
     # fix is replacing.
     PPP_AR_SLOT_DIRS_TO_KEEP = 10
 
+    @staticmethod
+    def _dir_size_bytes(path: Path) -> int:
+        """
+        Total size of every regular file under path, recursively.
+        Best-effort: a file that vanishes mid-walk (e.g. pruned by a
+        concurrent call) is simply skipped, not an error - this is a
+        disk-usage ESTIMATE for logging, not an exact accounting that
+        anything downstream depends on.
+        """
+        total = 0
+        for f in path.rglob('*'):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                continue
+        return total
+
     def _cleanup_old_ppp_ar_slot_dirs(self, ppp_ar_root: Path, keep_dir: Path) -> None:
         """
-        Prune old per-slot PRIDE-PPPAR work directories under ppp_ar_root,
-        keeping the PPP_AR_SLOT_DIRS_TO_KEEP most-recently-created ones
-        (by directory mtime) plus keep_dir itself (the one about to be
-        used for the current attempt, so it's never pruned even if it
-        happens to already exist and be older than others - shouldn't
-        normally happen given the run-id suffix, but kept defensive).
+        Prune old per-slot work directories under ppp_ar_root (PRIDE-PPPAR
+        AND, since the retention-policy follow-up, the rnx2rtkp path's own
+        per-update rinex_dir - see _perform_update()'s Step 2).
+
+        PROTECTED dirs (containing PROTECTED_SLOT_MARKER - written by
+        _apply_geodetic_position() for the slot(s) that produced the
+        CURRENTLY APPLIED result, see _protect_slot_dir()) are counted
+        and pruned SEPARATELY from ordinary ones: they are exempt from
+        the normal age-based PPP_AR_SLOT_DIRS_TO_KEEP rule entirely (an
+        applied result's own evidence must never be pruned just because
+        enough newer slots have since run, however old it gets), subject
+        only to their own, much smaller PROTECTED_SLOT_DIRS_TO_KEEP cap
+        (oldest-protected-first) so that count alone cannot grow
+        unbounded either.
+
+        Ordinary (unprotected) dirs keep the PPP_AR_SLOT_DIRS_TO_KEEP
+        most-recently-created ones (by directory mtime) plus keep_dir
+        itself (the one about to be used for the current attempt, so
+        it's never pruned even if it happens to already exist and be
+        older than others - shouldn't normally happen given the run-id
+        suffix, but kept defensive).
+
+        RETENTION (rule 3 of the Part 4b/5-era proposal): logs the
+        directory count and total size under ppp_ar_root, both BEFORE and
+        AFTER this pruning pass, at INFO whenever anything was actually
+        pruned (silent otherwise, to avoid a log line on every single
+        update when there is nothing to prune yet) - so disk growth under
+        work_dir is visible from normal logs, not only discoverable by
+        manually `du`-ing the station after the fact.
 
         Best-effort only: any failure to list/remove a stale directory is
         logged and otherwise ignored - a pruning failure must never abort
-        or fail the PPP-AR run itself.
+        or fail the underlying update/PPP-AR run itself.
         """
         try:
             if not ppp_ar_root.is_dir():
                 return
-            slot_dirs = [
+            all_slot_dirs = [
                 p for p in ppp_ar_root.iterdir()
                 if p.is_dir() and p.name.startswith("slot_") and p != keep_dir
             ]
-            slot_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            for stale_dir in slot_dirs[self.PPP_AR_SLOT_DIRS_TO_KEEP:]:
+            protected_dirs = [p for p in all_slot_dirs if (p / self.PROTECTED_SLOT_MARKER).exists()]
+            unprotected_dirs = [p for p in all_slot_dirs if p not in protected_dirs]
+
+            protected_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            unprotected_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+            to_prune = (
+                protected_dirs[self.PROTECTED_SLOT_DIRS_TO_KEEP:] +
+                unprotected_dirs[self.PPP_AR_SLOT_DIRS_TO_KEEP:]
+            )
+            if not to_prune:
+                return
+
+            size_before = self._dir_size_bytes(ppp_ar_root)
+            count_before = len(all_slot_dirs) + 1  # +1 for keep_dir
+
+            removed = 0
+            for stale_dir in to_prune:
                 try:
                     shutil.rmtree(stale_dir)
                     logger.debug(f"_cleanup_old_ppp_ar_slot_dirs: removed stale slot dir {stale_dir}")
+                    removed += 1
                 except Exception as e:
                     logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: failed to remove stale slot dir {stale_dir}: {e}")
+
+            size_after = self._dir_size_bytes(ppp_ar_root)
+            logger.info(
+                f"_cleanup_old_ppp_ar_slot_dirs({ppp_ar_root}): pruned {removed}/{len(to_prune)} "
+                f"stale slot dir(s) - {count_before} -> {count_before - removed} dirs, "
+                f"{size_before / 1024 / 1024:.1f}MB -> {size_after / 1024 / 1024:.1f}MB"
+            )
         except Exception as e:
             logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: pruning failed (non-fatal): {e}")
 
@@ -1745,6 +1907,103 @@ class SurveyController:
         except Exception as e:
             logger.warning(
                 f"_cleanup_ppp_ar_root_stray_files: cleanup of {ppp_ar_root} failed "
+                f"(non-fatal, survey will start anyway): {e}"
+            )
+
+    # Loose (non-slot_*) files directly in work_dir/rinex/ older than this
+    # many days are removed by _cleanup_legacy_rinex_root_files() - see
+    # that method's docstring. 7 days is generous: these files are
+    # derived data (reproducible from data/'s raw archives, never the
+    # only copy of anything), and this cleanup only runs at survey start,
+    # so even a slow-to-notice station still gets them cleared well
+    # before they could meaningfully contribute to a disk-space problem.
+    LEGACY_RINEX_FILE_AGE_DAYS = 7
+
+    def _cleanup_legacy_rinex_root_files(self) -> None:
+        """
+        Remove LEGACY loose .obs/.nav files sitting directly in
+        work_dir/rinex/ (the root, not inside a slot_*/ subdirectory) -
+        confirmed live on BaseStation: 1.1GB accumulated there from
+        before _perform_update()'s own per-update rinex_dir isolation
+        fix existed (that fix - see this method's caller - only isolates
+        conversions FROM NOW ON, same limitation
+        _cleanup_ppp_ar_root_stray_files() already has for the PPP-AR
+        side's equivalent pre-existing clutter).
+
+        UNLIKE _cleanup_ppp_ar_root_stray_files() (unconditional), this
+        is AGE-GATED: only files older than LEGACY_RINEX_FILE_AGE_DAYS
+        are removed, and only FILES directly in the root (never a
+        slot_*/ subdirectory, which is already covered by
+        _cleanup_old_ppp_ar_slot_dirs()'s own protected-aware pruning,
+        and never a non-slot_* subdirectory either, since nothing in
+        this codebase creates one - only loose files were ever observed
+        live). These files are derived data: fully reproducible by
+        re-converting the matching raw log still sitting in data/ (or
+        its archived .zip - see get_data_files_since()), so deleting an
+        old one loses nothing a fresh conversion couldn't regenerate.
+
+        Called once at the START of every survey (both backends - see
+        start_survey()), not left as a manual step. Logs the count and
+        total bytes freed at INFO; anything younger than the age cutoff
+        is left untouched and not even mentioned in the log, since a
+        young loose file could legitimately belong to a survey that
+        just started before this fix's isolation took effect for it.
+
+        Best-effort and NON-FATAL: any failure (permissions, directory
+        doesn't exist yet, individual file removal failing) is logged as
+        a warning and otherwise ignored - cleanup failing must never
+        block a survey from starting.
+        """
+        rinex_root = self.work_dir / "rinex"
+        try:
+            if not rinex_root.is_dir():
+                logger.info(f"_cleanup_legacy_rinex_root_files: {rinex_root} does not exist yet - nothing to clean.")
+                return
+
+            cutoff = time.time() - (self.LEGACY_RINEX_FILE_AGE_DAYS * 86400)
+            removed = []
+            failed = []
+            bytes_freed = 0
+
+            for entry in rinex_root.iterdir():
+                if entry.is_dir():
+                    # slot_*/ (covered by _cleanup_old_ppp_ar_slot_dirs())
+                    # or any other subdirectory - this method only ever
+                    # removes LOOSE FILES directly in the root.
+                    continue
+                try:
+                    mtime = entry.stat().st_mtime
+                except OSError as e:
+                    failed.append((entry.name, str(e)))
+                    continue
+                if mtime >= cutoff:
+                    continue  # too young - leave it, might be in active use
+                try:
+                    size = entry.stat().st_size
+                    entry.unlink()
+                    removed.append(entry.name)
+                    bytes_freed += size
+                except Exception as e:
+                    failed.append((entry.name, str(e)))
+
+            if removed:
+                logger.info(
+                    f"_cleanup_legacy_rinex_root_files: removed {len(removed)} legacy loose "
+                    f"file(s) older than {self.LEGACY_RINEX_FILE_AGE_DAYS} days from {rinex_root} "
+                    f"({bytes_freed / 1024 / 1024:.1f}MB freed)"
+                )
+            else:
+                logger.info(f"_cleanup_legacy_rinex_root_files: {rinex_root} has no legacy loose "
+                           f"files older than {self.LEGACY_RINEX_FILE_AGE_DAYS} days - nothing to clean.")
+
+            if failed:
+                logger.warning(
+                    f"_cleanup_legacy_rinex_root_files: failed to remove {len(failed)} "
+                    f"file(s) from {rinex_root} (non-fatal, survey will start anyway): {failed}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"_cleanup_legacy_rinex_root_files: cleanup of {rinex_root} failed "
                 f"(non-fatal, survey will start anyway): {e}"
             )
 
@@ -1949,6 +2208,11 @@ class SurveyController:
         # on the SAME PridePpparProcessor instance that just ran, so no
         # second obs-file read is needed to recover it.
         result['frequency_selection'] = getattr(pride, '_last_freq_selection', None)
+        # Retention follow-up: the pdp3 work dir itself (cst_*/amb_*/pos_*
+        # evidence), so _apply_geodetic_position() can protect it from
+        # pruning if this result ends up being the one that's applied -
+        # see that method's ppp_ar_dir arg and PROTECTED_SLOT_MARKER.
+        result['ppp_ar_dir'] = ppp_ar_dir
         return result
 
     def _ppp_ar_fix_rate_ok(self, ppp_ar_result: Dict) -> bool:
@@ -2236,6 +2500,7 @@ class SurveyController:
                 'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
             },
             extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
+            ppp_ar_dir=ppp_ar_result.get('ppp_ar_dir'),
         )
 
         if not applied:
@@ -2336,6 +2601,7 @@ class SurveyController:
                                 'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
                             },
                             extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
+                            ppp_ar_dir=ppp_ar_result.get('ppp_ar_dir'),
                         )
                         if final_applied:
                             self._log_ppp_ar_attempt("final", "SUCCESS", "applied successfully", ppp_ar_result)
