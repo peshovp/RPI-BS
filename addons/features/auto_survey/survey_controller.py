@@ -1053,6 +1053,10 @@ class SurveyController:
                         for attempt_num in range(1, self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS + 1):
                             slot_ok = self._run_ppp_ar_interim(elapsed_hours, latest_due)
                             if slot_ok:
+                                logger.info(
+                                    f"PPP-AR slot={latest_due}h: succeeded on attempt "
+                                    f"{attempt_num}/{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS}"
+                                )
                                 break
                             if attempt_num < self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS:
                                 logger.warning(
@@ -1206,12 +1210,20 @@ class SurveyController:
     # skipped without running" invariant (see _survey_loop()'s comment):
     # retries only ever apply to the slot that was already selected to
     # run, they never cause an older slot to run or re-run. Deliberately
-    # small/bounded (3 attempts, 2 minutes apart = at most ~6 extra
-    # minutes per slot) rather than an open-ended retry loop, so a
-    # persistent (non-transient) failure still gives up promptly and lets
-    # the survey continue waiting for the next slot rather than blocking
-    # the survey loop for an extended period.
-    PPP_AR_SLOT_RETRY_MAX_ATTEMPTS = 3
+    # small/bounded rather than an open-ended retry loop, so a persistent
+    # (non-transient) failure still gives up promptly and lets the survey
+    # continue waiting for the next slot rather than blocking the survey
+    # loop for an extended period.
+    #
+    # Part 8: raised from 3 to 5 attempts (still 2 minutes apart = at
+    # most ~8 extra minutes per slot, trivial against the 540min/9h
+    # PPP_AR_UPDATE_TIMEOUT_MINUTES budget) - a mirror/DNS blip lasting
+    # longer than the original 3-attempt/6-minute window (the exact
+    # failure class that motivated this retry loop in the first place)
+    # would still exhaust it and fall through to "give up on this slot"
+    # unnecessarily; 5 attempts gives a slow-to-recover transient more
+    # room without meaningfully eating into the per-slot timeout budget.
+    PPP_AR_SLOT_RETRY_MAX_ATTEMPTS = 5
     PPP_AR_SLOT_RETRY_DELAY_SECONDS = 120
 
     # Marker file name dropped into a slot_* directory to protect it from

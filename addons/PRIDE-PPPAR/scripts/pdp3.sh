@@ -3745,7 +3745,31 @@ WgetDownload() { # purpose : download a file with wget
         # live: 2/2 manual curl tests succeeded, but an earlier run saw 3/3
         # fail the same way - genuinely intermittent, not deterministic).
         # "-4" forces IPv4-only and eliminates the hang.
-        arg="--ftp-ssl -k --progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 60 -4 -O"
+        #
+        # LOCAL DOWNSTREAM PATCH (RPI-BS, Part 8 follow-up - same vendored-
+        # source caveat as above). NOT yet confirmed live - evaluated by
+        # analogy to the igs.gnsswhu.cn branch below, whose own confirmed-
+        # live finding directly applies here too: --max-time 60 was
+        # already shown marginal for a ~1MB file on that host; bdspride's
+        # own CLK product (30S interval, 1-day span) is typically LARGER
+        # than that, over an FTPS (not plain FTP/HTTP) connection, so the
+        # same 60s total-transfer cap is at least as much at risk here,
+        # arguably more. Raised to 180s (same value already proven
+        # sufficient for igs.gnsswhu.cn's smaller file) rather than
+        # guessing a new number.
+        #
+        # "--disable-epsv" added defensively: pride_pppar_processor.py's
+        # _DOWNLOAD_FAILURE_RE already recognizes "Failed EPSV" as a
+        # known download-failure pattern (added independently of this
+        # patch), implying an EPSV-related failure was anticipated/
+        # observed for this pipeline's FTP(S) downloads at some point;
+        # --ftp-ssl's default Extended Passive Mode negotiation is a
+        # known source of stalls behind NAT/firewalled paths exactly like
+        # a residential/field-deployed base station's own network. Not
+        # independently confirmed live for bdspride specifically, but
+        # low-risk (curl falls back to plain PASV) and directly
+        # addresses a failure mode this codebase already names.
+        arg="--ftp-ssl -k --progress-bar -S -C - --retry 3 --connect-timeout 10 --max-time 180 --disable-epsv -4 -O"
         local cmd="curl $arg $url"
         echo "$cmd" | bash
         dl_exit=$?
