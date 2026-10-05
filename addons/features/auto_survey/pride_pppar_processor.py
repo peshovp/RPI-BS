@@ -1145,7 +1145,8 @@ class PridePpparProcessor:
 
     def process_ppp_ar(self,
                         obs_file: Path,
-                        work_dir: Path) -> Optional[Path]:
+                        work_dir: Path,
+                        custom_antex_path: Optional[Path] = None) -> Optional[Path]:
         """
         Run PRIDE-PPPAR's pdp3 for ambiguity-resolved PPP-static
         positioning.
@@ -1173,6 +1174,18 @@ class PridePpparProcessor:
                 already exists - the caller owns its lifecycle, since it
                 needs to still exist afterward to locate/read the pos_*
                 result file.
+            custom_antex_path: Part 6b - path to GeoMaxima's own vendored
+                custom ANTEX (e.g. PPPProcessor.custom_antex_path(),
+                the SAME file ppp_processor.py's own merge uses for the
+                rnx2rtkp path). Passed to pdp3.sh via the
+                GEOMAXIMA_CUSTOM_ANTEX environment variable (NOT a CLI
+                flag - pdp3 has none for this), which pdp3.sh's own
+                locally-patched antenna-check step reads to append a
+                custom antenna entry into its freshly-downloaded
+                abs_igs.atx, only if that run's own download doesn't
+                already have an entry for the RINEX file's antenna type.
+                None skips this entirely (an uncalibrated-by-default
+                antenna behaves exactly as before Part 6b).
 
         Returns:
             Path to the generated pos_* file, or None on failure/timeout.
@@ -1227,6 +1240,15 @@ class PridePpparProcessor:
         shell_cmd = f"ulimit -s unlimited; exec {' '.join(pdp3_args)}"
         full_command_line = f'bash -c "{shell_cmd}"'
 
+        # Part 6b: GEOMAXIMA_CUSTOM_ANTEX, read by pdp3.sh's own locally-
+        # patched antenna-check step (see that script's comment) - never
+        # a CLI flag, pdp3 has none for this. os.environ.copy() (not a
+        # bare dict) so pdp3 still inherits its own normal environment
+        # (PATH, HOME, etc) unchanged, with only this one variable added.
+        run_env = os.environ.copy()
+        if custom_antex_path is not None:
+            run_env['GEOMAXIMA_CUSTOM_ANTEX'] = str(custom_antex_path)
+
         run_start = datetime.utcnow()
         logger.info(f"process_ppp_ar: starting pdp3 at {run_start.isoformat()}Z")
         logger.info(f"process_ppp_ar: full command line: {full_command_line}")
@@ -1238,6 +1260,7 @@ class PridePpparProcessor:
                 timeout=2400,
                 capture_output=True,
                 text=True,
+                env=run_env,
             )
         except subprocess.TimeoutExpired:
             elapsed = (datetime.utcnow() - run_start).total_seconds()

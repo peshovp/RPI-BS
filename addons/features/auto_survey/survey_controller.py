@@ -39,7 +39,7 @@ import requests
 from .rtkbase_config import RTKBaseConfig
 from .runtime_paths import GM_RUNTIME_DIR
 from .rinex_converter import RINEXConverter
-from .ppp_processor import PPPProcessor, antenna_type_in_antex
+from .ppp_processor import PPPProcessor, antenna_type_in_antex, classify_band_calibration
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
 from .pride_pppar_processor import (
     PridePpparProcessor, Pdp3NotFoundError, check_processed_window_coverage,
@@ -1284,7 +1284,13 @@ class SurveyController:
         update.
         """
         antenna_type = self.rtkbase.get_receiver_info().get('antenna', '')
-        antex_path = self.spp.default_antex_path()
+        # Part 6b: check against the MERGED working ANTEX (igs20.atx +
+        # this project's own vendored custom.atx entries, e.g. the
+        # ArduSimple AS-ANT3BCAL01 NGS calibration) - not igs20.atx
+        # alone, so a station using a custom-calibrated antenna is
+        # correctly recognized here, not just inside process_ppp()'s own
+        # separate resolve_antex() call.
+        antex_path = self.spp.resolve_working_antex()
         calibrated = antenna_type_in_antex(antex_path, antenna_type)
         if not calibrated and antenna_type and antenna_type != 'ADVNULLANTENNA':
             logger.warning(
@@ -2303,7 +2309,10 @@ class SurveyController:
         ppp_ar_dir = ppp_ar_root / f"slot_{safe_slot_label}_{run_id}"
         logger.info(f"_run_ppp_ar: isolated work_dir for this attempt: {ppp_ar_dir}")
 
-        pos_file = pride.process_ppp_ar(obs_file, work_dir=ppp_ar_dir)
+        pos_file = pride.process_ppp_ar(
+            obs_file, work_dir=ppp_ar_dir,
+            custom_antex_path=self.spp.resolve_augmented_custom_antex(),
+        )
 
         # Prune old slot directories AFTER this attempt (whether it
         # succeeded or failed) - never before, so a failed attempt's own
@@ -2361,6 +2370,29 @@ class SurveyController:
         # pruning if this result ends up being the one that's applied -
         # see that method's ppp_ar_dir arg and PROTECTED_SLOT_MARKER.
         result['ppp_ar_dir'] = ppp_ar_dir
+
+        # Part 6b (item 3): per-band calibration status for the bands
+        # THIS run's frequency_selection actually chose - "calibrated"
+        # (a real ANTEX entry), "substituted from Gxx"
+        # (augment_antex_with_gps_substitutes() filled it in), or "none"
+        # (missing even after augmentation). Logged at INFO on every
+        # attempt and carried into the Part 5 attempt record/Autosurvey
+        # UI - see _build_ppp_ar_attempt_record()/
+        # _ppp_ar_extra_position_fields().
+        if result['frequency_selection'] and result['frequency_selection'].get('frq'):
+            try:
+                band_calibration = classify_band_calibration(
+                    self.spp.resolve_augmented_custom_antex(),
+                    result['frequency_selection']['frq'],
+                )
+                result['band_calibration'] = band_calibration
+                logger.info(f"_run_ppp_ar: per-band calibration status: {band_calibration}")
+            except Exception as e:
+                logger.warning(f"_run_ppp_ar: failed to classify per-band calibration status: {e}")
+                result['band_calibration'] = None
+        else:
+            result['band_calibration'] = None
+
         return result
 
     def _ppp_ar_fix_rate_ok(self, ppp_ar_result: Dict) -> bool:
@@ -2465,6 +2497,7 @@ class SurveyController:
                 'processed_minutes': ppp_ar_result['processed_window']['processed_minutes'],
             } if ppp_ar_result.get('processed_window') is not None else None),
             'ar_fix_rate_mismatch': ppp_ar_result.get('fix_rate_mismatch'),
+            'ar_band_calibration': ppp_ar_result.get('band_calibration'),
         }
 
     def _log_ppp_ar_attempt(self, slot_label: str, result: str, reason: str,
@@ -2575,6 +2608,7 @@ class SurveyController:
             'sig0': None,
             'obs_duration_minutes': None,
             'fix_rate_mismatch': None,
+            'band_calibration': None,
         }
         if ppp_ar_result is None:
             return record
@@ -2619,6 +2653,11 @@ class SurveyController:
             # accepted/rejected. None when the two agree (or cst_* data
             # wasn't available to compare against at all).
             'fix_rate_mismatch': ppp_ar_result.get('fix_rate_mismatch'),
+            # Part 6b (item 3): per-band calibration status for the
+            # bands this attempt's frequency_selection actually used -
+            # see classify_band_calibration()'s own docstring for the
+            # three possible values per band.
+            'band_calibration': ppp_ar_result.get('band_calibration'),
         })
         return record
 

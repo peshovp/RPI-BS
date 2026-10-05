@@ -412,6 +412,15 @@
                                     {% else %}
                                         —
                                     {% endif %}
+                                    {% if a.band_calibration %}
+                                        {% set substituted_bands = a.band_calibration.items()|selectattr('1', 'in', ['substituted from G01', 'substituted from G02'])|list %}
+                                        {% if substituted_bands %}
+                                        <br><small class="text-warning" title="PRIDE-PPPAR's own ANTEX reader has no cross-GNSS frequency substitution - this project substitutes GPS L1/L2 values per the documented IGS convention (confirmed ~8mm-scale height bias) rather than leaving zero PCO/PCV for these bands">
+                                            <i class="fas fa-info-circle"></i> antenna calibrated for GPS L1/L2 only -
+                                            {{ substituted_bands|map('first')|join(', ') }} use{{ 's' if substituted_bands|length == 1 else '' }} substituted values
+                                        </small>
+                                        {% endif %}
+                                    {% endif %}
                                 </td>
                                 <td>
                                     {{ "%.1f"|format(a.wl_fix_rate) if a.wl_fix_rate is not none else 'n/a' }}% /

@@ -3446,6 +3446,43 @@ PrepareProducts() { # purpose : prepare PRIDE-PPPAR needed products in working d
     fi
 
     echo -e "$MSGINF Prepare IGS ANTEX file: $abs_atx done"
+
+    # LOCAL DOWNSTREAM PATCH (RPI-BS, Part 6b - not upstream PRIDE-PPPAR
+    # behavior; addons/PRIDE-PPPAR/ is vendored upstream source, keep this
+    # comment so it is never silently dropped on a future re-vendor from a
+    # new upstream snapshot). Unlike PPPProcessor's own igs20.atx (a
+    # fixed install-time file this project merges addons/geomaxima_antex/
+    # custom.atx into once - see ppp_processor.py's resolve_working_antex()),
+    # pdp3 downloads ITS OWN abs_igs.atx fresh into this run's own work
+    # directory every time, so there is no persistent file to merge into
+    # once - the merge has to happen HERE, per run, right before the
+    # receiver-antenna check below reads it.
+    #
+    # GEOMAXIMA_CUSTOM_ANTEX: an environment variable, NOT a $0/script-
+    # relative path - this script runs as the INSTALLED pdp3 binary
+    # (~/.PRIDE_PPPAR_BIN/pdp3), never from inside the git checkout at
+    # runtime (confirmed: find_pdp3() in pride_pppar_processor.py
+    # resolves that fixed install path, not anything under this repo),
+    # so a path derived from $0 would resolve under the wrong tree
+    # entirely. survey_controller.py's _run_ppp_ar() sets this env var
+    # (to PPPProcessor.custom_antex_path(), the SAME file
+    # ppp_processor.py's own merge uses) in the same shell invocation
+    # that execs pdp3 - see pride_pppar_processor.py's process_ppp_ar().
+    # Appends our vendored custom.atx verbatim (whole file, including
+    # its own header - a second ANTEX header mid-file is harmless, ANTEX
+    # readers only care about START/END OF ANTENNA blocks) UNLESS this
+    # run's own abs_igs.atx already has an entry for the SAME antenna
+    # type (an IGS entry must always win over our custom one - same rule
+    # PPPProcessor's own merge uses).
+    if [ -n "$GEOMAXIMA_CUSTOM_ANTEX" ] && [ -f "$GEOMAXIMA_CUSTOM_ANTEX" ]; then
+        rinex_ant_type="$(grep -m 1 "ANT # / TYPE" "$rinexobs" | cut -c 21-40)"
+        if [ -n "${rinex_ant_type// /}" ] && ! AntexHasAntenna abs_igs.atx "$rinex_ant_type" \
+           && AntexHasAntenna "$GEOMAXIMA_CUSTOM_ANTEX" "$rinex_ant_type"; then
+            echo -e "$MSGINF GeoMaxima Part 6b: antenna '$rinex_ant_type' not in $abs_atx - appending GeoMaxima's own custom.atx entry for it"
+            cat "$GEOMAXIMA_CUSTOM_ANTEX" >> abs_igs.atx
+        fi
+    fi
+
     [ "$mode" == "L" ] || CheckAntennaInAntex "$rinexobs" abs_igs.atx "$table_dir/$abs_atx"
 
     # Position SINEX solution

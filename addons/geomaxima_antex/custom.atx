@@ -1,0 +1,38 @@
+     1.4            G                                       ANTEX VERSION / SYST
+A                                                           PCV TYPE / REFANT
+This calibration extracted from composite ngs20.atx.  See   COMMENT
+the composite file ngs20.atx for more information.          COMMENT
+GeoMaxima Part 6b: fetched verbatim from                    COMMENT
+https://geodesy.noaa.gov/ANTCAL/LoadFile?file=              COMMENT
+AS-ANT3BCAL01_NONE.atx on 2026-10-02. sha256sum of the      COMMENT
+single-antenna file as originally fetched (before this      COMMENT
+provenance comment was added):                              COMMENT
+e34af73e02640844a505b3d7252193d99a9be16ec6951c150b7e9f5f66a COMMENT
+ba438. See addons/geomaxima_antex/README.md for the full    COMMENT
+merge mechanism this file feeds into.                       COMMENT
+                                                            END OF HEADER
+                                                            START OF ANTENNA
+AS-ANT3BCAL01   NONE                                        TYPE / SERIAL NO
+FIELD               NGS                      3    16-NOV-20 METH / BY / # / DATE
+     0.0                                                    DAZI
+     0.0  80.0   5.0                                        ZEN1 / ZEN2 / DZEN
+     2                                                      # OF FREQUENCIES
+NGSRA_2425                                                  SINEX CODE
+CONVERTED FROM RELATIVE NGS ANTENNA CALIBRATIONS            COMMENT
+   G01                                                      START OF FREQUENCY
+      2.56      1.97     61.74                              NORTH / EAST / UP
+   NOAZI    0.00    1.07    1.79    2.06    1.96    1.87    1.62    1.49    1.50    1.66    1.92    2.18    2.34    2.22    1.79    0.96   -0.27
+   G01                                                      END OF FREQUENCY
+   G02                                                      START OF FREQUENCY
+     -0.79      4.74     51.75                              NORTH / EAST / UP
+   NOAZI    0.00    2.17    3.29    3.62    3.31    2.72    2.00    1.33    0.68    0.38    0.44    0.94    1.67    2.57    3.27    3.67    3.72
+   G02                                                      END OF FREQUENCY
+   G01                                                      START OF FREQ RMS
+      0.10      0.50      0.30                              NORTH / EAST / UP
+   NOAZI    0.00    0.00    0.10    0.20    0.20    0.20    0.20    0.20    0.10    0.10    0.20    0.20    0.10    0.20    0.20    0.20    0.20
+   G01                                                      END OF FREQ RMS
+   G02                                                      START OF FREQ RMS
+      0.10      0.20      0.20                              NORTH / EAST / UP
+   NOAZI    0.00    0.30    0.40    0.50    0.50    0.50    0.50    0.50    0.50    0.40    0.40    0.40    0.40    0.50    0.50    0.50    0.50
+   G02                                                      END OF FREQ RMS
+                                                            END OF ANTENNA
