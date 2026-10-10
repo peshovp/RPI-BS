@@ -1,8 +1,75 @@
 # Autosurvey / PRIDE-PPPAR pipeline fix plan - status handoff
 
-Last updated: 2026-10-05, after Part 6b (`960f130`). This file exists so
-a fresh session (after a context reset/new conversation) can resume work
-without re-deriving the plan, the standing rules, or what's already done.
+Last updated: 2026-10-10, after Part 10b (`f8b7914`) and the archive/
+OTA data-loss incident hardening (`329cd8b`, `72584ad`). This file
+exists so a fresh session (after a context reset/new conversation) can
+resume work without re-deriving the plan, the standing rules, or what's
+already done.
+
+## 2026-10-05/06/07/10 data-loss incident - summary
+
+A test station lost every raw archive (several zips spanning Sep 23 -
+Oct 1) in one run of `archive_and_clean.sh` at 04:00 on 2026-10-05, and
+separately had `str2str_file.service` (raw GNSS logging) stopped for
+4+ days starting 2026-10-01 06:16.
+
+**Confirmed, by direct testing against the real code - not just
+inspection:**
+- `archive_and_clean.sh` was unsafe by construction: it `source`d the
+  entire settings.conf as shell code with zero validation, then used
+  the result directly in a destructive `find -delete`. A literal `"0"`
+  or `"00"` for `archive_rotate` genuinely deletes every archive
+  regardless of real age; a leading zero like `"08"` CRASHED the age
+  check entirely (bash misreads a leading-zero numeral as invalid
+  octal in both `(( ))` and `[[ -lt ]]` contexts).
+- `audit.log` writes from `archive_and_clean.sh` were silently
+  swallowed by TWO independent causes: wrong file ownership
+  (root:root 0644, unwritable by the service's own non-root user) AND
+  the unit's own `ProtectSystem=strict` sandbox (no `ReadWritePaths`
+  grant for a path outside the script's own directory). Both fixed;
+  a stderr+`logger` fallback now also exists so a future write failure
+  is never silent either way.
+- The journal itself was volatile (no `Storage=persistent`), which is
+  why pre-incident logs (Oct 1-4) were unrecoverable during the
+  investigation - fixed via `tools/install.sh`'s
+  `install_journald_retention()`.
+- File-service **STOPPED**: confirmed - `d8e817a` (2026-10-01 18:34), a
+  stale `file_service_owned` one-way latch, plain `systemctl stop`
+  (`survey_controller.py:625`, never `ServiceController.stop()`,
+  confirmed by reading the call site directly).
+- File-service **DISABLED**: no code path found anywhere in the repo
+  (current HEAD or `git log -S"disable"`/`-S"DisableUnitFiles"` history
+  since before 2026-09-15) that disables `str2str_file.service` as a
+  side effect of Autosurvey, Watchdog, or either OTA path. The only two
+  real `ServiceController.stop()` (disables-and-stops) call sites in
+  the whole repo are the UI's own intentional on/off toggle
+  (`switchService()` - correct to disable) and `configure_receiver()`
+  (a real temporary-stop bug, now fixed via a new `stop_temporarily()`
+  method) - but `configure_receiver()` only ever touches
+  `str2str_tcp.service`, never `str2str_file`, so it cannot be this
+  incident's mechanism. **A manual UI toggle cannot be ruled out and is
+  the leading open possibility for the "disabled" half.**
+- Separately corrected: commit `909a021` (2026-09-24) claims in its own
+  message to add `KillMode=process` to `unit/rtkbase_web.service` -
+  its diff shows only an explanatory comment was added, never the
+  actual directive. Not fixed by adding it now (would orphan
+  str2str/rtkrcv/PRIDE-PPPAR children on every future web restart);
+  fixed instead by launching both OTA paths via `systemd-run --collect`
+  outside that service's cgroup entirely, which makes the missing
+  directive moot for this specific class of bug.
+
+**Full hardening landed in two commits** (`329cd8b`, `72584ad`) -
+explicit key parsing/validation, audit-log access + fallback, journald
+persistence, server-side settings validation (rejecting leading zeros,
+using `[0-9]` never `\d`), `LogManager` path-traversal fix, a Watchdog
+raw-data-freshness check, `systemd-run --no-block` OTA launchers, a
+pre-OTA service-state snapshot (run_id + freshness matched, covers
+`.timer` units, raw state strings not booleans) restored in BOTH OTA
+scripts before their final web-service restart, and a visible
+status/settings page warning when raw logging is off and unowned. 121
+tests across 11 files, all run and passing on real Linux (WSL Ubuntu
+24.04) this session - not assumed correct from inspection or from a
+Windows/Git-Bash run alone.
 
 ## Standing rules (apply to every part below, no exceptions found so far)
 
@@ -79,13 +146,30 @@ without re-deriving the plan, the standing rules, or what's already done.
 | 9 | Fixed a confirmed-from-source multi-constellation bug: `_parse_fix_rate_line()` now takes the LAST "Wide/Narrow-lane FR(ind)" match (QZSS prints an identically-prefixed line before the true combined aggregate); split `PPP_AR_MIN_FIX_RATE_PERCENT` into separate WL/NL constants (still 90.0); cst_* T/W/N reconciliation with `fix_rate_mismatch` flag; per-call logging | done | `c28e9d4` |
 | 6a | Antenna/receiver info + ARP height into RINEX header for both PPP backends; PPP/PPP-AR ALWAYS processed at the antenna's own ARP (never the marker) - `ant1-antdel*=0` for rnx2rtkp, `convbin -hd 0/0/0` for PRIDE-PPPAR; marker position recovered ONLY for reports via `arp_to_marker()` (exact ECEF/ENU round-trip) + its own `verify_arp_to_marker_offset()` invariant; `antenna_calibrated` DERIVED from ANTEX lookup (not a manual key); new `antenna_arp_height_m/east_m/north_m` settings.conf keys (OTA-safe, default 0.0); UI reference-point report + uncalibrated-antenna note | done | `a487b3a` |
 | 6b | Custom ANTEX support: vendored ArduSimple AS-ANT3BCAL01 NGS calibration (`addons/geomaxima_antex/custom.atx`), merged into igs20.atx for rnx2rtkp (hash-cached) and injected per-run into pdp3's own freshly-downloaded ANTEX via a `GEOMAXIMA_CUSTOM_ANTEX` env var + a local `pdp3.sh` patch (PRIDE-PPPAR has no persistent ANTEX file of its own). **Found during review, not cosmetic**: PRIDE-PPPAR's `rdatx.f90` has NO cross-GNSS frequency substitution at all (confirmed file/line) - a 2-frequency (G01/G02-only) ANTEX entry would silently give zero PCO/PCV to every other constellation Part 1 could select. Fixed by implementing the documented historical IGS substitution convention ourselves (GPS L1 for upper-band, GPS L2 for lower-band), logged per-band every run, carried into the Part 5 record and UI | done | `960f130` |
-| 10 | READ-ONLY report on the BGS2005 transformation (~5cm residual vs АГКК BGSTrans, epoch handling) | **next** | - |
-| 11a | SOFI validation harness (BKG IGS/obs path, `_S_`/`_R_` naming, `crx2rnx` from official RNXCMP source) | pending | - |
+| 10 | READ-ONLY report on the BGS2005 transformation (~5cm residual vs АГКК BGSTrans, epoch handling) | done | `311bd59` |
+| 10b | BGS2005 corrected to ETRF2000 (was ETRF2014) + epoch-2005.0 reduction (Инструкция № РД-02-20-12/2012, Чл.20+Прил.6); EUREF TN1 Table 4 direct ITRF2020->ETRF2000 Helmert step; velocity source: SOFI's own EPN-derived ETRF2000 velocity (0.52mm/yr) as a **PROVISIONAL PROXY for every station** - flagged in every result (`coordinate_provisional: true`); all 3 chain stages kept/labeled in result+UI | done | `f8b7914` |
+| Archive/OTA incident | Data-loss incident hardening - see summary above | done | `329cd8b`, `72584ad` |
+| 11a | SOFI validation harness (BKG IGS/obs path, `_S_`/`_R_` naming, `crx2rnx` from official RNXCMP source) - **now explicitly validates the Part 10b chain against SOFI's own official EPN ETRF2000@2005.0 coordinate**, the 5mm/10mm acceptance test (Чл.7, Инструкция № РД-02-20-25/2011) | pending | - |
 | 7 | Frozen final window, "finalizing - waiting for product coverage" state, retry until accepted, remove the 540min time-based watchdog, 24h heartbeat + open-ended UI state, preserve final obs/slot | pending | - |
 | 11b | Differential PPP vs SOFI - design report only, no code | pending | - |
 
 ## Open questions / follow-ups not yet actioned
 
+- **Station-specific ETRF2000 velocity (Part 10b follow-up, not yet
+  started)** - Part 10b's epoch-2005.0 reduction uses SOFI's own EPN
+  velocity as a proxy for EVERY station, flagged provisional in every
+  result. Planned fix: interpolate a station-specific velocity from the
+  EPN densification (EPND) velocity field or a published Bulgarian
+  intraplate model, vendored with provenance, SOFI only as fallback
+  when no closer source is available. This is the single highest-
+  priority open item for compliance accuracy (potential 4-6cm error
+  for a station whose true velocity differs meaningfully from SOFI's).
+- **File-service "disabled" root cause (archive/OTA incident) remains
+  partially open** - the "stopped" half is fully confirmed
+  (`d8e817a`); no code path was found that disables
+  `str2str_file.service` outside the intentional UI toggle. A manual
+  UI toggle use cannot be ruled out and has not been confirmed or
+  denied by the station operator as of this doc's last update.
 - **Retention rule 2** (prune by survey boundary, not just by count) -
   proposed, approved for rules 1+3 only so far; rule 2 explicitly
   deferred to "after the next survey" (per the user's own instruction) -
@@ -106,27 +190,35 @@ without re-deriving the plan, the standing rules, or what's already done.
 - **Orange Pi branch (`feature/armbian-opi4pro-support`) has NOT been
   updated with `main`'s work** - as of this doc, its tip (`68c61fe`) is
   itself an ancestor of `main`'s much earlier history (before `f751930`);
-  it has received none of the DNS migration (`2b01198`) or anything from
-  this session (`f751930` through `960f130`, 21 commits). Needs an
-  explicit merge/rebase decision before that branch is usable again.
+  it has received none of the DNS migration (`2b01198`), anything from
+  the Part 5-10b session (`f751930` through `f8b7914`), or the archive/
+  OTA incident hardening (`329cd8b`, `72584ad`). Needs an explicit
+  merge/rebase decision before that branch is usable again.
 - **Part 9's QZSS fixture is synthetic** - replace with real data once a
   station produces a genuine multi-GNSS (QZSS-containing) AR run; the
   INFO-level stdout logging needed to capture it already exists.
 
 ## Remaining task order (as last confirmed by the user)
 
-Part 10 (read-only report) -> Part 11a -> Part 7 -> Part 11b.
+Station-specific ETRF2000 velocity (Part 10b follow-up) -> Part 11a ->
+Part 7 -> Part 11b. The archive/OTA data-loss incident hardening is
+done; the File-service "disabled" root cause remains partially open
+(see above) pending the station operator's own confirmation of whether
+a manual UI toggle was used.
 
 ## How to resume
 
 1. Read this file.
-2. Confirm the three ls-remote hashes below still match
+2. Confirm the two ls-remote hashes below still match
    `git ls-remote origin refs/heads/main` /
    `refs/heads/feature/armbian-opi4pro-support` (if they don't, something
    happened between this doc's last update and now - investigate before
    assuming the table above is still accurate).
-3. Pick up at Part 10, diff-first as always.
+3. Pick up at the station-specific ETRF2000 velocity follow-up, or ask
+   whether the File-service "disabled" question has been resolved
+   (operator confirmation) before Part 11a's SOFI acceptance test is
+   run, since both are open. Diff-first as always.
 
 **Hashes at the time this file was written:**
-- `main`: `960f13048def7add890e7fcee646202e5b14513b`
+- `main`: `f8b7914f1745eade58b5304f2c3585b525918cdb`
 - `feature/armbian-opi4pro-support`: `68c61feca0ae7395d750d971e88da6e483299855`
