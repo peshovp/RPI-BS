@@ -1669,7 +1669,7 @@ def _self_heal_audit_log_and_journald():
         does nothing and stays silent when already correct.
     """
     try:
-        # general.user is stored quoted in settings.conf (e.g. "'peshovp'")
+        # general.user is stored quoted in settings.conf (e.g. "'someuser'")
         # - same .strip("'") convention used everywhere else this key is
         # read in this file (see e.g. convbin_user above).
         standard_user = rtkbaseconfig.get("general", "user").strip("'")
@@ -1701,8 +1701,18 @@ def _self_heal_audit_log_and_journald():
     try:
         journald_dropin = Path("/etc/systemd/journald.conf.d/geomaxima-retention.conf")
         if not journald_dropin.exists():
+            # GeoMaxima - 2026-10-13 review fix: pass --user explicitly here
+            # too (standard_user is already resolved above) rather than
+            # relying on install.sh's own settings.conf/SUDO_USER fallback -
+            # same "pass --user explicitly everywhere install.sh is called
+            # from an OTA/self-heal path" rule applied to every other
+            # caller in this incident's fix.
+            standard_user = rtkbaseconfig.get("general", "user").strip("'")
+            journald_cmd = [os.path.join(rtkbase_path, "tools", "install.sh"), "--journald-retention"]
+            if standard_user:
+                journald_cmd += ["--user", standard_user]
             result = subprocess.run(
-                [os.path.join(rtkbase_path, "tools", "install.sh"), "--journald-retention"],
+                journald_cmd,
                 capture_output=True, text=True, check=False,
             )
             if result.returncode == 0:

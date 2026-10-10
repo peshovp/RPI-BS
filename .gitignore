@@ -37,3 +37,9 @@ test.conf
 # literally named "wum") - no code in this repo creates this; ignored
 # purely as a safety net in case it recurs during manual debugging.
 /wum
+# 2026-10-13 review fix: settings.conf backups now live at
+# /var/lib/rtkbase/settings_backups (RTKBaseConfigManager.py), never
+# inside this checkout - this is a safety net against the OLD in-repo
+# location ever being re-created (e.g. by a station still running pre-
+# migration code) and then caught up in a `git reset --hard`/`git clean`.
+/settings_conf_backups/

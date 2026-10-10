@@ -93,20 +93,55 @@ man_help(){
 }
 
 _check_user() {
-  # RTKBASE_USER is a global variable
+  # RTKBASE_USER is a global variable.
+  #
+  # GeoMaxima - 2026-10-13 review fix: `logname` has no answer at all in a
+  # non-interactive context with no login session - confirmed live, an OTA
+  # running inside a systemd transient unit (`geomaxima-ota-*`, launched via
+  # `systemd-run`) has no controlling terminal/PAM session, so `logname`
+  # prints nothing and this used to hit the "empty value" branch and
+  # `exit 1`, aborting the whole install.sh invocation (even for an
+  # unrelated flag like --journald-retention that never needed a user at
+  # all in the first place - see install_journald_retention(), which takes
+  # no user argument). Resolution order, most to least explicit:
+  #   1. --user argument (unchanged)
+  #   2. settings.conf's own [general] user= value, if a repo checkout can
+  #      be found relative to this script (this is the user RTKBase
+  #      services already run as - the right fallback on an already-
+  #      installed station, which is exactly the case an OTA runs in)
+  #   3. SUDO_USER (only if not "root" itself - a plain `sudo
+  #      install.sh ...` run by a human has this set to their login user)
+  #   4. fail, but ONLY this resolution step - callers that don't actually
+  #      need RTKBASE_USER (e.g. --journald-retention alone) must not be
+  #      blocked by a user that can't be determined. See install.sh's
+  #      argument-parsing block, which now only calls _check_user when a
+  #      requested flag actually needs RTKBASE_USER.
   if [ "${1}" != 0 ] ; then
     RTKBASE_USER="${1}"
       #TODO check if user exists and/or path exists ?
       # warning for image creation, do the path exist ?
-  elif [[ -z $(logname) ]] ; then
-    echo 'The logname command return an empty value. Please reboot and retry.'
-    exit 1
-  elif [[ $(logname) == 'root' ]]; then
-    echo 'The logname command return "root". Please reboot or use --user argument to choose the correct user which should run rtkbase services'
-    exit 1
-  else
-    RTKBASE_USER=$(logname)
+    return 0
   fi
+
+  local script_dir settings_conf conf_user
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for settings_conf in "${script_dir}/../settings.conf" "${script_dir}/settings.conf"; do
+    if [[ -f "${settings_conf}" ]]; then
+      conf_user=$(grep -E "^user=" "${settings_conf}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "'\"")
+      if [[ -n "${conf_user}" ]]; then
+        RTKBASE_USER="${conf_user}"
+        return 0
+      fi
+    fi
+  done
+
+  if [[ -n "${SUDO_USER:-}" ]] && [[ "${SUDO_USER}" != 'root' ]]; then
+    RTKBASE_USER="${SUDO_USER}"
+    return 0
+  fi
+
+  echo 'Could not determine which user RTKBase should run as (no --user argument, no settings.conf [general] user=, no usable SUDO_USER). Please pass --user explicitly.'
+  return 1
 }
 
 _version() { 
@@ -1016,7 +1051,23 @@ main() {
     done
   cumulative_exit=0
   [ $ARG_HELP -eq 1 ] && man_help
-  _check_user "${ARG_USER}" ; echo 'user for RTKBase is: ' "${RTKBASE_USER}"
+  # GeoMaxima - 2026-10-13 review fix: only block on a resolvable
+  # RTKBASE_USER when a requested step actually needs one.
+  # --journald-retention (install_journald_retention takes no user
+  # argument) must not be aborted just because no user could be
+  # determined - confirmed live: an OTA's standalone
+  # `install.sh --journald-retention` call used to die here every time in
+  # a systemd transient unit with no login session, before
+  # install_journald_retention() ever ran.
+  if [ $ARG_ALL != 0 ] || [ $ARG_UNIT -eq 1 ] || [ $ARG_AUDIT_LOG_ACCESS -eq 1 ] || [ $ARG_START_SERVICES -eq 1 ] || [ $ARG_DETECT_MODEM -eq 1 ] || [ $ARG_GPSD_CHRONY -eq 1 ]; then
+    if ! _check_user "${ARG_USER}"; then
+      exit 1
+    fi
+    echo 'user for RTKBase is: ' "${RTKBASE_USER}"
+  elif [ "${ARG_USER}" != 0 ]; then
+    _check_user "${ARG_USER}"
+    echo 'user for RTKBase is: ' "${RTKBASE_USER}"
+  fi
   #if [ $ARG_USER != 0 ] ;then echo 'user:' "${ARG_USER}"; check_user "${ARG_USER}"; else ;fi
   if [ $ARG_ALL != 0 ] 
   then

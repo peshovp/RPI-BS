@@ -505,7 +505,7 @@ chown -R ${standard_user}:${standard_user} ${destination_directory}
 #unconditionally in the update tail every single time. Idempotent -
 #install.sh's install_journald_retention() just rewrites the same
 #drop-in and restarts journald, safe to repeat.
-"${destination_directory}"/tools/install.sh --journald-retention
+"${destination_directory}"/tools/install.sh --journald-retention --user "${standard_user}"
 
 #GeoMaxima - 2026-10-05/06 incident investigation: fix audit.log's
 #ownership on EVERY OTA, same unconditional pattern as journald
@@ -513,7 +513,14 @@ chown -R ${standard_user}:${standard_user} ${destination_directory}
 #upd_X.Y.Z() function would otherwise ship this fix must still receive
 #it, since archive_and_clean.sh's audit-log write depends on it on every
 #single run, not just at upgrade time.
-"${destination_directory}"/tools/install.sh --audit-log-access
+#
+#GeoMaxima - 2026-10-13 review fix: --user was missing on BOTH calls above
+#- _check_user() in tools/install.sh used to fall back to `logname`, which
+#has no answer at all in a non-interactive context (confirmed live: an
+#OTA running inside a systemd transient unit has no login session). Pass
+#it explicitly everywhere install.sh is invoked from an OTA path, same as
+#every other install.sh call in this file already does.
+"${destination_directory}"/tools/install.sh --audit-log-access --user "${standard_user}"
 
   #restart str2str if it was active before upgrading rtklib
   # restart not nedeed if RTKlib was not upgraded
