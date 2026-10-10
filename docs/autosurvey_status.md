@@ -1,10 +1,11 @@
 # Autosurvey / PRIDE-PPPAR pipeline fix plan - status handoff
 
-Last updated: 2026-10-10, after Part 10b (`f8b7914`) and the archive/
-OTA data-loss incident hardening (`329cd8b`, `72584ad`). This file
-exists so a fresh session (after a context reset/new conversation) can
-resume work without re-deriving the plan, the standing rules, or what's
-already done.
+Last updated: 2026-10-13, after a live OTA verification found that the
+archive/OTA incident fixes (`329cd8b`, `72584ad`) hadn't actually
+applied (see below) - fixed in the next commit after this doc update.
+This file exists so a fresh session (after a context reset/new
+conversation) can resume work without re-deriving the plan, the
+standing rules, or what's already done.
 
 ## 2026-10-05/06/07/10 data-loss incident - summary
 
@@ -37,18 +38,21 @@ inspection:**
   stale `file_service_owned` one-way latch, plain `systemctl stop`
   (`survey_controller.py:625`, never `ServiceController.stop()`,
   confirmed by reading the call site directly).
-- File-service **DISABLED**: no code path found anywhere in the repo
-  (current HEAD or `git log -S"disable"`/`-S"DisableUnitFiles"` history
-  since before 2026-09-15) that disables `str2str_file.service` as a
-  side effect of Autosurvey, Watchdog, or either OTA path. The only two
-  real `ServiceController.stop()` (disables-and-stops) call sites in
-  the whole repo are the UI's own intentional on/off toggle
+- File-service **DISABLED**: cause unknown - no code path found
+  anywhere in the repo (current HEAD or `git log
+  -S"disable"`/`-S"DisableUnitFiles"` history since before 2026-09-15)
+  that disables `str2str_file.service` as a side effect of Autosurvey,
+  Watchdog, or either OTA path. The only two real
+  `ServiceController.stop()` (disables-and-stops) call sites in the
+  whole repo are the UI's own intentional on/off toggle
   (`switchService()` - correct to disable) and `configure_receiver()`
   (a real temporary-stop bug, now fixed via a new `stop_temporarily()`
   method) - but `configure_receiver()` only ever touches
   `str2str_tcp.service`, never `str2str_file`, so it cannot be this
-  incident's mechanism. **A manual UI toggle cannot be ruled out and is
-  the leading open possibility for the "disabled" half.**
+  incident's mechanism. **Operator follow-up (2026-10-13): unknown - he
+  may have toggled it off in the UI or deleted files manually, but does
+  not remember which, and no audit trail existed for either action at
+  the time (closed going forward - see below).**
 - Separately corrected: commit `909a021` (2026-09-24) claims in its own
   message to add `KillMode=process` to `unit/rtkbase_web.service` -
   its diff shows only an explanatory comment was added, never the
@@ -70,6 +74,52 @@ status/settings page warning when raw logging is off and unowned. 121
 tests across 11 files, all run and passing on real Linux (WSL Ubuntu
 24.04) this session - not assumed correct from inspection or from a
 Windows/Git-Bash run alone.
+
+### 2026-10-13: live OTA verification found the fix itself didn't apply
+
+A real OTA to commit `fccc038` on a test station confirmed the broadcast
+position/settings/services were all correctly preserved, but THREE of
+the just-landed fixes (audit-log-access, journald-retention, the
+service-state restore) had NOT been applied at all.
+
+**Root cause, confirmed by reading the code**:
+`addons/tools/perform_update.sh` makes a private self-copy of itself to
+`/tmp` BEFORE its own `git reset --hard` (specifically so that reset
+replacing the on-disk file mid-run can't corrupt the running script),
+and `update_controller.py`'s `perform_update()` resolves and launches
+this script BEFORE any pull/reset runs. The process that actually
+executes an OTA is therefore always whichever `perform_update.sh`
+version was already on disk at the START of the update - inlining
+post-update steps into that same script (as the previous commit did)
+can **never** see its own post-reset code, no matter how the script is
+edited, because the running copy was made before the edit ever landed.
+
+**Fix**: the post-update steps now live in a separate script,
+`addons/tools/post_update.sh`, which `perform_update.sh` hands off to
+via `cat tools/post_update.sh | bash -s -- ...` **after** its own git
+reset has already landed the new tree - always reading the file fresh
+from disk at that point, never from the pre-reset self-copy. Also
+added: a startup self-heal in `web_app/server.py` (root, every
+`rtkbase_web.service` start) that idempotently fixes audit.log
+ownership/mode and installs the journald drop-in if missing, covering
+any station updated by an older launcher regardless of OTA history;
+`settings.conf` backups moved from inside the git working tree
+(`<rtkbase_path>/settings_conf_backups/`, fragile against a future
+`git clean -fdx`/re-clone) to `/var/lib/rtkbase/settings_backups`, the
+same location every other piece of this project's runtime state
+already lives in, with one-time migration of any existing backups; and
+`switchService()` (the UI's service on/off toggle - the only confirmed
+code path that disables a unit) now logs an audit event with the
+before-state, requested action, success/failure, and after-state for
+every start/stop, closing the audit gap that made the File-service
+"disabled" question unanswerable in the first place.
+
+22 new tests (143 total across 14 files), all run and passing on real
+Linux (WSL Ubuntu 24.04). **The next OTA is the real test of the new
+post-update hand-off path** - this round's fix could only be verified
+by direct code reading and simulation in this sandbox (no real
+`systemd`/root OTA environment available here), not by an actual live
+OTA run.
 
 ## Standing rules (apply to every part below, no exceptions found so far)
 
@@ -164,12 +214,20 @@ Windows/Git-Bash run alone.
   when no closer source is available. This is the single highest-
   priority open item for compliance accuracy (potential 4-6cm error
   for a station whose true velocity differs meaningfully from SOFI's).
-- **File-service "disabled" root cause (archive/OTA incident) remains
-  partially open** - the "stopped" half is fully confirmed
-  (`d8e817a`); no code path was found that disables
-  `str2str_file.service` outside the intentional UI toggle. A manual
-  UI toggle use cannot be ruled out and has not been confirmed or
-  denied by the station operator as of this doc's last update.
+- **File-service "disabled" root cause - CLOSED as "cause unknown",
+  gap fixed going forward.** The "stopped" half is fully confirmed
+  (`d8e817a`); the operator confirmed (2026-10-13) he does not remember
+  whether he toggled it off in the UI or deleted files manually, and no
+  audit trail existed for either action at the time. `switchService()`
+  now logs a full before/requested/success/after audit event on every
+  UI toggle, so this specific ambiguity cannot recur.
+- **The next OTA is the real test of the post_update.sh hand-off fix**
+  (see the 2026-10-13 section above) - this sandbox has no real
+  systemd/root OTA environment, so the fix was verified by code reading
+  and simulation only, not by an actual live update. Confirm on the
+  next real OTA: audit.log ownership (root:\<user\> 0660), the journald
+  drop-in (`/etc/systemd/journald.conf.d/geomaxima-retention.conf`),
+  and `ota_service_state`/`post_update` events in audit.log.
 - **Retention rule 2** (prune by survey boundary, not just by count) -
   proposed, approved for rules 1+3 only so far; rule 2 explicitly
   deferred to "after the next survey" (per the user's own instruction) -
@@ -201,10 +259,12 @@ Windows/Git-Bash run alone.
 ## Remaining task order (as last confirmed by the user)
 
 Station-specific ETRF2000 velocity (Part 10b follow-up) -> Part 11a ->
-Part 7 -> Part 11b. The archive/OTA data-loss incident hardening is
-done; the File-service "disabled" root cause remains partially open
-(see above) pending the station operator's own confirmation of whether
-a manual UI toggle was used.
+Part 7 -> Part 11b. The archive/OTA data-loss incident hardening,
+including the 2026-10-13 post_update.sh hand-off fix, is done; the
+File-service "disabled" root cause is closed as "cause unknown" (the
+audit gap that made it unanswerable is fixed going forward). The next
+OTA to any station should be checked against the verification list in
+the 2026-10-13 section above.
 
 ## How to resume
 
@@ -214,11 +274,12 @@ a manual UI toggle was used.
    `refs/heads/feature/armbian-opi4pro-support` (if they don't, something
    happened between this doc's last update and now - investigate before
    assuming the table above is still accurate).
-3. Pick up at the station-specific ETRF2000 velocity follow-up, or ask
-   whether the File-service "disabled" question has been resolved
-   (operator confirmation) before Part 11a's SOFI acceptance test is
-   run, since both are open. Diff-first as always.
+3. Pick up at the station-specific ETRF2000 velocity follow-up, or
+   check whether the next OTA to a station confirms the
+   post_update.sh hand-off fix (audit.log ownership, journald drop-in,
+   ota_service_state/post_update audit events - see the 2026-10-13
+   section above). Diff-first as always.
 
 **Hashes at the time this file was written:**
-- `main`: `f8b7914f1745eade58b5304f2c3585b525918cdb`
+- `main`: `abcd35a8a37edd4b525fb783370bfd7f853367fd`
 - `feature/armbian-opi4pro-support`: `68c61feca0ae7395d750d971e88da6e483299855`
