@@ -525,5 +525,6 @@ the 2026-10-13 section above.
    section above). Diff-first as always.
 
 **Hashes at the time this file was written:**
-- `main`: `abcd35a8a37edd4b525fb783370bfd7f853367fd`
-- `feature/armbian-opi4pro-support`: `68c61feca0ae7395d750d971e88da6e483299855`
+- `main`: `b90042907e24c6ebd40b2d78ce311d74ae81ed19`
+- `feature/armbian-opi4pro-support`: deleted 2026-10-14 - the Orange Pi
+  station is fully migrated to `main`, no longer a separate branch.
