@@ -95,7 +95,7 @@ can **never** see its own post-reset code, no matter how the script is
 edited, because the running copy was made before the edit ever landed.
 
 **Fix**: the post-update steps now live in a separate script,
-`addons/tools/post_update.sh`, which `perform_update.sh` hands off to
+`tools/post_update.sh`, which `perform_update.sh` hands off to
 via `cat tools/post_update.sh | bash -s -- ...` **after** its own git
 reset has already landed the new tree - always reading the file fresh
 from disk at that point, never from the pre-reset self-copy. Also
@@ -241,6 +241,50 @@ git repos, all passing.
 this fix - waiting on explicit confirmation that the Topolchane OTA
 fixes verify correctly on a live station first, per the user's own
 sequencing instruction.
+
+## 2026-10-14: the post_update.sh hand-off had NEVER actually run on any station
+
+The Topolchane OTA to `c3634fd` succeeded (web restarted, station
+healthy) but its log showed: `"tools/post_update.sh not found in the
+updated tree - skipping post-update steps"`, and `audit.log` had zero
+`post_update`/`ota_service_state` events. Root cause, confirmed via
+`git show <hash>:addons/tools/perform_update.sh | grep post_update`
+against every deployed parent (`298cedb`, `b1c6b83`, `8ec046f`,
+`c3634fd`): `post_update.sh` was created at
+`addons/tools/post_update.sh`, but **every single deployed version of
+`perform_update.sh` looks for it at `$DEV_REPO_PATH/tools/post_update.sh`**
+- the plain `tools/` path, with zero exceptions across all four
+parents. The hand-off had therefore never actually executed on any
+station since it was introduced; only the separate web-startup
+self-heal (a different code path entirely) saved every OTA that
+happened to go through it.
+
+Fixed: `git mv addons/tools/post_update.sh tools/post_update.sh` - this
+alone fixes the very next OTA from any of the four already-deployed
+parents, since they all already agree on this exact path; no wrapper
+script was needed. Also added, since a missing `post_update.sh` must
+be a warning (`gm_warn`, "completed with warnings"), never silently
+treated as success - confirmed this was already correctly wired from
+the prior `8ec046f` best-effort-split commit, just never reachable
+because the file itself was never found.
+
+Two new tests close the real gap that let this slip through:
+`tests/post_update_path_resolution_test.sh` runs `perform_update.sh`'s
+REAL `[ -r ... ]` lookup logic (extracted verbatim, not reimplemented)
+against the real repo tree, and separately confirms (via `git show`)
+that every historically-deployed parent looked up the identical path.
+`tests/perform_update_handoff_audit_test.sh` goes further: it runs the
+REAL `gm_post_update_handoff()` function end-to-end against a fake repo
+tree built from the real `tools/post_update.sh`, and asserts
+`before_update`/`after_update` actually land in `audit.log` as a
+result - the exact two events confirmed missing live. The *existing*
+`tests/perform_update_service_restore_test.sh` ran `tools/post_update.sh`
+directly, bypassing `perform_update.sh`'s own lookup entirely - which is
+exactly why it never caught this path mismatch; it remains useful as a
+narrower unit test but is no longer the only coverage for this path.
+
+The next Topolchane OTA is the real verification: `post_update` and
+`ota_service_state` category events should now appear in `audit.log`.
 
 ## Standing rules (apply to every part below, no exceptions found so far)
 

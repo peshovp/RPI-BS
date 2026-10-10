@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit-style test for addons/tools/post_update.sh's service-state
+# Unit-style test for tools/post_update.sh's service-state
 # snapshot-read + restore logic (2026-10-10/13 review fix) - this logic
 # used to be inlined in perform_update.sh itself, which is confirmed
 # live NEVER to work that way: perform_update.sh self-copies to /tmp
@@ -100,7 +100,7 @@ echo "disabled" > "$W/units/str2str_file.service.enabled"
 echo "== Run the REAL post_update.sh directly (not an extracted fragment) =="
 AUDIT_LOG="$W/audit.log"
 OUT=$(bash -c "
-  sed 's#/var/lib/rtkbase/audit.log#${AUDIT_LOG}#; s#/var/lib/rtkbase/ota/service_state_before.json#${SNAPSHOT_PATH}#; s#/var/lib/rtkbase/\.post_update_service_state#${W}/.post_update_service_state#' '$REPO/addons/tools/post_update.sh' > '$W/post_update_rendered.sh'
+  sed 's#/var/lib/rtkbase/audit.log#${AUDIT_LOG}#; s#/var/lib/rtkbase/ota/service_state_before.json#${SNAPSHOT_PATH}#; s#/var/lib/rtkbase/\.post_update_service_state#${W}/.post_update_service_state#' '$REPO/tools/post_update.sh' > '$W/post_update_rendered.sh'
   bash '$W/post_update_rendered.sh' '$W/fake_repo' 'testuser' '$RUN_ID'
 " 2>&1)
 echo "$OUT"

@@ -27,12 +27,12 @@ bad() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 mkdir -p "$W/bin" "$W/repo/tools"
 
 echo "== Static check: trap 'exit 0' EXIT is registered in the real post_update.sh =="
-grep -q "trap 'exit 0' EXIT" "$REPO/addons/tools/post_update.sh" \
+grep -q "trap 'exit 0' EXIT" "$REPO/tools/post_update.sh" \
   && ok "post_update.sh registers an unconditional exit-0 EXIT trap" \
   || bad "post_update.sh does NOT register the exit-0 EXIT trap"
 
 echo "== Case A: missing required arguments (an internal contract violation) - must still exit 0 =="
-OUT=$(bash "$REPO/addons/tools/post_update.sh" 2>&1)
+OUT=$(bash "$REPO/tools/post_update.sh" 2>&1)
 RC=$?
 echo "$OUT"
 echo "exit code: $RC"
@@ -54,7 +54,7 @@ exit 1
 EOF
 chmod +x "$W/repo/tools/install.sh"
 
-OUT=$(PATH="$W/bin:/usr/bin:/bin" AUDIT_LOG_OVERRIDE="$W/audit.log" bash "$REPO/addons/tools/post_update.sh" "$W/repo" "testuser" "test-run-id" 2>&1)
+OUT=$(PATH="$W/bin:/usr/bin:/bin" AUDIT_LOG_OVERRIDE="$W/audit.log" bash "$REPO/tools/post_update.sh" "$W/repo" "testuser" "test-run-id" 2>&1)
 RC=$?
 echo "$OUT"
 echo "exit code: $RC"

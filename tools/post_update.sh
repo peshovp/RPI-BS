@@ -28,6 +28,19 @@
 # same end state (ownership/mode, drop-in file, service active/enabled
 # state) regardless of the station's current state.
 #
+# GeoMaxima - 2026-10-14 review fix: THIS FILE MUST LIVE AT EXACTLY
+# tools/post_update.sh. Confirmed live (Topolchane OTA to c3634fd): this
+# file was originally created at addons/tools/post_update.sh, but every
+# perform_update.sh version ever deployed (298cedb, b1c6b83, 8ec046f,
+# c3634fd, and the current tree) looks for it at
+# "$DEV_REPO_PATH/tools/post_update.sh" - so the hand-off had NEVER
+# actually run on any station; the OTA only succeeded because of the
+# separate web-startup self-heal path. tests/post_update_path_resolution_test.sh
+# and tests/perform_update_handoff_audit_test.sh both run the REAL
+# lookup/hand-off logic (not a hand-copied reimplementation) against
+# this file's REAL on-disk path specifically to catch a future
+# reintroduction of this bug.
+#
 # GeoMaxima - 2026-10-13 review fix: this script must ALWAYS exit 0, no
 # matter what happens inside it. perform_update.sh's hand-off
 # (`cat tools/post_update.sh | bash -s -- ...`) is already wrapped in an
