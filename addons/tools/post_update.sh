@@ -27,6 +27,25 @@
 # Idempotent and safe to re-run - every step here just re-applies the
 # same end state (ownership/mode, drop-in file, service active/enabled
 # state) regardless of the station's current state.
+#
+# GeoMaxima - 2026-10-13 review fix: this script must ALWAYS exit 0, no
+# matter what happens inside it. perform_update.sh's hand-off
+# (`cat tools/post_update.sh | bash -s -- ...`) is already wrapped in an
+# `if ... ; then ... ; else ...warn...; fi` on BOTH the already-committed
+# 298cedb version (which will launch the very next OTA on the station
+# this incident happened on) and the current version in this repo - so a
+# non-zero exit here was already caught and turned into a warning rather
+# than aborting the parent before it reaches the service-state restore/
+# web restart. This exit-0 guarantee is a second, independent line of
+# defense against the still-unexplained "exit 3" seen live: even if some
+# future change to this script (or an environment this hasn't been
+# tested against) introduces a path that would otherwise propagate a
+# nonzero exit, that can never again reach the parent and abort it.
+# Implemented via a trap on EXIT that forces exit 0 unconditionally,
+# covering every path out of this script - explicit exit calls, `set -u`
+# unbound-variable aborts, and signals - not just the normal fall-through
+# at the bottom.
+trap 'exit 0' EXIT
 
 set -u
 
@@ -63,7 +82,7 @@ if [[ -x "${DEV_REPO_PATH}/tools/install.sh" ]]; then
   fi
 
   echo "post_update.sh: running install_journald_retention..."
-  if sudo "${DEV_REPO_PATH}/tools/install.sh" --journald-retention 2>&1; then
+  if sudo "${DEV_REPO_PATH}/tools/install.sh" --journald-retention --user "${REPO_OWNER}" 2>&1; then
     _post_update_audit_log "journald_retention_applied" "{}"
   else
     echo "⚠ install_journald_retention reported an error - continuing anyway" >&2

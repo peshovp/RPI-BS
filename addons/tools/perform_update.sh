@@ -19,7 +19,7 @@ if [ -z "${GM_UPDATER_COPY:-}" ]; then
     GM_UPDATER_COPY=""   # copy failed - run in place
 fi
 
-set -e
+set -Ee
 
 # Log everything to /tmp/ota_update.log for debugging. This already
 # captures every command's output, so commands below must NOT also pipe
@@ -28,23 +28,106 @@ set -e
 exec 1> >(tee -a /tmp/ota_update.log)
 exec 2>&1
 
+# GeoMaxima - 2026-10-13 review fix: CRITICAL vs BEST-EFFORT split, closing
+# the gap confirmed live on a real OTA (298cedb on a test station): a
+# best-effort step (install.sh --journald-retention, via post_update.sh)
+# failed, the whole update was reported FAILED, and - because that failure
+# happened partway through, under `set -e`, with no guaranteed finally path
+# - the service-state restore and the final web restart never ran either,
+# leaving the station on the new code but with the UI still showing the
+# OLD commit (rtkbase_web was never restarted) and no restore of whatever
+# services were active/enabled before the update. From here on:
+#   - CRITICAL steps (ownership normalization, git reset+verify, unit
+#     redeploy, the post_update.sh hand-off's own service-state restore,
+#     the final web restart) abort the update on failure, as before.
+#   - BEST-EFFORT steps (raspi-config, apt packages, WireGuard, DNS
+#     migration, ANTEX, PRIDE-PPPAR, pip refresh, post_update.sh's
+#     install.sh calls) are tracked but NEVER abort the update - a failure
+#     there is logged to both /tmp/ota_update.log and audit.log, and the
+#     final status becomes "completed with warnings" rather than FAILED.
+#   - The service-state restore AND the final web restart are moved into a
+#     trap-driven finally path (gm_run_finally, below) that runs exactly
+#     once, from the EXIT trap, regardless of where/why the script exits -
+#     so a station is never left with the new code but the old process
+#     still running, and never left with services in the wrong state,
+#     even if some other, currently-unknown failure aborts the script
+#     between the reset and the point this comment describes.
+GM_UPDATE_DONE=0
+GM_ERROR_REPORTED=0
+GM_WARNINGS=()
+GM_FINALLY_RAN=0
+
+gm_warn() {
+    # Record a BEST-EFFORT step's failure. Never aborts the update.
+    local msg="$1"
+    GM_WARNINGS+=("$msg")
+    echo "⚠ $msg" >&2
+    _gm_audit_log "best_effort_step_failed" "{\"message\": $(gm_json_string "$msg")}" 2>/dev/null || true
+}
+
+gm_json_string() {
+    # Minimal JSON string escaping (backslash and double-quote only -
+    # every caller passes a plain English message, never user input).
+    local s="${1//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '"%s"' "$s"
+}
+
+GM_AUDIT_LOG_PATH="/var/lib/rtkbase/audit.log"
+_gm_audit_log() {
+    local event="$1" details_json="$2"
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%6N")
+    mkdir -p "$(dirname "${GM_AUDIT_LOG_PATH}")" 2>/dev/null
+    printf '{"timestamp": "%s", "category": "ota", "event": "%s", "details": %s}\n' \
+        "${ts}" "${event}" "${details_json}" >> "${GM_AUDIT_LOG_PATH}" 2>/dev/null || true
+}
+
 # Any exit other than the explicit success at the end is a FAILED update -
 # including `set -e` aborts. The status file must never be left saying
 # "running" or "success" in that case. (log_status is defined below; the
 # trap only fires once the script is running.)
-GM_UPDATE_DONE=0
-GM_ERROR_REPORTED=0
-gm_on_exit() {
+#
+# GeoMaxima - 2026-10-13 review fix: report the REAL failing file/line -
+# confirmed live, the previous version printed "line ?" (GM_LAST_LINE was
+# never actually set on the failure path that mattered). $LINENO inside
+# an ERR trap already reports the line of the command that triggered the
+# trap, both at top level AND inside a function call (confirmed directly:
+# a `false` at top level reports that exact line; a `false` inside a
+# function called from top level also reports that function's own line -
+# BASH_LINENO[0], by contrast, is 0 at top level, since it only has
+# meaning as "the line that called the CURRENTLY EXECUTING function",
+# which doesn't exist outside a function call. $LINENO alone is correct
+# here).
+trap 'GM_LAST_LINE=$LINENO; GM_LAST_SOURCE=${BASH_SOURCE[0]:-$0}' ERR
+trap gm_run_finally EXIT
+
+gm_run_finally() {
     local rc=$?
+    # Idempotent - EXIT can in principle fire more than once reentrantly
+    # (e.g. a signal during this trap itself); never run the restore/
+    # restart twice.
+    [ "$GM_FINALLY_RAN" = 1 ] && return
+    GM_FINALLY_RAN=1
+
     [ -n "${GM_UPDATER_COPY:-}" ] && rm -f "$GM_UPDATER_COPY"
-    # Only if nothing more specific was reported (log_status "error" sets
-    # GM_ERROR_REPORTED) - never overwrite e.g. the git reset error text.
+
+    # CRITICAL: the service-state restore and the web restart must run
+    # even if something above failed unexpectedly (anything not already
+    # caught and handled as CRITICAL-with-its-own-exit, or BEST-EFFORT).
+    # gm_post_update_handoff/gm_restart_web are themselves safe to call
+    # more than once (idempotent) and guard against running twice via
+    # GM_POST_UPDATE_DONE/GM_WEB_RESTARTED below.
+    if [ "$GM_UPDATE_DONE" != 1 ] && [ "${GM_RESET_DONE:-0}" = 1 ]; then
+        echo "⚠ Update did not reach its normal completion (rc=$rc) - still running the service-state restore and web restart so the station is not left half-updated." >&2
+        gm_post_update_handoff || true
+        gm_restart_web || true
+    fi
+
     if [ "$GM_UPDATE_DONE" != 1 ] && [ "$rc" -ne 0 ] && [ "$GM_ERROR_REPORTED" != 1 ]; then
-        log_status "error" "❌ Update FAILED (exit $rc, failing command at line ${GM_LAST_LINE:-?}) - see /tmp/ota_update.log" 2>/dev/null || true
+        log_status "error" "❌ Update FAILED (exit $rc, failing command at ${GM_LAST_SOURCE:-$0}:${GM_LAST_LINE:-?}) - see /tmp/ota_update.log" 2>/dev/null || true
     fi
 }
-trap 'GM_LAST_LINE=$LINENO' ERR
-trap gm_on_exit EXIT
 
 echo "=========================================="
 echo "OTA UPDATE STARTED: $(date)"
@@ -263,11 +346,76 @@ if [ -z "$GM_HEAD" ] || [ "$GM_HEAD" != "$GM_TARGET" ] || [ -n "$GM_DIRTY" ]; th
     exit 1
 fi
 log_status "info" "✓ Updates applied successfully: $(GM_GIT_AS_OWNER git log -1 --oneline 2>/dev/null)"
+# GeoMaxima - 2026-10-13 review fix: from this point on, the new tree is
+# live on disk. gm_run_finally's EXIT trap now always runs the
+# service-state restore and web restart if the script exits before its
+# own normal completion, since leaving the station on new code with the
+# old process still running (or services not restored) is strictly worse
+# than a script that aborts cleanly before any of this.
+GM_RESET_DONE=1
+
+# GeoMaxima - 2026-10-13 review fix: defined here (immediately after
+# GM_RESET_DONE=1, before any best-effort step below can fail) rather
+# than at their call site near the bottom of this script - gm_run_finally
+# can call these from the EXIT trap no matter where between here and the
+# bottom the script aborts, and a function must already be defined by the
+# time a trap tries to call it. REPO_OWNER/GEOMAXIMA_RUN_ID/DEV_REPO_PATH
+# are already set by this point (REPO_OWNER a few lines below the unit
+# redeploy step further down used to be the only place it was computed;
+# moved earlier - stat -c '%U' "$DEV_REPO_PATH" is cheap and idempotent to
+# compute twice were it still needed there, but it no longer is).
+REPO_OWNER=$(stat -c '%U' "$DEV_REPO_PATH")
+
+# CRITICAL (restore) wrapped in a BEST-EFFORT-tolerant idempotent
+# function - the hand-off itself (cat | bash -s) and the service-state
+# restore it performs must always be attempted, including from
+# gm_run_finally's EXIT trap if something later in this script aborts
+# unexpectedly, but must never run twice (see GM_POST_UPDATE_DONE guard).
+GM_POST_UPDATE_DONE=0
+gm_post_update_handoff() {
+    [ "$GM_POST_UPDATE_DONE" = 1 ] && return 0
+    GM_POST_UPDATE_DONE=1
+    log_status "info" "Running post-update steps from the freshly-updated tree..."
+    if [ -r "$DEV_REPO_PATH/tools/post_update.sh" ]; then
+        if cat "$DEV_REPO_PATH/tools/post_update.sh" | bash -s -- "$DEV_REPO_PATH" "$REPO_OWNER" "$GEOMAXIMA_RUN_ID" 2>&1; then
+            log_status "info" "✓ Post-update steps completed"
+        else
+            gm_warn "post_update.sh reported an error - continuing anyway (update itself already succeeded)"
+        fi
+    else
+        gm_warn "tools/post_update.sh not found in the updated tree - skipping post-update steps"
+    fi
+}
+
+# GeoMaxima - 2026-10-05/06 incident investigation: the restart used to
+# be backgrounded (`(sleep 5 && systemctl restart rtkbase_web) &`) so
+# this script's own `exit 0` ran before the restart fired - intended to
+# let the HTTP response complete first, but it meant the restart command
+# became an orphaned child of this script's process once the script
+# exited, with no guarantee it would survive whatever happens to this
+# process tree's cgroup after that (this script is now launched via
+# `systemd-run --unit=... --collect`, which abandons/cleans up its
+# transient unit's cgroup once the unit's main process exits - a
+# detached grandchild is not protected from that cleanup the way it
+# would be inside a durable, unrelated unit). The restart must be the
+# LAST thing a normal (non-aborted) run of this script does, synchronously,
+# not backgrounded.
+#
+# CRITICAL - also idempotent/guarded (GM_WEB_RESTARTED) for the same
+# reason as gm_post_update_handoff above: must always run, must never
+# run twice.
+GM_WEB_RESTARTED=0
+gm_restart_web() {
+    [ "$GM_WEB_RESTARTED" = 1 ] && return 0
+    GM_WEB_RESTARTED=1
+    sudo systemctl restart rtkbase_web
+}
+
 log_status "info" "Ensuring SPI is enabled (idempotent, needed for optional LCD display feature)..."
-sudo raspi-config nonint do_spi 0 2>&1 || log_status "info" "⚠ raspi-config SPI enable failed - continuing anyway"
+sudo raspi-config nonint do_spi 0 2>&1 || gm_warn "raspi-config SPI enable failed - continuing anyway"
 
 log_status "info" "Ensuring fonts-dejavu-core is installed (idempotent, needed for optional LCD display feature)..."
-sudo apt-get install -y -qq --no-remove fonts-dejavu-core 2>&1 || log_status "info" "⚠ fonts-dejavu-core install failed - continuing anyway"
+sudo apt-get install -y -qq --no-remove fonts-dejavu-core 2>&1 || gm_warn "fonts-dejavu-core install failed - continuing anyway"
 
 log_status "info" "Ensuring WireGuard tooling is installed (idempotent - never the 'wireguard' metapackage, see tools/wireguard_setup.sh)..."
 # GeoMaxima: same shared helper install.sh uses - re-applied on every OTA
@@ -290,7 +438,7 @@ log_status "info" "Ensuring WireGuard tooling is installed (idempotent - never t
 # top), so `if ! cmd` sees the helper's own exit status - and a failure
 # can't trip `set -e`.
 if ! sudo bash -c "source '${DEV_REPO_PATH}/tools/wireguard_setup.sh' && geomaxima_install_wireguard" 2>&1; then
-    log_status "info" "⚠ WireGuard setup failed - continuing anyway (optional feature, does not affect RTCM/GNSS)"
+    gm_warn "WireGuard setup failed - continuing anyway (optional feature, does not affect RTCM/GNSS)"
 fi
 
 log_status "info" "DNS: openresolv step (now a no-op - see tools/dns_setup.sh)..."
@@ -312,7 +460,7 @@ log_status "info" "DNS: removing injected public resolvers and WireGuard DNS lin
 #   resolvconf -l            (no wg0 entry)
 #   cat /var/lib/rtkbase/dns_migration.json
 if ! sudo bash -c "source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_configure_dns_fallback" 2>&1; then
-    log_status "info" "⚠ DNS migration was rolled back or failed - see the [dns] lines above (does not affect RTCM/GNSS)"
+    gm_warn "DNS migration was rolled back or failed - see the [dns] lines above (does not affect RTCM/GNSS)"
 fi
 
 log_status "info" "Verifying DNS resolution is still working after the DNS/WireGuard setup steps above..."
@@ -322,7 +470,7 @@ log_status "info" "Verifying DNS resolution is still working after the DNS/WireG
 # is logged here and shown by the watchdog (Watchdog > DNS) instead.
 # GM_DNS_HEALTH_FATAL=1 only so the function reports the real result.
 if ! sudo bash -c "GM_DNS_HEALTH_FATAL=1; source '${DEV_REPO_PATH}/tools/dns_setup.sh' && geomaxima_dns_health_check" 2>&1; then
-    log_status "info" "⚠ DNS resolution is not working through the network's DNS - continuing the update anyway (see the diagnostics above and Watchdog > DNS); downloads later in this update may fail."
+    gm_warn "DNS resolution is not working through the network's DNS - continuing the update anyway (see the diagnostics above and Watchdog > DNS); downloads later in this update may fail."
 fi
 
 log_status "info" "Ensuring ANTEX (igs20.atx) is present (idempotent, needed for optional PPP-static feature)..."
@@ -339,10 +487,10 @@ else
         if GM_GIT_AS_OWNER gzip -d "$ANTEX_DIR/igs20.atx.gz" 2>&1; then
             log_status "info" "✓ ANTEX file downloaded and decompressed"
         else
-            log_status "info" "⚠ ANTEX decompression failed - PPP-static will not work until resolved manually"
+            gm_warn "ANTEX decompression failed - PPP-static will not work until resolved manually"
         fi
     else
-        log_status "info" "⚠ ANTEX download failed (network issue?) - PPP-static will not work until resolved - will retry on next update"
+        gm_warn "ANTEX download failed (network issue?) - PPP-static will not work until resolved - will retry on next update"
     fi
 fi
 
@@ -406,7 +554,7 @@ fi
 if [ "$PRIDE_PPPAR_NEEDS_BUILD" -eq 0 ]; then
     log_status "info" "✓ PRIDE-PPPAR already installed at $PRIDE_PPPAR_BIN and matches vendored source - skipping build"
 elif [ ! -d "$PRIDE_PPPAR_VENDORED_SRC/src" ]; then
-    log_status "info" "⚠ vendored PRIDE-PPPAR source not found at $PRIDE_PPPAR_VENDORED_SRC - skipping (opt-in feature, rnx2rtkp unaffected)"
+    gm_warn "vendored PRIDE-PPPAR source not found at $PRIDE_PPPAR_VENDORED_SRC - skipping (opt-in feature, rnx2rtkp unaffected)"
 else
     if [ -x "$PRIDE_PPPAR_BIN" ]; then
         # Binary exists but the vendored source hash has changed since the
@@ -490,7 +638,7 @@ else
                     if [ -n "$detected_version" ]; then
                         log_status "info" "PRIDE-PPPAR version installed: $detected_version"
                     else
-                        log_status "info" "⚠ PRIDE-PPPAR built successfully but version string could not be detected from README.md"
+                        gm_warn "PRIDE-PPPAR built successfully but version string could not be detected from README.md"
                     fi
                     # Record what was just built so the next OTA update's
                     # idempotency check can tell this build apart from a stale
@@ -500,21 +648,21 @@ else
                     # marker on confirmed success" rule this step now follows
                     # throughout.
                     echo "$PRIDE_PPPAR_CURRENT_HASH" > "$PRIDE_PPPAR_HASH_FILE" 2>/dev/null \
-                        || log_status "info" "⚠ failed to write $PRIDE_PPPAR_HASH_FILE - next update will rebuild unconditionally"
+                        || gm_warn "failed to write $PRIDE_PPPAR_HASH_FILE - next update will rebuild unconditionally"
                 else
                     # mv into place failed - restore the old installation
                     # (if any) rather than leaving the station with nothing.
-                    log_status "info" "⚠ failed to swap new PRIDE-PPPAR build into place - restoring previous installation (opt-in feature, rnx2rtkp unaffected)"
+                    gm_warn "failed to swap new PRIDE-PPPAR build into place - restoring previous installation (opt-in feature, rnx2rtkp unaffected)"
                     [ -d "$PRIDE_PPPAR_OLD_BIN_BAK" ] && mv "$PRIDE_PPPAR_OLD_BIN_BAK" "$PRIDE_PPPAR_REAL_BIN_DIR"
                 fi
             else
-                log_status "info" "⚠ PRIDE-PPPAR install.sh completed but no pdp3 binary was found in the temporary build location - previous installation (if any) left untouched (rnx2rtkp unaffected)"
+                gm_warn "PRIDE-PPPAR install.sh completed but no pdp3 binary was found in the temporary build location - previous installation (if any) left untouched (rnx2rtkp unaffected)"
             fi
         else
-            log_status "info" "⚠ PRIDE-PPPAR build failed - previous installation (if any) left untouched (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
+            gm_warn "PRIDE-PPPAR build failed - previous installation (if any) left untouched (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
         fi
     else
-        log_status "info" "⚠ failed to copy vendored PRIDE-PPPAR source to $PRIDE_PPPAR_REPO_DIR - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
+        gm_warn "failed to copy vendored PRIDE-PPPAR source to $PRIDE_PPPAR_REPO_DIR - continuing update (opt-in feature, rnx2rtkp unaffected) - will retry on next update"
     fi
     rm -rf "$PRIDE_PPPAR_TMP_HOME"
 fi
@@ -530,12 +678,12 @@ log_status "info" "Ensuring /var/log/rtkbase/ exists (idempotent, needed by geom
 # geomaxima_watchdog.timer until this was fixed. This step ensures
 # already-deployed stations (BaseStation, BaseStation) get this fixed
 # automatically on their next OTA update.
-sudo mkdir -p /var/log/rtkbase 2>&1 || log_status "info" "⚠ could not create /var/log/rtkbase - continuing anyway"
-sudo chown root:root /var/log/rtkbase 2>&1 || log_status "info" "⚠ chown of /var/log/rtkbase to root failed - continuing anyway"
+sudo mkdir -p /var/log/rtkbase 2>&1 || gm_warn "could not create /var/log/rtkbase - continuing anyway"
+sudo chown root:root /var/log/rtkbase 2>&1 || gm_warn "chown of /var/log/rtkbase to root failed - continuing anyway"
 
 log_status "info" "Redeploying systemd units (unit/ and addons/unit/)..."
 
-REPO_OWNER=$(stat -c '%U' "$DEV_REPO_PATH")
+# REPO_OWNER is already set (just after GM_RESET_DONE=1 above).
 VENV_PYTHON="$DEV_REPO_PATH/rtkbase/venv/bin/python"
 if [ ! -x "$VENV_PYTHON" ]; then
     VENV_PYTHON="$DEV_REPO_PATH/venv/bin/python"
@@ -546,17 +694,17 @@ if [ -x "$VENV_PYTHON" ]; then
     if sudo "$VENV_PYTHON" -m pip install -q -r "$DEV_REPO_PATH/web_app/requirements.txt" 2>&1; then
         log_status "info" "✓ Python dependencies refreshed"
     else
-        log_status "info" "⚠ pip install refresh reported an error - continuing anyway (existing packages untouched)"
+        gm_warn "pip install refresh reported an error - continuing anyway (existing packages untouched)"
     fi
 else
-    log_status "info" "⚠ venv python not found - skipping dependency refresh"
+    gm_warn "venv python not found - skipping dependency refresh"
 fi
 
 if [ -x "$DEV_REPO_PATH/tools/copy_unit.sh" ] && [ -x "$VENV_PYTHON" ]; then
     if sudo "$DEV_REPO_PATH/tools/copy_unit.sh" --python_path "$VENV_PYTHON" --user "$REPO_OWNER" 2>&1; then
         log_status "info" "✓ Systemd units redeployed"
     else
-        log_status "info" "⚠ copy_unit.sh reported an error - continuing anyway (existing units untouched)"
+        gm_warn "copy_unit.sh reported an error - continuing anyway (existing units untouched)"
     fi
 
     # Enable (idempotent) any addon timers - e.g. geomaxima_watchdog.timer -
@@ -568,7 +716,7 @@ if [ -x "$DEV_REPO_PATH/tools/copy_unit.sh" ] && [ -x "$VENV_PYTHON" ]; then
         sudo systemctl enable --now "$timer_name" 2>&1 || true
     done
 else
-    log_status "info" "⚠ copy_unit.sh or venv python not found - skipping unit redeploy"
+    gm_warn "copy_unit.sh or venv python not found - skipping unit redeploy"
 fi
 
 # GeoMaxima - 2026-10-10/13 review fix: confirmed live (OTA to commit
@@ -590,37 +738,28 @@ fi
 # -s`, not executed by path (which could still resolve to a stale
 # cached/mmap'd reference in some edge case) - so it is always the
 # version that was just pulled, never the one that launched this OTA.
-log_status "info" "Running post-update steps from the freshly-updated tree..."
-if [ -r "$DEV_REPO_PATH/tools/post_update.sh" ]; then
-    if cat "$DEV_REPO_PATH/tools/post_update.sh" | bash -s -- "$DEV_REPO_PATH" "$REPO_OWNER" "$GEOMAXIMA_RUN_ID" 2>&1; then
-        log_status "info" "✓ Post-update steps completed"
-    else
-        log_status "info" "⚠ post_update.sh reported an error - continuing anyway (update itself already succeeded)"
-    fi
+gm_post_update_handoff
+
+# GeoMaxima - 2026-10-13 review fix: a BEST-EFFORT step's failure (e.g.
+# install.sh --journald-retention, apt/WireGuard/DNS/ANTEX/PRIDE-PPPAR
+# steps above) must never be reported as a FAILED update - confirmed
+# live, that caused the UI to show "FAILED" for an update that actually
+# landed the new code successfully. "completed with warnings" instead,
+# listing exactly which best-effort steps didn't apply.
+#
+# GM_UPDATE_DONE is set only AFTER gm_restart_web below actually returns -
+# not here - so that if the restart itself fails, gm_run_finally's EXIT
+# trap still sees GM_UPDATE_DONE=0 and retries it (gm_post_update_handoff
+# has its own GM_POST_UPDATE_DONE guard, so that part is never repeated).
+if [ "${#GM_WARNINGS[@]}" -eq 0 ]; then
+    log_status "success" "✅ Update completed successfully! Restarting the web service now."
 else
-    log_status "info" "⚠ tools/post_update.sh not found in the updated tree - skipping post-update steps"
+    GM_WARNINGS_TEXT=$(printf '; %s' "${GM_WARNINGS[@]}")
+    GM_WARNINGS_TEXT="${GM_WARNINGS_TEXT:2}"
+    log_status "success" "✅ Update completed with warnings: ${GM_WARNINGS_TEXT} - restarting the web service now."
 fi
 
+gm_restart_web
 GM_UPDATE_DONE=1
-log_status "success" "✅ Update completed successfully! Restarting the web service now."
-
-# GeoMaxima - 2026-10-05/06 incident investigation: the restart used to
-# be backgrounded (`(sleep 5 && systemctl restart rtkbase_web) &`) so
-# this script's own `exit 0` ran before the restart fired - intended to
-# let the HTTP response complete first, but it meant the restart command
-# became an orphaned child of this script's process once the script
-# exited, with no guarantee it would survive whatever happens to this
-# process tree's cgroup after that (this script is now launched via
-# `systemd-run --unit=... --collect`, which abandons/cleans up its
-# transient unit's cgroup once the unit's main process exits - a
-# detached grandchild is not protected from that cleanup the way it
-# would be inside a durable, unrelated unit). The restart is now the
-# LAST command this script runs, synchronously, not backgrounded - any
-# process this script's own update steps started (e.g. a rebuilt
-# PRIDE-PPPAR binary's build step) has already completed by this point
-# (every step above is synchronous, `set -e` would have aborted
-# otherwise), so there is nothing left running in this script's cgroup
-# that the restart could prematurely kill.
-sudo systemctl restart rtkbase_web
 
 exit 0
