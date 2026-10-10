@@ -36,6 +36,8 @@ import json
 import os
 import re
 import shutil
+import stat as stat_module
+import grp
 import sys
 import requests
 import tempfile
@@ -1447,16 +1449,52 @@ def switchService(json_msg):
         name with their new status.
     """
     #print("Received service to switch", json_msg)
+    # GeoMaxima - 2026-10-13 review fix: closes the remaining audit gap
+    # that left the 2026-10-05/06/07/10 incident's File-service
+    # "disabled" question unanswerable - this UI toggle (the only
+    # confirmed, intentional code path that disables a unit, via
+    # ServiceController.stop()'s own DisableUnitFiles call) previously
+    # logged only "a start/stop was requested", with no before-state and
+    # no confirmation the action actually succeeded. Every call now logs,
+    # in the SAME log_event()/audit.log format deleteLog()'s own audit
+    # entry already uses: service name, requested state, the state
+    # BEFORE acting (active/enabled, read via ServiceController itself -
+    # no second detection mechanism), and the result AFTER acting
+    # (success/failure, the resulting active/enabled state) - so a
+    # future "was this service disabled by the UI toggle or by
+    # something else" question is always answerable from audit.log.
     try:
         for service in services_list:
             if json_msg["name"] == service["name"] and json_msg["active"] == True:
+                unit = service["unit"]
+                before = {"active": unit.isActive(), "enabled": unit.isEnabled()}
                 print("Trying to start service {}".format(service["name"]))
-                log_event("service", "start_requested", {"service": service["name"]})
-                service["unit"].start()
+                success = True
+                try:
+                    unit.start()
+                except Exception as e:
+                    success = False
+                    print(f"Error starting service {service['name']}: {e}")
+                after = {"active": unit.isActive(), "enabled": unit.isEnabled()}
+                log_event("service", "start_requested", {
+                    "service": service["name"], "requested_active": True,
+                    "before": before, "success": success, "after": after,
+                })
             elif json_msg["name"] == service["name"] and json_msg["active"] == False:
+                unit = service["unit"]
+                before = {"active": unit.isActive(), "enabled": unit.isEnabled()}
                 print("Trying to stop service {}".format(service["name"]))
-                log_event("service", "stop_requested", {"service": service["name"]})
-                service["unit"].stop()
+                success = True
+                try:
+                    unit.stop()
+                except Exception as e:
+                    success = False
+                    print(f"Error stopping service {service['name']}: {e}")
+                after = {"active": unit.isActive(), "enabled": unit.isEnabled()}
+                log_event("service", "stop_requested", {
+                    "service": service["name"], "requested_active": False,
+                    "before": before, "success": success, "after": after,
+                })
 
         # When the service is in failed state and we try to restart the service from the web UI during
         # the StartLimitIntervalSec, the service status doesn't change (stay failed off), but the button switch to on
@@ -1616,9 +1654,71 @@ def arg_parse():
     args = parser.parse_args()
     return args
 
+def _self_heal_audit_log_and_journald():
+    """
+        GeoMaxima - 2026-10-13 review fix: confirmed live (OTA to
+        fccc038) that an OTA launched by an OLDER perform_update.sh
+        never applies the newer audit-log-access/journald-retention
+        fixes, because that launcher has no knowledge of
+        tools/post_update.sh's existence at all (see
+        addons/tools/perform_update.sh's own incident comment for the
+        full root cause). This runs at EVERY rtkbase_web.service start
+        (root), independent of which OTA path or version last ran, so
+        a station self-heals regardless of OTA history. Idempotent -
+        only ACTS (and only logs) when something is actually wrong;
+        does nothing and stays silent when already correct.
+    """
+    try:
+        # general.user is stored quoted in settings.conf (e.g. "'peshovp'")
+        # - same .strip("'") convention used everywhere else this key is
+        # read in this file (see e.g. convbin_user above).
+        standard_user = rtkbaseconfig.get("general", "user").strip("'")
+        audit_log = Path("/var/lib/rtkbase/audit.log")
+        audit_log.parent.mkdir(parents=True, exist_ok=True)
+        needs_fix = True
+        if audit_log.exists():
+            st = audit_log.stat()
+            mode_ok = stat_module.S_IMODE(st.st_mode) == 0o660
+            try:
+                owner_ok = standard_user and st.st_gid == grp.getgrnam(standard_user).gr_gid
+            except KeyError:
+                owner_ok = False
+            needs_fix = not (mode_ok and owner_ok)
+        if needs_fix:
+            if standard_user:
+                result = subprocess.run(
+                    [os.path.join(rtkbase_path, "tools", "install.sh"), "--audit-log-access", "--user", standard_user],
+                    capture_output=True, text=True, check=False,
+                )
+                if result.returncode == 0:
+                    print(f"Self-heal: fixed audit.log ownership/mode (was incorrect)")
+                    log_event("startup", "self_heal_audit_log_access", {})
+                else:
+                    print(f"Self-heal: audit-log-access fix failed: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"Self-heal: audit.log check failed (continuing anyway): {e}")
+
+    try:
+        journald_dropin = Path("/etc/systemd/journald.conf.d/geomaxima-retention.conf")
+        if not journald_dropin.exists():
+            result = subprocess.run(
+                [os.path.join(rtkbase_path, "tools", "install.sh"), "--journald-retention"],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode == 0:
+                print("Self-heal: installed missing persistent journald retention drop-in")
+                log_event("startup", "self_heal_journald_retention", {})
+            else:
+                print(f"Self-heal: journald-retention fix failed: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"Self-heal: journald drop-in check failed (continuing anyway): {e}")
+
 if __name__ == "__main__":
     args=arg_parse()
     try:
+        # GeoMaxima - self-heal BEFORE anything else - covers a station
+        # updated by any older OTA launcher, not just the current one.
+        _self_heal_audit_log_and_journald()
         #check if a new password is defined in settings.conf
         update_password(rtkbaseconfig)
         #check if authentification is required

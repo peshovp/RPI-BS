@@ -571,117 +571,35 @@ else
     log_status "info" "⚠ copy_unit.sh or venv python not found - skipping unit redeploy"
 fi
 
-# GeoMaxima - 2026-10-05/06 incident investigation: this OTA path
-# (perform_update.sh) never called tools/install.sh at all, so neither
-# the journald-retention fix nor the audit-log-access fix below would
-# EVER reach a station using only this update path (confirmed this is
-# the GeoMaxima git-based OTA, separate from the older
-# addons/tools/rtkbase_update.sh tar-based path, which DOES call
-# install.sh already) - both must be invoked here explicitly, on every
-# run, unconditionally. Idempotent/safe to re-run (install.sh's own
-# install_journald_retention()/install_audit_log_access() just rewrite
-# the same files each time).
-if [ -x "$DEV_REPO_PATH/tools/install.sh" ]; then
-    sudo "$DEV_REPO_PATH/tools/install.sh" --journald-retention 2>&1 || log_status "info" "⚠ journald-retention install reported an error - continuing anyway"
-    sudo "$DEV_REPO_PATH/tools/install.sh" --audit-log-access --user "$REPO_OWNER" 2>&1 || log_status "info" "⚠ audit-log-access install reported an error - continuing anyway"
+# GeoMaxima - 2026-10-10/13 review fix: confirmed live (OTA to commit
+# fccc038 on a test station) that audit-log-access, journald-retention,
+# and the service-state restore were NOT applied at all, even though
+# all three were already committed at the time. Root cause: this
+# script makes a private self-copy of ITSELF to /tmp BEFORE the git
+# reset above (see the top of this file - specifically so the reset
+# replacing the on-disk file mid-run can't corrupt the running script),
+# and update_controller.py's perform_update() resolves and launches
+# THIS script before any git pull/reset runs - so the process actually
+# executing is always whichever version of perform_update.sh was on
+# disk at the START of the OTA. Inlining the post-update steps here (as
+# a previous commit did) can therefore NEVER see its own post-reset
+# code, no matter how this script is edited - every post-update step
+# must live in a SEPARATE script, read fresh from disk AFTER the reset
+# above has already landed the new tree. tools/post_update.sh is that
+# script - `cat`'d from the just-reset tree and piped to a fresh `bash
+# -s`, not executed by path (which could still resolve to a stale
+# cached/mmap'd reference in some edge case) - so it is always the
+# version that was just pulled, never the one that launched this OTA.
+log_status "info" "Running post-update steps from the freshly-updated tree..."
+if [ -r "$DEV_REPO_PATH/tools/post_update.sh" ]; then
+    if cat "$DEV_REPO_PATH/tools/post_update.sh" | bash -s -- "$DEV_REPO_PATH" "$REPO_OWNER" "$GEOMAXIMA_RUN_ID" 2>&1; then
+        log_status "info" "✓ Post-update steps completed"
+    else
+        log_status "info" "⚠ post_update.sh reported an error - continuing anyway (update itself already succeeded)"
+    fi
 else
-    log_status "info" "⚠ tools/install.sh not found - skipping journald-retention/audit-log-access"
+    log_status "info" "⚠ tools/post_update.sh not found in the updated tree - skipping post-update steps"
 fi
-
-# GeoMaxima - 2026-10-07 review fix: restore every str2str_*/rtkbase_*/
-# geomaxima_* service (AND timer) to its EXACT pre-update active+enabled
-# state, BEFORE restarting rtkbase_web - same logic/reasoning as
-# addons/tools/rtkbase_update.sh's own _geomaxima_restore_service_states()
-# (see that script for the fuller comment on why this matters: a
-# temporary-stop helper that also disables, or an OTA's own unit-file
-# redeploy, could otherwise leave a service permanently off). Prefers the
-# pre-shutdown snapshot (addons/ota_service_snapshot.py, matched by
-# GEOMAXIMA_RUN_ID and freshness) over one taken from inside this script.
-GEOMAXIMA_AUDIT_LOG="/var/lib/rtkbase/audit.log"
-_geomaxima_audit_log() {
-  local event="$1" details_json="$2"
-  local ts
-  ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%6N")
-  mkdir -p "$(dirname "${GEOMAXIMA_AUDIT_LOG}")" 2>/dev/null
-  printf '{"timestamp": "%s", "category": "ota_service_state", "event": "%s", "details": %s}\n' \
-    "${ts}" "${event}" "${details_json}" >> "${GEOMAXIMA_AUDIT_LOG}" 2>/dev/null
-}
-_geomaxima_service_units() {
-  systemctl list-unit-files --no-legend 2>/dev/null \
-    | awk '{print $1}' \
-    | grep -E '^(str2str_|rtkbase_|geomaxima_)[^@]*\.(service|timer)$' \
-    | sort -u
-}
-GEOMAXIMA_SERVICE_STATE_FILE="/var/lib/rtkbase/.ota_service_state_before_update"
-GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT="/var/lib/rtkbase/ota/service_state_before.json"
-GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS=1800
-mkdir -p "$(dirname "${GEOMAXIMA_SERVICE_STATE_FILE}")" 2>/dev/null
-_geomaxima_used_pre_shutdown_snapshot=0
-if [[ -r "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" ]] && [[ -n "${GEOMAXIMA_RUN_ID}" ]] && command -v python3 >/dev/null 2>&1; then
-  if python3 - "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" "${GEOMAXIMA_SERVICE_STATE_FILE}" "${GEOMAXIMA_RUN_ID}" "${GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS}" << 'PYEOF'
-import json, sys
-from datetime import datetime, timezone
-snapshot_path, out_path, expected_run_id, max_age_seconds = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
-try:
-    with open(snapshot_path) as f:
-        data = json.load(f)
-    if data.get("run_id") != expected_run_id:
-        sys.exit(1)
-    written_at = datetime.fromisoformat(data["timestamp"])
-    age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
-    if age_seconds > max_age_seconds or age_seconds < 0:
-        sys.exit(1)
-    with open(out_path, "w") as f:
-        for unit, state in data.get("units", {}).items():
-            f.write(f"{unit} {state.get('active', 'unknown')} {state.get('enabled', 'unknown')}\n")
-except (OSError, ValueError, KeyError):
-    sys.exit(1)
-PYEOF
-  then
-    _geomaxima_used_pre_shutdown_snapshot=1
-    rm -f "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" 2>/dev/null
-    log_status "info" "Using the pre-shutdown service-state snapshot (run_id matched, fresh)"
-  else
-    log_status "info" "⚠ pre-shutdown snapshot did not match this run (wrong run_id or too old) - ignoring it"
-  fi
-fi
-if [[ "${_geomaxima_used_pre_shutdown_snapshot}" -eq 0 ]]; then
-  log_status "info" "⚠ no usable pre-shutdown snapshot - taking one now from inside this script (may already be post-shutdown)"
-  : > "${GEOMAXIMA_SERVICE_STATE_FILE}"
-  while IFS= read -r unit; do
-    [[ -z "${unit}" ]] && continue
-    active=$(systemctl is-active "${unit}" 2>/dev/null)
-    enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
-    echo "${unit} ${active} ${enabled}" >> "${GEOMAXIMA_SERVICE_STATE_FILE}"
-  done < <(_geomaxima_service_units)
-fi
-
-_geomaxima_restore_service_states() {
-  [[ -f "${GEOMAXIMA_SERVICE_STATE_FILE}" ]] || return 0
-  local after_json="[" first=1
-  while read -r unit active enabled; do
-    [[ -z "${unit}" ]] && continue
-    local now_active now_enabled
-    now_active=$(systemctl is-active "${unit}" 2>/dev/null)
-    now_enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
-    if [[ "${active}" == "active" && "${now_active}" != "active" && "${now_active}" != "activating" ]]; then
-      log_status "info" "Restoring ${unit} to active (was active before this update)"
-      systemctl start "${unit}" 2>/dev/null
-    fi
-    if [[ "${enabled}" == "enabled" && "${now_enabled}" == "disabled" ]]; then
-      log_status "info" "Restoring ${unit} to enabled (was enabled before this update)"
-      systemctl enable "${unit}" 2>/dev/null
-    fi
-    now_active=$(systemctl is-active "${unit}" 2>/dev/null)
-    now_enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
-    if [[ "${first}" -eq 1 ]]; then first=0; else after_json+=","; fi
-    after_json+="{\"unit\": \"${unit}\", \"active_before\": \"${active}\", \"enabled_before\": \"${enabled}\", \"active_after\": \"${now_active}\", \"enabled_after\": \"${now_enabled}\"}"
-  done < "${GEOMAXIMA_SERVICE_STATE_FILE}"
-  after_json+="]"
-  _geomaxima_audit_log "after_update" "${after_json}"
-}
-_geomaxima_restore_service_states
-rm -f "${GEOMAXIMA_SERVICE_STATE_FILE}" 2>/dev/null
 
 GM_UPDATE_DONE=1
 log_status "success" "✅ Update completed successfully! Restarting the web service now."

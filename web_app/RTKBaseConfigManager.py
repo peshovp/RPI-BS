@@ -330,6 +330,38 @@ class RTKBaseConfigManager:
     # comfortably fits in this count without needing a time-based prune.
     SETTINGS_BACKUP_COUNT = 20
 
+    # GeoMaxima - 2026-10-13 review fix: moved OUT of the git working
+    # tree entirely (was <rtkbase_path>/settings_conf_backups/) - that
+    # location is only safe from `git clean`/`stash -u` by the absence
+    # of those specific flags in perform_update.sh TODAY, which is a
+    # fragile invariant for a backup directory to depend on (a future
+    # manual `git clean -fdx`, a fresh re-clone, or any future change
+    # to the OTA script's own flags could silently wipe it). Moved to
+    # /var/lib/rtkbase/settings_backups, the SAME location every other
+    # piece of this project's own runtime state already lives in
+    # (audit.log, survey_state.json, OTA status, watchdog config,
+    # ota/service_state_before.json) - root 0700, files 0600, same as
+    # before. Any backups found at the OLD location are migrated here
+    # once, on the first write after this fix.
+    _OLD_BACKUP_DIR_NAME = "settings_conf_backups"
+    _NEW_BACKUP_DIR = "/var/lib/rtkbase/settings_backups"
+
+    def _migrate_old_backups(self, new_backup_dir):
+        old_backup_dir = os.path.join(os.path.dirname(self.user_settings_path), self._OLD_BACKUP_DIR_NAME)
+        if not os.path.isdir(old_backup_dir):
+            return
+        try:
+            for name in os.listdir(old_backup_dir):
+                old_path = os.path.join(old_backup_dir, name)
+                new_path = os.path.join(new_backup_dir, name)
+                if os.path.isfile(old_path) and not os.path.exists(new_path):
+                    shutil.move(old_path, new_path)
+                    os.chmod(new_path, 0o600)
+            if not os.listdir(old_backup_dir):
+                os.rmdir(old_backup_dir)
+        except OSError as e:
+            print(f"_migrate_old_backups: failed to migrate old settings.conf backups (non-fatal): {e}")
+
     def _backup_before_write(self):
         """
             Copy the CURRENT on-disk settings.conf (before this write
@@ -347,23 +379,16 @@ class RTKBaseConfigManager:
         if not os.path.exists(self.user_settings_path):
             return
         try:
-            # NOT inside datadir (data/) - a sibling of settings.conf
-            # itself, under the rtkbase root
-            # (<rtkbase_path>/settings_conf_backups/), so
-            # archive_and_clean.sh's own datadir-scoped find/rm/zip never
-            # sees it. Each backup file is named settings.conf.<timestamp>
-            # (never the exact string "settings.conf"), so no script that
-            # greps/opens settings.conf by exact filename - this
-            # project's OWN convention, confirmed via
-            # archive_and_clean.sh's `_read_setting()`,
-            # RTKBaseConfigManager's own __init__, and every
-            # `source <(...)`-based script - will ever read a backup
-            # file as if it were live config. 0600/owner-only, matching
-            # settings.conf's own permission model (it carries
-            # passwords/tokens).
-            backup_dir = os.path.join(os.path.dirname(self.user_settings_path), "settings_conf_backups")
+            # Each backup file is named settings.conf.<timestamp>
+            # (never the exact string "settings.conf"), so no script
+            # that greps/opens settings.conf by exact filename will
+            # ever read a backup file as if it were live config.
+            # 0600/owner-only, matching settings.conf's own permission
+            # model (it carries passwords/tokens).
+            backup_dir = self._NEW_BACKUP_DIR
             os.makedirs(backup_dir, mode=0o700, exist_ok=True)
             os.chmod(backup_dir, 0o700)
+            self._migrate_old_backups(backup_dir)
             # Microsecond precision: a plain-settings-page save followed
             # immediately by another (e.g. several fields saved in quick
             # succession) can land within the same second - confirmed in

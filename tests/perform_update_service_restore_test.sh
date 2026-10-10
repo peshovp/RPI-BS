@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Unit-style test for addons/tools/perform_update.sh's own
-# service-state snapshot-read + restore logic (2026-10-07 review fix) -
-# this is the GeoMaxima/primary OTA path (git-based), separate from
-# addons/tools/rtkbase_update.sh (the older tar-based path, already
-# covered by tests/ota_end_to_end_snapshot_test.sh) - it had NO
-# service-state preservation at all before this fix.
+# Unit-style test for addons/tools/post_update.sh's service-state
+# snapshot-read + restore logic (2026-10-10/13 review fix) - this logic
+# used to be inlined in perform_update.sh itself, which is confirmed
+# live NEVER to work that way: perform_update.sh self-copies to /tmp
+# BEFORE the git reset that lands new code, and
+# update_controller.py's perform_update() launches it before any
+# pull/reset runs - so inlined post-update steps can never see their
+# own post-reset version. post_update.sh is now a separate script,
+# invoked by perform_update.sh via `cat tools/post_update.sh | bash -s`
+# AFTER the reset, specifically so it is always read fresh from the
+# just-updated tree. This test runs the REAL post_update.sh directly
+# (not an awk-extracted fragment), confirming it works standalone with
+# just its 3 positional arguments.
 #
 # LINUX-ONLY: mocks `systemctl`, uses GNU date syntax. Confirmed passing
 # on WSL Ubuntu 24.04 this session.
@@ -20,7 +27,7 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
   exit 0
 fi
 
-W="$(mktemp -d /tmp/gm_perform_update_restore_test.XXXXXX)"
+W="$(mktemp -d /tmp/gm_post_update_test.XXXXXX)"
 cleanup() { rm -rf "$W"; }
 trap cleanup EXIT
 
@@ -51,6 +58,22 @@ case "$1" in
 esac
 MOCKEOF
 chmod +x "$W/bin/systemctl"
+
+# Mock sudo (post_update.sh calls `sudo install.sh --audit-log-access`/
+# `--journald-retention` - no real root available in this sandbox, so
+# just make sudo a no-op passthrough that reports success, isolating
+# this test to the service-state restore logic specifically).
+cat > "$W/bin/sudo" << 'MOCKEOF'
+#!/usr/bin/env bash
+exit 0
+MOCKEOF
+chmod +x "$W/bin/sudo"
+
+# Mock install.sh presence check (post_update.sh tests -x on it).
+mkdir -p "$W/fake_repo/tools"
+touch "$W/fake_repo/tools/install.sh"
+chmod +x "$W/fake_repo/tools/install.sh"
+
 export PATH="$W/bin:$PATH"
 export GM_TEST_UNITS_DIR="$W/units"
 
@@ -74,28 +97,20 @@ PYEOF
 echo "inactive" > "$W/units/str2str_file.service.state"
 echo "disabled" > "$W/units/str2str_file.service.enabled"
 
-echo "== Extract and run perform_update.sh's own snapshot-read + restore logic =="
-cat > "$W/run_restore.sh" << SCRIPT
-#!/usr/bin/env bash
-set -uo pipefail
-GEOMAXIMA_AUDIT_LOG="$W/audit.log"
-GEOMAXIMA_SERVICE_STATE_FILE="$W/.ota_service_state_before_update"
-GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT="$SNAPSHOT_PATH"
-GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS=1800
-GEOMAXIMA_RUN_ID="$RUN_ID"
-log_status() { echo "LOG[\$1] \$2"; }
-SCRIPT
-awk '/^_geomaxima_audit_log\(\) \{/,/^}/{print} /^_geomaxima_service_units\(\) \{/,/^}/{print}' "$REPO/addons/tools/perform_update.sh" >> "$W/run_restore.sh"
-awk '/^_geomaxima_used_pre_shutdown_snapshot=0/,/^fi$/{print}' "$REPO/addons/tools/perform_update.sh" | head -n -0 >> "$W/run_restore.sh"
-awk '/^_geomaxima_restore_service_states\(\) \{/,/^}/{print}' "$REPO/addons/tools/perform_update.sh" >> "$W/run_restore.sh"
-echo '_geomaxima_restore_service_states' >> "$W/run_restore.sh"
-OUT=$(bash "$W/run_restore.sh" 2>&1)
+echo "== Run the REAL post_update.sh directly (not an extracted fragment) =="
+AUDIT_LOG="$W/audit.log"
+OUT=$(bash -c "
+  sed 's#/var/lib/rtkbase/audit.log#${AUDIT_LOG}#; s#/var/lib/rtkbase/ota/service_state_before.json#${SNAPSHOT_PATH}#; s#/var/lib/rtkbase/\.post_update_service_state#${W}/.post_update_service_state#' '$REPO/addons/tools/post_update.sh' > '$W/post_update_rendered.sh'
+  bash '$W/post_update_rendered.sh' '$W/fake_repo' 'testuser' '$RUN_ID'
+" 2>&1)
 echo "$OUT"
 
 echo "== Verify =="
 [[ "$(cat "$W/units/str2str_file.service.state")" == "active" ]] && ok "str2str_file.service restored to active" || bad "str2str_file.service NOT restored to active"
 [[ "$(cat "$W/units/str2str_file.service.enabled")" == "enabled" ]] && ok "str2str_file.service restored to enabled" || bad "str2str_file.service NOT restored to enabled"
-echo "$OUT" | grep -q "matched" && ok "pre-shutdown snapshot was used (run_id matched)" || bad "pre-shutdown snapshot was not used"
+echo "$OUT" | grep -q "run_id matched" && ok "pre-shutdown snapshot was used (run_id matched)" || bad "pre-shutdown snapshot was not used"
+grep -q '"event": "before_update"' "$AUDIT_LOG" 2>/dev/null && ok "before_update event logged to audit.log" || bad "missing before_update audit event"
+grep -q '"event": "after_update"' "$AUDIT_LOG" 2>/dev/null && ok "after_update event logged to audit.log" || bad "missing after_update audit event"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
