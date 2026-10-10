@@ -34,6 +34,7 @@ monkey.patch_all()
 import time
 import json
 import os
+import re
 import shutil
 import sys
 import requests
@@ -1022,7 +1023,22 @@ def continueBase():
 
 @socketio.on("delete log", namespace="/test")
 def deleteLog(json_msg):
-    rtk.logm.deleteLog(json_msg.get("name"))
+    # GeoMaxima - 2026-10-05 archive incident fix: this delete path had
+    # NO audit trail at all (confirmed during the incident investigation -
+    # a UI-triggered delete around the same time as the incident could
+    # not be ruled in OR out, because nothing recorded it). The UI already
+    # asks for confirmation (logs.js's #confirm-delete-button modal); this
+    # adds the other half - a durable record of what was deleted, when,
+    # and by which logged-in session, independent of audit_logger's
+    # already-existing, separate deletion.
+    log_name = json_msg.get("name")
+    # GeoMaxima - 2026-10-07 review fix: deleteLog() now returns the
+    # actual outcome (True/False) instead of always None - log that,
+    # not just "a delete was requested", so a rejected (path-traversal/
+    # absolute-path) or failed (OSError) attempt is distinguishable
+    # from a genuine successful delete in the audit trail.
+    success = rtk.logm.deleteLog(log_name)
+    log_event("logs", "log_deleted" if success else "log_delete_failed", {"filename": log_name, "success": success})
     # Sending the the new available logs
     getAvailableLogs()
 
@@ -1380,6 +1396,70 @@ def update_settings(json_msg):
             print("ERROR, FAILED TO WRITE WIREGUARD CONFIG!")
     else:
         field_names = [form_input.get("name") for form_input in json_msg]
+
+        # GeoMaxima - 2026-10-05/06/07 archive incident fix: the
+        # settings.html form's own `pattern`/`required` HTML attributes
+        # (e.g. archive_rotate's pattern="\d+" required) are NEVER
+        # actually enforced before this point - settings.js's
+        # $(form).submit() handler serializes the form with jQuery's
+        # serializeArray() and emits it directly, without ever calling
+        # the browser's own checkValidity()/reportValidity(). Combined
+        # with update_setting() having no validation of its own, an
+        # invalid value for a field like archive_rotate used to reach
+        # settings.conf unchecked - and archive_and_clean.sh then
+        # blindly `source`d that value into a destructive `find -mtime
+        # +${archive_rotate} -delete`. Confirmed by direct testing (not
+        # assumed): a literal "0" or "00" genuinely deletes every
+        # archive regardless of real age. REVIEW FIX: `\d+` (and, in
+        # Python, `\d` matches any Unicode decimal digit, not just
+        # ASCII 0-9) would have ACCEPTED "0"/"00"/"08" - exactly the
+        # values that are destructive or that `archive_and_clean.sh`
+        # itself (correctly) rejects below its 14-day floor. These
+        # rules now mirror archive_and_clean.sh's own validation
+        # exactly: archive_rotate must be a non-zero, non-leading-zero
+        # integer >= 14; min_free_space must be a non-zero, non-
+        # leading-zero integer within a sane range; file_rotate_time/
+        # file_overlap_time allow a bare 0 (legitimate - 0s overlap is
+        # the documented default) but still reject a leading zero like
+        # "00"/"08" and an unbounded value. All patterns use the
+        # explicit [0-9] class, never \d, specifically to exclude
+        # Unicode digits standard int()-style parsing anywhere else in
+        # this call chain could otherwise accept or mis-handle.
+        validation_errors = []
+        for form_input in json_msg:
+            name = form_input.get("name")
+            value = form_input.get("value") or ""
+            if name == "archive_rotate":
+                if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) < 14:
+                    validation_errors.append(f"{name}='{value}' must be an integer >= 14 (no leading zero)")
+            elif name == "min_free_space":
+                if not re.fullmatch(r"[1-9][0-9]*", value) or not (1 <= int(value) <= 1_000_000):
+                    validation_errors.append(f"{name}='{value}' must be an integer between 1 and 1000000 (no leading zero)")
+            elif name == "file_rotate_time":
+                # settings.html's own pattern (\d+\.?\d*) allows a decimal
+                # hour value (e.g. "24.5") - validated as a float here,
+                # not forced to int like archive_rotate/min_free_space.
+                # The integer part must still reject a leading zero like
+                # "08"/"024" - caught by this session's own test suite,
+                # which found that a plain [0-9]+(\.[0-9]+)? regex (no
+                # leading-zero guard) let "08" through. "0" and "0.5" are
+                # legitimate (not a leading-zero case) and must stay valid.
+                try:
+                    rotate_hours = float(value)
+                    if not re.fullmatch(r"(0|[1-9][0-9]*)(\.[0-9]+)?", value) or rotate_hours <= 0 or rotate_hours > 168:
+                        raise ValueError
+                except ValueError:
+                    validation_errors.append(f"{name}='{value}' must be a positive number of hours, 0-168")
+            elif name == "file_overlap_time":
+                if not re.fullmatch(r"0|[1-9][0-9]*", value) or int(value) > 86400:
+                    validation_errors.append(f"{name}='{value}' must be an integer 0-86400 seconds (no leading zero except a bare 0)")
+        if validation_errors:
+            error_msg = "Settings NOT saved - invalid value(s): " + "; ".join(validation_errors)
+            print("ERROR,", error_msg)
+            log_event("settings", "form_save_rejected", {"section": source_section, "errors": validation_errors})
+            socketio.emit("settings_save_failed", json.dumps({"section": source_section, "message": error_msg}), namespace="/test")
+            return
+
         for form_input in json_msg:
             #print("name: ", form_input.get("name"))
             #print("value: ", form_input.get("value"))

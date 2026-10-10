@@ -58,6 +58,10 @@ man_help(){
     echo '        -t | --unit-files'
     echo '                         Deploy services.'
     echo ''
+    echo '        --journald-retention'
+    echo '                         Install persistent journald retention'
+    echo '                         (survives reboots, >= 30 days typical).'
+    echo ''
     echo '        -g | --gpsd-chrony'
     echo '                         Install gpsd and chrony to set date and time'
     echo '                         from the gnss receiver.'
@@ -470,7 +474,7 @@ install_unit_files() {
     echo 'ADDING UNIT FILES'
     echo '################################'
       if [ -d "${rtkbase_path}" ]
-      then 
+      then
         #Install unit files
         "${rtkbase_path}"/tools/copy_unit.sh --python_path "${rtkbase_path}"/venv/bin/python --user "${RTKBASE_USER}"
         systemctl enable rtkbase_web.service
@@ -478,9 +482,74 @@ install_unit_files() {
         systemctl daemon-reload
         #Add dialout group to user
         usermod -a -G dialout "${RTKBASE_USER}"
+        #GeoMaxima - 2026-10-05 archive incident fix: ship persistent
+        #journald retention. Confirmed live: the journal was volatile
+        #(default size limits, in-memory only) and had rolled over to
+        #only 16MB covering less than 24h by the time of a data-loss
+        #incident post-mortem, destroying 3+ days of logs that would
+        #have shown exactly what ran/deleted files around the incident
+        #time. Install a drop-in (not editing journald.conf.d's distro
+        #default directly) so it's never clobbered by an unrelated
+        #package upgrade, and is idempotent/safe to re-run on every OTA.
+        install_journald_retention
+        #GeoMaxima - 2026-10-05/06 incident investigation: fix
+        #audit.log's ownership so archive_and_clean.sh (runs as
+        #RTKBASE_USER, per rtkbase_archive.service's User={user}) can
+        #actually write to it. Confirmed live: the file was root:root
+        #0644 (created by rtkbase_web.service, which runs as root), so
+        #every audit write attempted by the archive script was failing.
+        #Idempotent/safe to re-run on every OTA.
+        install_audit_log_access "${RTKBASE_USER}"
       else
         echo 'RtkBase is not installed, use option --rtkbase-release or any other rtkbase installation option.'
       fi
+}
+
+install_journald_retention() {
+    echo '################################'
+    echo 'CONFIGURING PERSISTENT JOURNALD RETENTION'
+    echo '################################'
+      mkdir -p /etc/systemd/journald.conf.d
+      cat > /etc/systemd/journald.conf.d/geomaxima-retention.conf << 'EOF'
+# GeoMaxima - persistent journald retention, sized for >= 30 days of
+# typical RTKBase/GeoMaxima logging on an SD card. Installed/updated by
+# tools/install.sh's install_journald_retention() - do not edit by hand,
+# changes here are overwritten on the next OTA.
+[Journal]
+Storage=persistent
+SystemMaxUse=500M
+SystemKeepFree=200M
+MaxRetentionSec=1month
+EOF
+      mkdir -p /var/log/journal
+      systemd-tmpfiles --create --prefix /var/log/journal 2>/dev/null || true
+      systemctl restart systemd-journald
+}
+
+install_audit_log_access() {
+    local rtkbase_user="${1}"
+    echo '################################'
+    echo 'FIXING AUDIT LOG ACCESS'
+    echo '################################'
+      local audit_log="/var/lib/rtkbase/audit.log"
+      mkdir -p "$(dirname "${audit_log}")"
+      # Create it if missing (root:root default) so chown/chmod below
+      # always have a real file to act on, then fix ownership/mode -
+      # root:RTKBASE_USER 0660. RTKBASE_USER is the SAME user
+      # rtkbase_archive.service runs as (User={user} in
+      # unit/rtkbase_archive.service), so its own primary or
+      # supplementary group membership already makes this file group-
+      # writable for it without creating a new dedicated group. root
+      # (rtkbase_web.service, which creates this file on first write -
+      # see web_app/audit_logger.py) keeps full read/write; nothing
+      # outside root/RTKBASE_USER can read or write it (0660, no
+      # world/other bits at all - this file can contain settings-form
+      # field names/values, filenames, and other operationally
+      # sensitive detail).
+      touch "${audit_log}"
+      chown "root:${rtkbase_user}" "${audit_log}"
+      chmod 0660 "${audit_log}"
+      echo "audit.log ownership: root:${rtkbase_user}, mode 0660"
 }
 
 detect_gnss() {
@@ -900,9 +969,11 @@ main() {
   ARG_DETECT_MODEM=0
   ARG_START_SERVICES=0
   ARG_ZEROCONF=0
+  ARG_JOURNALD_RETENTION=0
+  ARG_AUDIT_LOG_ACCESS=0
   ARG_ALL=0
 
-  PARSED_ARGUMENTS=$(getopt --name install --options hu:drbi:jf:qtgencmsza: --longoptions help,user:,dependencies,rtklib,rtkbase-release,rtkbase-repo:,rtkbase-bundled,rtkbase-custom:,rtkbase-requirements,unit-files,gpsd-chrony,detect-gnss,no-write-port,configure-gnss,detect-modem,start-services,zeroconf,all: -- "$@")
+  PARSED_ARGUMENTS=$(getopt --name install --options hu:drbi:jf:qtgencmsza: --longoptions help,user:,dependencies,rtklib,rtkbase-release,rtkbase-repo:,rtkbase-bundled,rtkbase-custom:,rtkbase-requirements,unit-files,gpsd-chrony,detect-gnss,no-write-port,configure-gnss,detect-modem,start-services,zeroconf,journald-retention,audit-log-access,all: -- "$@")
   VALID_ARGUMENTS=$?
   if [ "$VALID_ARGUMENTS" != "0" ]; then
     #man_help
@@ -932,6 +1003,8 @@ main() {
         -m | --detect-modem) ARG_DETECT_MODEM=1        ; shift   ;;
         -s | --start-services) ARG_START_SERVICES=1    ; shift   ;;
         -z | --zeroconf) ARG_ZEROCONF=1                ; shift   ;;
+        --journald-retention) ARG_JOURNALD_RETENTION=1 ; shift   ;;
+        --audit-log-access) ARG_AUDIT_LOG_ACCESS=1      ; shift   ;;
         -a | --all) ARG_ALL="${2}"                     ; shift 2 ;;
         # -- means the end of the arguments; drop this, and break out of the while loop
         --) shift; break ;;
@@ -994,6 +1067,8 @@ main() {
   [ $ARG_CONFIGURE_GNSS -eq 1 ] && { configure_gnss ; ((cumulative_exit+=$?)) ;}
   [ $ARG_DETECT_MODEM -eq 1 ] && { detect_usb_modem && _add_modem_port && _configure_modem ; ((cumulative_exit+=$?)) ;}
   [ $ARG_ZEROCONF -eq 1 ] && { install_zeroconf_service; ((cumulative_exit+=$?)) ;}
+  [ $ARG_JOURNALD_RETENTION -eq 1 ] && { install_journald_retention; ((cumulative_exit+=$?)) ;}
+  [ $ARG_AUDIT_LOG_ACCESS -eq 1 ] && { install_audit_log_access "${RTKBASE_USER}"; ((cumulative_exit+=$?)) ;}
   [ $ARG_START_SERVICES -eq 1 ] && { start_services ; ((cumulative_exit+=$?)) ;}
 }
 

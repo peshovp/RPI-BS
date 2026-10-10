@@ -7,4 +7,19 @@ User={user}
 ExecStart={script_path}/archive_and_clean.sh
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths={script_path}
+# GeoMaxima - 2026-10-05/06 incident investigation: archive_and_clean.sh
+# writes audit events to /var/lib/rtkbase/audit.log, which is OUTSIDE
+# {script_path} - confirmed live that this write was being silently
+# swallowed by this unit's own ProtectSystem=strict sandbox, on top of
+# (and independent from) the separate ownership/permission issue also
+# found and fixed (see install.sh's install_audit_log_access()) -
+# archive_and_clean.sh's own audit-write fallback (stderr + `logger`,
+# see its _audit_log() function) means a write failure is never silent
+# any more either way, but the real fix is granting the access this
+# directive adds. The "-" prefix makes a missing file non-fatal to the
+# unit (this file is created lazily by whichever process writes to it
+# first). Scoped to this ONE file, not the whole /var/lib/rtkbase
+# directory - this job has no legitimate reason to write
+# survey_state.json, watchdog config, dns_status.json, or anything else
+# under there.
+ReadWritePaths={script_path} -/var/lib/rtkbase/audit.log

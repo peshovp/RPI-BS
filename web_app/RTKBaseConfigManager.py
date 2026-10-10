@@ -1,5 +1,7 @@
 import os
+import shutil
 from configparser import ConfigParser
+from datetime import datetime
 from secrets import token_urlsafe
 
 class RTKBaseConfigManager:
@@ -319,6 +321,71 @@ class RTKBaseConfigManager:
             print(e)
             return False
 
+    # Number of timestamped settings.conf backups to keep (see
+    # _backup_before_write() below) - one per write_file() call, oldest
+    # pruned once this many exist. Chosen generously (not just "the last
+    # one") since the 2026-10-05 archive incident's own post-mortem was
+    # made harder by having NO prior settings.conf state to compare
+    # against - a week of saves at a typical few-per-day editing rate
+    # comfortably fits in this count without needing a time-based prune.
+    SETTINGS_BACKUP_COUNT = 20
+
+    def _backup_before_write(self):
+        """
+            Copy the CURRENT on-disk settings.conf (before this write
+            replaces it) into a timestamped backup, so any settings.conf
+            change can always be reconstructed after the fact - see the
+            2026-10-05 archive incident: settings.conf was rewritten
+            twice in the days before the incident (once by the app at
+            18:03 on 2026-10-01, once during the 2026-10-05 15:25:33 OTA)
+            with no prior copy of either version kept, making it
+            impossible to confirm what value archive_rotate actually had
+            at 04:00 on the incident date. Best-effort only (logged, not
+            raised) - a backup failure must never block the actual
+            settings write.
+        """
+        if not os.path.exists(self.user_settings_path):
+            return
+        try:
+            # NOT inside datadir (data/) - a sibling of settings.conf
+            # itself, under the rtkbase root
+            # (<rtkbase_path>/settings_conf_backups/), so
+            # archive_and_clean.sh's own datadir-scoped find/rm/zip never
+            # sees it. Each backup file is named settings.conf.<timestamp>
+            # (never the exact string "settings.conf"), so no script that
+            # greps/opens settings.conf by exact filename - this
+            # project's OWN convention, confirmed via
+            # archive_and_clean.sh's `_read_setting()`,
+            # RTKBaseConfigManager's own __init__, and every
+            # `source <(...)`-based script - will ever read a backup
+            # file as if it were live config. 0600/owner-only, matching
+            # settings.conf's own permission model (it carries
+            # passwords/tokens).
+            backup_dir = os.path.join(os.path.dirname(self.user_settings_path), "settings_conf_backups")
+            os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+            os.chmod(backup_dir, 0o700)
+            # Microsecond precision: a plain-settings-page save followed
+            # immediately by another (e.g. several fields saved in quick
+            # succession) can land within the same second - confirmed in
+            # testing, second-resolution timestamps collided and silently
+            # overwrote each other, defeating the whole point of keeping
+            # SETTINGS_BACKUP_COUNT distinct backups.
+            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S.%f")
+            backup_path = os.path.join(backup_dir, f"settings.conf.{timestamp}")
+            shutil.copy2(self.user_settings_path, backup_path)
+            os.chmod(backup_path, 0o600)
+
+            existing = sorted(
+                (f for f in os.listdir(backup_dir) if f.startswith("settings.conf.")),
+            )
+            for stale in existing[:-self.SETTINGS_BACKUP_COUNT]:
+                try:
+                    os.remove(os.path.join(backup_dir, stale))
+                except OSError:
+                    pass
+        except OSError as e:
+            print(f"_backup_before_write: failed to back up settings.conf (write proceeds anyway): {e}")
+
     def write_file(self, settings=None):
         """
             write on disk the settings to the config file
@@ -333,9 +400,14 @@ class RTKBaseConfigManager:
             function shares the identical vulnerable pattern, reachable
             via any manual Settings-page save (e.g. editing Base
             coordinates) that triggers a service restart shortly after.
+
+            Backs up the PRIOR on-disk file before replacing it - see
+            _backup_before_write().
         """
         if settings is None:
             settings = self.config
+
+        self._backup_before_write()
 
         tmp_path = f"{self.user_settings_path}.tmp"
         with open(tmp_path, "w") as configfile:

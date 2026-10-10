@@ -101,7 +101,25 @@ class WatchdogController:
                     'check_data_stream': True,
                     'serial_port': '/dev/ttyACM0',
                     'timeout_seconds': 30,
-                    'alert_on_failure': True
+                    'alert_on_failure': True,
+                    # 2026-10-05 archive incident: the serial-port check
+                    # above would NOT have caught that incident's actual
+                    # failure (receiver/serial port was fine - the File
+                    # service that writes serial data to disk was
+                    # stopped, so data/ simply stopped growing, silently,
+                    # for 4+ days). This checks the newest RAW (not
+                    # archived - see gnss_monitor.py's own
+                    # _RAW_DATA_SUFFIXES comment for why *.zip is
+                    # deliberately excluded) file's age in data_dir
+                    # directly. str2str_file writes/appends continuously
+                    # while active, so thresholds are in MINUTES
+                    # (RAW_DATA_WARNING_MINUTES=30/
+                    # RAW_DATA_CRITICAL_MINUTES=120, both module-level
+                    # constants in gnss_monitor.py, not configurable
+                    # here - unlike data_dir, these aren't something a
+                    # station needs to tune per-install).
+                    'check_raw_data_freshness': True,
+                    'data_dir': '',  # '' = auto-detect from settings.conf
                 },
                 'temperature': {
                     'enabled': True,

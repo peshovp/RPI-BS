@@ -147,12 +147,38 @@ class LogManager():
 
         #log_name, extension = os.path.splitext(log_filename)
 
+        # GeoMaxima - 2026-10-07 review fix: log_filename comes directly
+        # from a socketio message (web_app/server.py's deleteLog()) with
+        # NO validation before this point. os.path.join(self.log_path,
+        # log_filename) does NOT protect against path traversal - a
+        # name containing "../" escapes log_path entirely, and if
+        # log_filename is itself an absolute path, os.path.join
+        # DISCARDS self.log_path and joins to that absolute path
+        # instead (documented Python behavior, not a bug in join()
+        # itself) - either way, this socket event could otherwise
+        # delete an arbitrary file the service account can write to.
+        # Basename-only, and the result must still resolve to a real
+        # file INSIDE log_path.
+        # Returns True/False (added in this fix, was previously always
+        # None) so the caller (web_app/server.py's deleteLog()) can log
+        # the actual outcome, not just that a delete was requested.
+        safe_name = os.path.basename(log_filename)
+        if not safe_name or safe_name != log_filename:
+            print(f"Rejected deleteLog request: '{log_filename}' is not a plain filename (path traversal or absolute path)")
+            return False
+        target_path = os.path.join(self.log_path, safe_name)
+        if os.path.dirname(os.path.realpath(target_path)) != os.path.realpath(self.log_path):
+            print(f"Rejected deleteLog request: '{log_filename}' resolves outside {self.log_path}")
+            return False
+
         # try to delete raw log
-        print("Deleting log " + log_filename)
+        print("Deleting log " + safe_name)
         try:
-            os.remove(os.path.join(self.log_path, log_filename))
+            os.remove(target_path)
+            return True
         except OSError as e:
-            print ("Error: " + e.log_filename + " - " + e.strerror)
+            print ("Error: " + e.filename + " - " + e.strerror)
+            return False
 
         """
         print("Deleting log " + log_name + ".zip")

@@ -56,13 +56,43 @@ $(document).ready(function () {
         });
 
     // Send saved settings to back-end
+    //
+    // GeoMaxima - 2026-10-05 archive incident fix: this handler used to
+    // call serializeArray()+emit() straight away, which NEVER runs the
+    // browser's own HTML5 constraint validation (the `pattern`/
+    // `required` attributes on fields like archive_rotate were
+    // decorative only - $(form).submit() bypasses them entirely unless
+    // checkValidity()/reportValidity() is called explicitly). An invalid
+    // field could silently reach the server, which had no validation of
+    // its own either - a confirmed, reproducible vulnerability class
+    // (archive_rotate='0' makes archive_and_clean.sh's `find -mtime
+    // +${archive_rotate} -delete` delete every archive regardless of
+    // age), independent of whether it's what actually caused any
+    // specific past incident. Now checked here (client-side, immediate
+    // feedback) AND on the server (server.py's update_settings(), since
+    // a client check alone is never trustworthy on its own).
     $("form").submit(function(e) {
+        e.preventDefault();
+        if (this.checkValidity && !this.checkValidity()) {
+            this.reportValidity();
+            return;
+        }
         var formdata = $( this ).serializeArray();
         formdata.push({"source_form" : e.currentTarget.id});
         socket.emit("form data", formdata);
         $(this).closest("form").find(":submit").prop("disabled", true);
-        e.preventDefault();
       });
+
+    // Server-side validation refused the save (see server.py's
+    // update_settings()) - re-enable the Save button and surface the
+    // reason, rather than leaving the button disabled with no feedback
+    // as if the save had succeeded.
+    socket.on("settings_save_failed", function(msg) {
+        var response = JSON.parse(msg);
+        console.error("Settings save failed:", response.message);
+        alert(response.message);
+        $("form#" + response.section).find(":submit").removeAttr("disabled");
+    });
     
     // Warn user if some changed settings are not saved before leaving the page
     window.addEventListener('beforeunload', function (e) {
