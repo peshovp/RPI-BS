@@ -50,7 +50,7 @@ setup_remote_and_station() {
     echo "$station"
 }
 
-echo "== Case A: station tracking the feature branch, clean tree -> switches to main =="
+echo "== Case A: FRESH feature-branch station, clean tree -> full switch, LOCAL branch renamed to main =="
 STATION=$(setup_remote_and_station case_a)
 BEFORE_BRANCH=$(cd "$STATION" && git rev-parse --abbrev-ref HEAD)
 echo "before: $BEFORE_BRANCH"
@@ -61,12 +61,39 @@ echo "$OUT"
 
 AFTER_HEAD=$(cd "$STATION" && git rev-parse HEAD)
 MAIN_HEAD=$(cd "$STATION" && git rev-parse origin/main)
+AFTER_BRANCH=$(cd "$STATION" && git rev-parse --abbrev-ref HEAD)
 AFTER_UPSTREAM=$(cd "$STATION" && git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
 
 [ "$AFTER_HEAD" = "$MAIN_HEAD" ] && ok "Case A: station's HEAD now matches origin/main" || bad "Case A: HEAD does not match origin/main (got $AFTER_HEAD, expected $MAIN_HEAD)"
-[ "$AFTER_UPSTREAM" = "origin/main" ] && ok "Case A: upstream is now origin/main" || bad "Case A: upstream is $AFTER_UPSTREAM, expected origin/main"
+[ "$AFTER_BRANCH" = "main" ] && ok "Case A: the LOCAL branch name is now main (not just the upstream)" || bad "Case A: local branch name is still '$AFTER_BRANCH', expected main - this is the exact live bug (half-switched state)"
+[ "$AFTER_UPSTREAM" = "origin/main" ] && ok "Case A: upstream is origin/main" || bad "Case A: upstream is $AFTER_UPSTREAM, expected origin/main"
+(cd "$STATION" && ! git rev-parse --verify -q feature/armbian-opi4pro-support >/dev/null 2>&1) && ok "Case A: the old local feature-branch name was deleted" || bad "Case A: the old local feature-branch name still exists"
+(cd "$STATION" && git rev-parse --verify -q origin/feature/armbian-opi4pro-support >/dev/null 2>&1) && ok "Case A: the REMOTE feature branch ref is untouched (never deleted)" || bad "Case A: the remote feature-branch ref was removed - this function must never touch the remote ref"
 grep -q '"event": "switch_completed"' "$AUDIT_LOG" 2>/dev/null && ok "Case A: switch_completed logged to audit.log" || bad "Case A: no switch_completed audit event"
 cat "$STATION/file.txt" | grep -q "v2" && ok "Case A: main's newer content is present (v2 line)" || bad "Case A: main's newer content missing"
+
+echo "== Case A2: HALF-SWITCHED station (exact live state found on the Orange Pi) - local branch still feature/armbian-opi4pro-support, but upstream ALREADY origin/main - must finish the job =="
+STATION=$(setup_remote_and_station case_a2)
+# Reproduce the half-switched state directly: the OLD version of this
+# function only ran `git branch -u origin/main` without renaming the
+# local branch - simulate that exact end state.
+(cd "$STATION" && git fetch -q origin main && git branch -u origin/main)
+HALF_SWITCHED_BRANCH=$(cd "$STATION" && git rev-parse --abbrev-ref HEAD)
+HALF_SWITCHED_UPSTREAM=$(cd "$STATION" && git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+echo "half-switched precondition: local branch=$HALF_SWITCHED_BRANCH, upstream=$HALF_SWITCHED_UPSTREAM"
+[ "$HALF_SWITCHED_BRANCH" = "feature/armbian-opi4pro-support" ] && [ "$HALF_SWITCHED_UPSTREAM" = "origin/main" ] || { bad "Case A2: failed to set up the half-switched precondition"; }
+
+AUDIT_LOG="$W/case_a2_audit.log"
+OUT=$(GM_BRANCH_SWITCH_AUDIT_LOG="$AUDIT_LOG" bash -c "source '$REPO/tools/branch_switch.sh' && geomaxima_maybe_switch_branch '$STATION' ''" 2>&1)
+echo "$OUT"
+
+AFTER_BRANCH=$(cd "$STATION" && git rev-parse --abbrev-ref HEAD)
+AFTER_HEAD=$(cd "$STATION" && git rev-parse HEAD)
+MAIN_HEAD=$(cd "$STATION" && git rev-parse origin/main)
+[ "$AFTER_BRANCH" = "main" ] && ok "Case A2: half-switched station's local branch is now correctly renamed to main" || bad "Case A2: local branch is still '$AFTER_BRANCH' - the half-switched state was never finished"
+[ "$AFTER_HEAD" = "$MAIN_HEAD" ] && ok "Case A2: HEAD matches origin/main after finishing the switch" || bad "Case A2: HEAD does not match origin/main"
+(cd "$STATION" && ! git rev-parse --verify -q feature/armbian-opi4pro-support >/dev/null 2>&1) && ok "Case A2: the old local feature-branch name was deleted" || bad "Case A2: the old local feature-branch name still exists"
+grep -q '"event": "switch_completed"' "$AUDIT_LOG" 2>/dev/null && ok "Case A2: switch_completed logged" || bad "Case A2: no switch_completed audit event"
 
 echo "== Case B: station tracking the feature branch, DIRTY tree -> skipped, never forced =="
 STATION=$(setup_remote_and_station case_b)

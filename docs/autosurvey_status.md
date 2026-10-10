@@ -286,6 +286,45 @@ narrower unit test but is no longer the only coverage for this path.
 The next Topolchane OTA is the real verification: `post_update` and
 `ota_service_state` category events should now appear in `audit.log`.
 
+## 2026-10-14 (continued): the Orange Pi's branch switch was only half-done
+
+The Orange Pi's OTA to `e009f5c` (which included the `post_update.sh`
+path fix and `tools/branch_switch.sh`) succeeded - startup self-heal
+ran, `branch_switch`/`switch_completed` was logged, the DNS fallback
+drop-in was removed. But `git status -sb` on the station still showed
+`feature/armbian-opi4pro-support...origin/main`: only the UPSTREAM had
+been repointed (`git branch -u origin/main`), not the LOCAL branch
+name. This half-switched state is worse than not switching at all,
+because `perform_update.sh`, `tools/repo_update.sh`'s interrupted-
+update recovery, and `update_controller.py`'s `check_for_updates()`
+(`"Already up to date"` check) all derive their reset/pull target from
+the LOCAL branch name (`git rev-parse --abbrev-ref HEAD`), never the
+upstream - so the station's next OTA would have reset to
+`origin/feature/armbian-opi4pro-support`, a ref that now never moves
+again, silently diverging it from `main`.
+
+Two-part fix: (1) every one of those call sites now prefers the real
+upstream (`@{u}`) when one is configured, falling back to
+`origin/<local name>` only when there is none - `perform_update.sh`'s
+reset step, `repo_update.sh`'s interrupted-update recovery, and a new
+`_get_update_target_ref()` helper in `update_controller.py` used by
+`check_for_updates()` (and, for consistency, the otherwise-unreachable
+`_old_perform_update()`). (2) `tools/branch_switch.sh`'s
+`geomaxima_maybe_switch_branch()` no longer stops at repointing the
+upstream - it now runs `git checkout -B main origin/main` to actually
+rename the local branch, then deletes the old local
+`feature/armbian-opi4pro-support` name (never the remote ref). Handles
+three starting states: never switched, half-switched (exactly what the
+Orange Pi was left in), and already-on-main (idempotent no-op); a
+station on some other branch entirely is still never touched.
+
+9 new tests (`tests/upstream_aware_reset_target_test.sh`, plus a new
+half-switched-state case added to the existing
+`tests/branch_switch_test.sh`), all against real git repos, all
+passing. The feature branch was fast-forwarded to this fix's commit a
+second time so the Orange Pi's next OTA (which still resolves its reset
+target by local branch name until this fix lands) can reach it.
+
 ## Standing rules (apply to every part below, no exceptions found so far)
 
 1. **Diff first, wait for explicit approval, before every commit.** Not

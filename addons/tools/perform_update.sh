@@ -323,26 +323,44 @@ if [ $BRANCH_RC -ne 0 ]; then
     exit 1
 fi
 log_status "info" "✓ Current branch: $BRANCH"
-log_status "info" "Resetting to remote HEAD to avoid conflicts..."
+
+# GeoMaxima - 2026-10-14 review fix: a station mid-way through the
+# Orange Pi branch-switch (tools/branch_switch.sh) has its UPSTREAM
+# already repointed to origin/main (via `git branch -u`), but its LOCAL
+# branch NAME still says feature/armbian-opi4pro-support until
+# geomaxima_maybe_switch_branch's next run actually renames it (see that
+# function's own fix, same commit). Resetting to "origin/$BRANCH" here
+# would target origin/feature/armbian-opi4pro-support instead of the
+# upstream the station is ACTUALLY configured to follow - confirmed live
+# this would have silently diverged the station from main the next time
+# main gets commits the (now-frozen) feature branch ref doesn't. Prefer
+# the real upstream (@{u}) when one is configured; only fall back to
+# origin/<local name> when there is none (a station that was never
+# switched, the normal/common case).
+RESET_TARGET="$(GM_GIT_AS_OWNER git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
+if [ -z "$RESET_TARGET" ]; then
+    RESET_TARGET="origin/$BRANCH"
+fi
+log_status "info" "Resetting to $RESET_TARGET to avoid conflicts..."
 
 # Use hard reset instead of pull to avoid merge conflicts entirely.
 # GeoMaxima: the reset was piped through `tee`, so its failure was never
 # seen - confirmed live: "unable to unlink old ... Permission denied" /
 # "Could not reset index file", and the update carried on and reported
 # success with HEAD still on the old commit. Now git's own status is
-# checked, and the result is verified: HEAD must equal origin/<branch>
+# checked, and the result is verified: HEAD must equal the reset target
 # with no tracked changes left. Anything else stops the update as FAILED.
-RESET_OUT="$(GM_GIT_AS_OWNER git reset --hard "origin/$BRANCH" 2>&1)" && RESET_RC=0 || RESET_RC=$?
+RESET_OUT="$(GM_GIT_AS_OWNER git reset --hard "$RESET_TARGET" 2>&1)" && RESET_RC=0 || RESET_RC=$?
 printf '%s\n' "$RESET_OUT"
 if [ $RESET_RC -ne 0 ]; then
-    log_status "error" "Git reset to origin/$BRANCH FAILED (exit $RESET_RC): $(printf '%s' "$RESET_OUT" | grep -iE 'error|fatal' | head -3 | tr '\n' ' ')"
+    log_status "error" "Git reset to $RESET_TARGET FAILED (exit $RESET_RC): $(printf '%s' "$RESET_OUT" | grep -iE 'error|fatal' | head -3 | tr '\n' ' ')"
     exit 1
 fi
 GM_HEAD="$(GM_GIT_AS_OWNER git rev-parse HEAD 2>/dev/null)" || GM_HEAD=""
-GM_TARGET="$(GM_GIT_AS_OWNER git rev-parse "origin/$BRANCH" 2>/dev/null)" || GM_TARGET=""
+GM_TARGET="$(GM_GIT_AS_OWNER git rev-parse "$RESET_TARGET" 2>/dev/null)" || GM_TARGET=""
 GM_DIRTY="$(GM_GIT_AS_OWNER git status --porcelain --untracked-files=no 2>&1)" || GM_DIRTY="git status failed: $GM_DIRTY"
 if [ -z "$GM_HEAD" ] || [ "$GM_HEAD" != "$GM_TARGET" ] || [ -n "$GM_DIRTY" ]; then
-    log_status "error" "Git reset did not complete: HEAD ${GM_HEAD:0:7}, origin/$BRANCH ${GM_TARGET:0:7}, tracked changes: $(printf '%s' "$GM_DIRTY" | head -5 | tr '\n' ' ')"
+    log_status "error" "Git reset did not complete: HEAD ${GM_HEAD:0:7}, $RESET_TARGET ${GM_TARGET:0:7}, tracked changes: $(printf '%s' "$GM_DIRTY" | head -5 | tr '\n' ' ')"
     exit 1
 fi
 log_status "info" "✓ Updates applied successfully: $(GM_GIT_AS_OWNER git log -1 --oneline 2>/dev/null)"

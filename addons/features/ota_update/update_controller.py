@@ -272,7 +272,35 @@ fi
         
         logger.debug(f"Git command: {' '.join(cmd)}")
         return subprocess.run(cmd, env=env, **kwargs)
-    
+
+    def _get_update_target_ref(self) -> str:
+        """
+        GeoMaxima - 2026-10-14 review fix: a station mid-way through the
+        Orange Pi branch-switch (tools/branch_switch.sh) has its
+        upstream already repointed to origin/main via `git branch -u`,
+        but its local branch NAME can still say
+        feature/armbian-opi4pro-support until the next switch run
+        actually renames it. Using "origin/<local branch name>" here
+        would target origin/feature/armbian-opi4pro-support instead of
+        what the station is actually configured to follow - confirmed
+        live this silently diverges a half-switched station from main
+        the moment main gets a commit the frozen feature-branch ref
+        doesn't. Prefer the real upstream (@{u}) when one is configured;
+        fall back to origin/<local name> only when there is none (the
+        normal/common case - a station that was never switched).
+        """
+        result = self._run_git_command(
+            ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        branch = self._run_git_command(
+            ['rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        return f'origin/{branch}'
+
     def _find_repo_path(self) -> str:
         """
         Compute the repo root path directly from this file's location.
@@ -393,39 +421,44 @@ fi
                 logger.error(error_msg)
                 return {'error': error_msg}
             
-            # Get current branch
+            # Get current branch (for display only - the actual update
+            # target below is resolved from the upstream, not this name).
             branch = self._run_git_command(
                 ['rev-parse', '--abbrev-ref', 'HEAD'],
                 capture_output=True, text=True, check=True
             ).stdout.strip()
-            
+
+            # Target ref - prefers the real upstream (@{u}) over
+            # origin/<local branch name>; see _get_update_target_ref().
+            target_ref = self._get_update_target_ref()
+
             # Get local commit
             local_commit = self._run_git_command(
                 ['rev-parse', 'HEAD'],
                 capture_output=True, text=True, check=True
             ).stdout.strip()
-            
+
             # Get remote commit
             remote_commit = self._run_git_command(
-                ['rev-parse', f'origin/{branch}'],
+                ['rev-parse', target_ref],
                 capture_output=True, text=True, check=True
             ).stdout.strip()
-            
+
             updates_available = local_commit != remote_commit
-            
+
             # Get commits behind
             if updates_available:
                 commits_behind = self._run_git_command(
-                    ['rev-list', '--count', f'HEAD..origin/{branch}'],
+                    ['rev-list', '--count', f'HEAD..{target_ref}'],
                     capture_output=True, text=True, check=True
                 ).stdout.strip()
-                
+
                 # Get changelog
                 changelog = self._run_git_command(
-                    ['log', '--oneline', f'HEAD..origin/{branch}'],
+                    ['log', '--oneline', f'HEAD..{target_ref}'],
                     capture_output=True, text=True, check=True
                 ).stdout.strip()
-                
+
                 return {
                     'updates_available': True,
                     'commits_behind': int(commits_behind),
@@ -775,18 +808,25 @@ fi
                 branch = branch.stdout.strip()
                 logger.info(f"Current branch: {branch}")
                 update_log.append(f"✓ Current branch: {branch}")
-                
+
                 self.last_update_status['log'] = '\n'.join(update_log)
                 self._save_status_to_file()
-                
+
+                # GeoMaxima - 2026-10-14 review fix: prefer the real
+                # upstream (@{u}) over origin/<local branch name> - see
+                # _get_update_target_ref(). This method is currently
+                # unreachable (no callers), kept consistent anyway.
+                target_ref = self._get_update_target_ref()
+
                 # Step 4: Pull updates
-                update_log.append(f"Pulling updates from {branch}...")
-                logger.info(f"Starting git pull from {branch}...")
+                update_log.append(f"Pulling updates from {target_ref}...")
+                logger.info(f"Starting git pull from {target_ref}...")
                 self.last_update_status['log'] = '\n'.join(update_log)
                 self._save_status_to_file()
-                
+
+                target_remote, target_branch = target_ref.split('/', 1)
                 result = self._run_git_command(
-                    ['pull', 'origin', branch],
+                    ['pull', target_remote, target_branch],
                     capture_output=True, text=True, timeout=60
                 )
                 if result.returncode != 0:

@@ -102,21 +102,34 @@ geomaxima_finish_interrupted_update() {
     local as_owner=(sudo -u "$owner")
     [[ "$(id -un)" == "$owner" ]] && as_owner=()
     branch="$("${as_owner[@]}" git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
-    target="$("${as_owner[@]}" git -C "$repo" rev-parse --verify -q "origin/$branch" 2>/dev/null)" || return 0
+
+    # GeoMaxima - 2026-10-14 review fix: prefer the real upstream (@{u})
+    # over origin/<local branch name> - a station mid-way through the
+    # Orange Pi branch-switch (tools/branch_switch.sh) has its upstream
+    # already repointed to origin/main, but its local branch name can
+    # still say feature/armbian-opi4pro-support until the rename
+    # actually happens. Using "origin/$branch" here would target the
+    # wrong ref and silently diverge such a station the moment main
+    # advances past the frozen feature branch.
+    local reset_target
+    reset_target="$("${as_owner[@]}" git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
+    [[ -z "$reset_target" ]] && reset_target="origin/$branch"
+
+    target="$("${as_owner[@]}" git -C "$repo" rev-parse --verify -q "$reset_target" 2>/dev/null)" || return 0
     head="$("${as_owner[@]}" git -C "$repo" rev-parse HEAD 2>/dev/null)"
     dirty="$("${as_owner[@]}" git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)"
     if [[ "$head" == "$target" && -z "$dirty" ]]; then
         return 0
     fi
 
-    _gm_repo_log "interrupted update detected: HEAD ${head:0:7}, origin/$branch ${target:0:7}, $(printf '%s' "$dirty" | grep -c .) tracked change(s) - finishing it"
+    _gm_repo_log "interrupted update detected: HEAD ${head:0:7}, $reset_target ${target:0:7}, $(printf '%s' "$dirty" | grep -c .) tracked change(s) - finishing it"
     geomaxima_repo_normalize_ownership "$repo"
-    out="$("${as_owner[@]}" git -C "$repo" reset --hard "origin/$branch" 2>&1)" && rc=0 || rc=$?
+    out="$("${as_owner[@]}" git -C "$repo" reset --hard "$reset_target" 2>&1)" && rc=0 || rc=$?
     printf '%s\n' "$out" | sed 's/^/[repo] git: /'
     head="$("${as_owner[@]}" git -C "$repo" rev-parse HEAD 2>/dev/null)"
     dirty="$("${as_owner[@]}" git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)"
     if [[ $rc -eq 0 && "$head" == "$target" && -z "$dirty" ]]; then
-        _gm_repo_log "update finished: checkout is clean at origin/$branch (${target:0:7})"
+        _gm_repo_log "update finished: checkout is clean at $reset_target (${target:0:7})"
     else
         _gm_repo_log "ERROR: could not finish the update (reset exit $rc, HEAD ${head:0:7}, target ${target:0:7}) - the next OTA will retry"
     fi
