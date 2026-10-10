@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  tools/platform_detect.sh
-#  Meant to be SOURCED (not executed) by install.sh, tools/install.sh,
-#  tools/security_setup.sh, addons/tools/perform_update.sh, and any other
-#  GeoMaxima shell script that needs to know what board/OS it is running on.
+#  Meant to be SOURCED (not executed) by any GeoMaxima shell script that
+#  needs to know what board/OS it is running on. Currently sourced by
+#  install.sh, tools/install.sh, and tools/post_update.sh.
+#
+#  GeoMaxima - 2026-10-13 review fix: this comment used to also claim
+#  tools/security_setup.sh and addons/tools/perform_update.sh already
+#  source it - confirmed via grep that neither did. Neither currently has
+#  a step that actually branches on GM_PLATFORM (perform_update.sh's one
+#  RPi-specific call, raspi-config, already self-degrades gracefully on
+#  any platform where raspi-config doesn't exist, with no need to detect
+#  the platform first) - add a `source` call there too, the same way
+#  tools/post_update.sh does, the day either of them needs to.
 #
 #  Exports, read-only, no side effects (safe to source repeatedly):
 #    GM_PLATFORM       one of: rpi | armbian-a733 | armbian | unknown

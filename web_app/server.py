@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import stat as stat_module
 import grp
 import sys
@@ -1722,6 +1723,32 @@ def _self_heal_audit_log_and_journald():
                 print(f"Self-heal: journald-retention fix failed: {result.stderr.strip()}")
     except Exception as e:
         print(f"Self-heal: journald drop-in check failed (continuing anyway): {e}")
+
+    try:
+        # GeoMaxima - 2026-10-13: Orange Pi 4 Pro consolidation - must run
+        # HERE too, not only from tools/post_update.sh's OTA hand-off.
+        # Confirmed: the Orange Pi 4 Pro station's CURRENT perform_update.sh
+        # (commit 68c61fe) predates tools/post_update.sh's existence
+        # entirely and never calls it - so on that station's very FIRST
+        # OTA after this fix lands, the hand-off never runs at all. This
+        # startup self-heal is the only path guaranteed to run on every
+        # station regardless of which perform_update.sh launched the last
+        # OTA, since rtkbase_web.service always restarts on the freshly-
+        # pulled code. See tools/branch_switch.sh for the full rationale
+        # and safety conditions (clean tree only, never forces).
+        branch_switch_script = os.path.join(rtkbase_path, "tools", "branch_switch.sh")
+        if os.path.isfile(branch_switch_script):
+            standard_user = rtkbaseconfig.get("general", "user").strip("'")
+            result = subprocess.run(
+                ["bash", "-c", f"source {shlex.quote(branch_switch_script)} && geomaxima_maybe_switch_branch {shlex.quote(rtkbase_path)} {shlex.quote(standard_user)}"],
+                capture_output=True, text=True, check=False,
+            )
+            if result.stdout.strip():
+                print(f"Self-heal: {result.stdout.strip()}")
+            if result.returncode != 0:
+                print(f"Self-heal: branch-switch check failed: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"Self-heal: branch-switch check failed (continuing anyway): {e}")
 
 if __name__ == "__main__":
     args=arg_parse()

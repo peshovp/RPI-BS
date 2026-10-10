@@ -121,6 +121,127 @@ by direct code reading and simulation in this sandbox (no real
 `systemd`/root OTA environment available here), not by an actual live
 OTA run.
 
+## 2026-10-13 (later the same day): live OTA on a test station still failed - exit 3, logname, and the best-effort/critical split
+
+A live OTA to `298cedb` on a test station FAILED (exit 3). Root cause
+of the install.sh half: `tools/install.sh --journald-retention` (called
+from `post_update.sh`, no `--user` argument) hit `_check_user()`'s old
+`logname`-only fallback, which has no answer at all in a non-interactive
+systemd transient unit (`logname: no login name`) - so `install.sh`
+`exit 1`'d before `install_journald_retention()` ever ran, even though
+that flag needs no user at all. Fixed (`b1c6b83`): resolution order is
+now `--user` / `settings.conf`'s `[general] user=` / `SUDO_USER` (never
+`root`) / fail only that step; `--user` added explicitly at every OTA-path
+caller.
+
+Separately (`8ec046f`): `perform_update.sh` now splits CRITICAL steps
+(reset+verify, unit redeploy, the post-update hand-off, the final web
+restart - abort on failure) from BEST-EFFORT steps (raspi-config, apt,
+WireGuard, DNS, ANTEX, PRIDE-PPPAR - tracked via `gm_warn`, never abort).
+The hand-off/restart are idempotent functions, defined immediately after
+the reset lands (before any best-effort step can fail) and called both
+normally and from a `gm_run_finally` EXIT trap, so they always run even
+if something later aborts unexpectedly. Final status becomes "completed
+with warnings" rather than FAILED when only a best-effort step failed.
+The error trap's line number was fixed too: `BASH_LINENO[0]` is always
+`0` at top-level script scope (confirmed by direct reproduction) - that's
+why the UI showed "line ?"; replaced with plain `$LINENO`, which reports
+correctly in both contexts. `post_update.sh` also gets an unconditional
+`trap 'exit 0' EXIT` as a second, independent guarantee that it can never
+propagate a failure up to its caller - on top of the caller's own
+`if/else` wrapper, which already caught this case (confirmed by reading
+the already-committed `298cedb` parent's own hand-off code).
+
+**The exact source of "exit 3" was never identified.** Grepped the
+`fccc038` and `298cedb` versions of `perform_update.sh`,
+`repo_update.sh`, `dns_setup.sh`, `wireguard_setup.sh`, and `install.sh`
+for `exit 3`/`return 3`/exit-code arithmetic - none found. Every
+soft-fail wrapper in the chain already catches non-zero exits as 0/1,
+never 3, under `set -e`. Most likely something outside the scripts'
+own logic entirely (a signal, an OOM-kill during the memory-intensive
+PRIDE-PPPAR build, or systemd's own unit lifecycle) - reported to the
+user as genuinely unresolved rather than guessed at.
+
+18 new tests across 4 files (310 total passing on WSL Ubuntu 24.04 for
+this round alone), all run and confirmed via `git stash` A/B comparison
+to introduce no regressions against the pre-change baseline.
+
+## 2026-10-13 (same day, continued): Orange Pi 4 Pro / Armbian branch consolidation
+
+The Orange Pi 4 Pro station was stuck tracking
+`feature/armbian-opi4pro-support` at `68c61fe` - a strict ancestor of
+`main` (`git rev-list --left-right --count origin/main...HEAD` = "34 0"),
+fully merged via `8f0f3ba`, with zero commits of its own. Its OTA never
+pulled anything new, so none of `main`'s ongoing fixes (including this
+same incident's own fixes) could ever reach it.
+
+Added `tools/branch_switch.sh`'s `geomaxima_maybe_switch_branch()`:
+switches a station's tracking branch from
+`feature/armbian-opi4pro-support` to `main` through code - only when
+currently on that exact branch, only when the tree is clean (never
+forces), idempotent, logs every outcome to `audit.log`. Every git
+command inside it runs as the repo's actual owner (`stat -c '%U'`,
+cross-checked against the caller-supplied owner, the disk owner always
+wins) via `sudo -u <owner>`, NEVER as root - confirmed live elsewhere in
+this project that running git as root against a non-root-owned tree
+triggers "dubious ownership" or leaves root-owned files in `.git` that
+break a later owner-run git operation; this function refuses to run any
+git command at all if a safe non-root owner can't be established, rather
+than ever falling back to running as whichever user called it (root, in
+`server.py`'s case).
+
+Called from BOTH `tools/post_update.sh` (every station, after a normal
+OTA) AND `web_app/server.py`'s startup self-heal - confirmed necessary
+because the Orange Pi's CURRENT `perform_update.sh` (`68c61fe`) predates
+`tools/post_update.sh`'s existence entirely and never calls it, so on
+that station's very first OTA after this fix lands, the hand-off path
+never runs at all; the startup self-heal is the only path guaranteed to
+run regardless of OTA history.
+
+**Correction to an earlier (uncommitted) analysis in this same session**:
+it was initially reasoned that `68c61fe`'s backgrounded web restart
+(`(sleep 5 && systemctl restart rtkbase_web) &`) survives because its
+launcher (`update_controller.py` at that commit) uses
+`start_new_session=True`, placing it outside `rtkbase_web.service`'s own
+cgroup. That reasoning was wrong - `start_new_session=True` does NOT, by
+itself, protect a process from being killed when its *own* parent dies;
+the actual reason the restart reliably completes is that `systemctl
+restart` only needs to successfully *queue* the job with systemd before
+the `systemctl` client process exits/is killed - systemd itself then
+carries out the restart independent of whatever happens to the client
+afterward. This is confirmed empirically: the `960f130` -> `fccc038` OTA
+on the other test station used this exact backgrounded-restart pattern
+and worked. The conclusion (safe to proceed) is unchanged; only the
+reasoning was corrected.
+
+Also fixed: `tools/platform_detect.sh`'s header comment falsely claimed
+`tools/security_setup.sh` and `addons/tools/perform_update.sh` already
+source it - neither did (confirmed via grep). Now actually sourced by
+`tools/post_update.sh` (neither of the other two currently has a step
+that branches on `GM_PLATFORM`, so there was nothing unsafe about the gap
+itself, just an inaccurate comment).
+
+Confirmed, not changed (already correct): the `systemd-resolved`
+`FallbackDNS=` drop-in removal in `tools/dns_setup.sh` already runs
+unconditionally via `perform_update.sh`'s DNS step on every platform,
+with backup + `systemctl reload-or-restart systemd-resolved`; the DNS
+health check already reads per-link DNS correctly on the
+networkd/resolved stack (not NetworkManager-only) and only reports an
+error when nameservers are truly empty. The vendored `aarch64` RTKLIB
+binaries are confirmed trixie-compatible: `str2str`/`rtkrcv`/`convbin`
+are statically linked (no ABI dependency at all); `rnx2rtkp`'s highest
+required `GLIBC_` symbol is `2.38`, well under what trixie ships.
+
+11 new tests in `tests/branch_switch_test.sh` (14 after a review round
+added an explicit root-caller-vs-different-owner case), using real local
+git repos, all passing.
+
+**Not yet done**: fast-forwarding
+`origin/feature/armbian-opi4pro-support` to the main commit containing
+this fix - waiting on explicit confirmation that the Topolchane OTA
+fixes verify correctly on a live station first, per the user's own
+sequencing instruction.
+
 ## Standing rules (apply to every part below, no exceptions found so far)
 
 1. **Diff first, wait for explicit approval, before every commit.** Not

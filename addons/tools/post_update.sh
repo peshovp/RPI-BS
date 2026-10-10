@@ -72,6 +72,34 @@ echo "=========================================="
 echo "POST-UPDATE STEPS STARTED: $(date)"
 echo "=========================================="
 
+# GeoMaxima - 2026-10-13 review fix: tools/platform_detect.sh's own header
+# comment claimed perform_update.sh and tools/security_setup.sh already
+# source it - confirmed via grep that neither actually did. Sourced here
+# (no current step in this script branches on GM_PLATFORM yet, but this
+# makes it available for the next one that needs to, and closes the
+# documented-but-not-true gap for this script specifically).
+if [[ -r "${DEV_REPO_PATH}/tools/platform_detect.sh" ]]; then
+  source "${DEV_REPO_PATH}/tools/platform_detect.sh"
+  echo "post_update.sh: platform detected as ${GM_PLATFORM:-unknown} (board: ${GM_BOARD:-unknown}, arch: ${GM_ARCH:-unknown})"
+fi
+
+# GeoMaxima - 2026-10-13: Orange Pi 4 Pro consolidation - if this station
+# is still tracking feature/armbian-opi4pro-support (a strict ancestor of
+# main, fully merged, with no new commits of its own), switch it to
+# tracking main so this station's OTA path actually pulls main's ongoing
+# fixes from here on. Safe to call unconditionally - a no-op for every
+# station already tracking main. See tools/branch_switch.sh's header
+# comment for the full rationale and safety conditions (clean tree only,
+# never forces).
+if [[ -r "${DEV_REPO_PATH}/tools/branch_switch.sh" ]]; then
+  echo "post_update.sh: checking for a stale feature-branch tracking that should switch to main..."
+  if source "${DEV_REPO_PATH}/tools/branch_switch.sh" && geomaxima_maybe_switch_branch "${DEV_REPO_PATH}" "${REPO_OWNER}"; then
+    :
+  else
+    echo "⚠ branch_switch check reported an error - continuing anyway" >&2
+  fi
+fi
+
 if [[ -x "${DEV_REPO_PATH}/tools/install.sh" ]]; then
   echo "post_update.sh: running install_audit_log_access..."
   if sudo "${DEV_REPO_PATH}/tools/install.sh" --audit-log-access --user "${REPO_OWNER}" 2>&1; then
