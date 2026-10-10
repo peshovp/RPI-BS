@@ -2,52 +2,94 @@
 bgs2005_transformer.py
 ========================
 Трансформира ITRF2020 (динамична) координата, получена от PPPProcessor,
-в BGS2005 (~ETRF2014, статична, plate-fixed) координата - официалната
-референтна система, изисквана за координатите на GNSS базови станции в
-България съгласно Инструкция № РД-02-20-25 от 20.09.2011 г. (МРРБ), Чл.22,
-ал.1: "Изходни данни са геодезическите координати... на изходните точки...
-когато се прилагат относителни методи - в БГС 2005." RTK е класифициран
-изрично като относителен метод (Чл.11). БГС2005 официално е дефиниран чрез
-ETRS89 (Инструкция № РД-02-20-12 от 03.08.2012, Чл.7).
+в BGS2005 координата - официалната референтна система, изисквана за
+координатите на GNSS базови станции в България съгласно Инструкция №
+РД-02-20-25 от 20.09.2011 г. (МРРБ), Чл.22, ал.1: "Изходни данни са
+геодезическите координати... на изходните точки... когато се прилагат
+относителни методи - в БГС 2005." RTK е класифициран изрично като
+относителен метод (Чл.11).
 
 ВАЖНО: координатите, произведени от този модул, СА координатите, които
 трябва да се излъчват през RTCM (settings.conf) за коректна работа на RTK
 rover-и спрямо тази базова станция - не суровият ITRF2020 PPP резултат.
 
-Методология: официална, конформна Helmert трансформация с ротационни
-СКОРОСТИ (не позиция) за привързване към Евразийската плоча:
-  1. ITRF2020 -> ITRF2014 (IGN, https://itrf.ign.fr/en/solutions/transformations)
-  2. ITRF2014 -> ETRF2014 (EPSG:8407, EUREF Technical Note 1, Altamimi 2017)
+PART 10b - КОРИГИРАНА ВЕРИГА (замества по-старата ITRF2020->ITRF2014->
+ETRF2014 верига, която целеше грешна рамка):
 
-Валидирано срещу реален RTK замер (~5cm остатъчна разлика, обяснима с RTK
-точност + известна разлика между генеричен EUREF модел и специфичната
-национална реализация/сгъстяване на БГС2005 - Държавната GPS мрежа,
-473 точки; официалният АГКК софтуер BGSTrans ползва 10 000-точкова
-корекционна мрежа за тази остатъчна разлика, виж design doc за детайли).
+БГС2005 официално е дефиниран като ETRS89, реализация ETRF2000, епоха
+2005.0 (АГКК "Основни положения"; Наредба № 2/2010, Чл.8: Държавната GPS
+мрежа и постоянните GNSS станции "определени в ETRS89, епоха 2005.0").
+ETRF2014 НЕ е целевата рамка - само ETRF2000 е. Инструкция № РД-02-20-12
+от 03.08.2012, Чл.20 + Приложение 6 изисква координатите (и скоростите) да
+се трансформират в ETRS89 и да се ПРИВЕЖАТ към епоха 2005.0 чрез модел на
+скоростите - пропуснатото привеждане на епохата е изискване за
+съответствие, не просто кандидат за грешка.
 
-ТРИ-ПЪТНА ВАЛИДАЦИОННА СЪГЛАСУВАНОСТ (не единична непроверена догадка):
-тази трансформационна верига беше тествана самостоятелно в рамките на тази
-сесия срещу три НЕЗАВИСИМИ официални източника на параметри (IGN
-трансформационни таблици, EUREF Technical Note 1, и EPSG registry записи),
-и трите се сближиха до рамките на 4.6-5.7cm от реален RTK-измерен
-референтен пункт - консистентен, а не случаен резултат. EPSG:9391
-("BGS2005 / UTM zone 35N", Base CRS EPSG:7798, обхват: България - на изток
-от 24°E) е потвърден независимо чрез spatialreference.org и epsg.io като
-реалния, официален EPSG код за тази национална UTM зона - различен от
-генеричния UTM 35N (EPSG:32635/25835), защото България има собствена
-BGS2005-специфична дефиниция на UTM зоната.
+Веригата сега е:
+  1. ITRF2020 (t_obs) -> ETRF2000 (t_obs): ЕДНА директна Helmert стъпка с
+     ротационни СКОРОСТИ, параметри от EUREF Technical Note 1 (Altamimi &
+     Collilieux, IGN, издание 4 март 2024), Table 4, ред ITRF2020,
+     референтна епоха 2015.0 (вместо по-стария двустъпков
+     ITRF2020->ITRF2014->ETRF2014 път, който Table 4 изрично замества за
+     точно такива случаи - виж TN1 §4.3).
+  2. ETRF2000 (t_obs) -> ETRF2000 (2005.0): привеждане на епохата чрез
+     станционна интраплочна скорост (N/E/U mm/yr), приложена като локално
+     ENU отместване за (2005.0 - t_obs) години - разрешено изрично от TN1
+     §4.3 за "countries in Postglacial Rebond regions or in deforming and
+     seismic zones [needing] to apply a deformation model to propagate
+     coordinates... to the reference epoch of their legal national
+     reference frame" (точно случаят на България тук).
+  3. Резултатът от стъпка 2 Е BGS2005 (= ETRF2000 @ epoch 2005.0) -
+     излъчваната RTCM координата.
 
-ИЗВЕСТНО ОГРАНИЧЕНИЕ (флагирано, не скрито): параметрите по-долу НЕ бяха
-независимо повторно проверени от асистента, изпълняващ тази задача, срещу
-официалните регистри в реално време (без интернет достъп в тази среда) -
-верификацията е базирана на предходно самостоятелно тестване и последващо
-уеб търсене в рамките на текущата сесия, докладвано от потребителя. Ако
-резултатите от тази функция някога отклонят значително (>10cm) от
-независим контролен замер, първата проверка трябва да бъде именно тези
-Helmert параметри срещу текущите официални публикации на IGN/EUREF/EPSG,
-не логиката на този модул.
+Скоростен източник: официалното EPN multi-year combined solution (EPNCB,
+release C2415, https://epncb.oma.be/pub/product/referenceframe/latest/),
+станция SOFI, ITRF2020 скорост конвертирана в ETRF2000 чрез TN1 Table 4
+ротационните СКОРОСТИ - вендорирано с пълен произход в
+addons/geomaxima_geodesy/sofi_velocity_etrf2000.json (виж този файл за
+точните числа, URL, дата на изтегляне, и метода на конверсия). Хоризонтална
+величина 0.52 mm/yr, в рамките на независимо публикуваните български
+GNSS/EPN скорости 0.2-3.8 mm/yr (виж docs/part10_bgs2005_report.md).
+
+Запазени и ВСЕ ТРИ етапа в резултата - ITRF2020@t_obs, ETRF2000@t_obs, и
+BGS2005 (ETRF2000@2005.0) - ясно обозначени (виж itrf2020_to_bgs2005()).
+BGS2005 (елипсоидна височина) си остава единствената излъчвана стойност.
+
+EPSG:9391 ("BGS2005 / UTM zone 35N", Base CRS EPSG:7798, обхват: България -
+на изток от 24°E) е потвърден независимо чрез spatialreference.org и
+epsg.io - различен от генеричния UTM 35N (EPSG:32635/25835). Непроменено
+от Part 10/10b - UTM проекцията е отделна, следваща стъпка и не зависи от
+кой ITRF/ETRF Helmert път се използва преди нея.
+
+ПРОВИЗОРНО СЪСТОЯНИЕ (флагирано в резултата, не скрито - виж
+"coordinate_provisional"): SOFI е единствената станция с директно сверена
+EPN скорост в тази верига - ВСЯКА друга станция в момента използва
+СЪЩАТА SOFI скорост като PROXY, не собствена, локално интерполирана
+скорост. Това е ЗНАЧИМО ограничение, не козметично: Part 10 независимо
+потвърди обхват от 0.2-3.8 mm/yr за българските GNSS/EPN станции - ако
+реалната скорост на дадена станция се различава от SOFI's (0.52 mm/yr) с
+2-3 mm/yr, за ~21.7-годишния epoch gap това натрупва 4-6cm грешка, един
+порядък над 5mm изискването (Чл.7, Инструкция № РД-02-20-25/2011).
+Резултатният dict маркира всяка BGS2005 координата, произведена по тази
+верига, с "coordinate_provisional": True докато този проблем остава
+отворен.
+
+ПЛАНИРАН СЛЕДВАЩ СТЪПКА (не е имплементирано в Part 10b, отделен commit):
+станционно-специфична ETRF2000 скорост - интерполирана от EPN
+densification (EPND) скоростното поле или публикуван български
+интраплочен модел, вендориран с произход, с документиран метод на
+интерполация (най-близка станция / мрежа), SOFI само като fallback при
+липса на по-близък източник.
+
+Part 11a валидира тази верига на SOFI срещу собствената й официална EPN
+ETRF2000@2005.0 координата - приемателен тест за 5mm/10mm изискването на
+Чл.7 (Инструкция № РД-02-20-25/2011); за SOFI самата станция тази
+провизорна proxy скорост е точно нейната собствена, така тестът остава
+валиден независимо от proxy-ограничението по-горе.
 """
 
+import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -190,40 +232,123 @@ def _datetime_to_decimal_year(dt: datetime) -> float:
     return dt.year + elapsed / year_length
 
 
-_PIPELINE = (
+# EUREF Technical Note 1 (Altamimi & Collilieux, IGN, 4 March 2024), Table
+# 4, ITRF2020 row: direct ITRF2020 -> ETRF2000 transformation at reference
+# epoch 2015.0. Replaces the old two-step ITRF2020->ITRF2014->ETRF2014
+# chain - this is the single-step table EUREF publishes specifically to
+# avoid that two-step path for a non-ETRF2014 target (TN1 §4.3).
+_PIPELINE_ITRF2020_TO_ETRF2000 = (
     "+proj=pipeline "
     "+step +proj=helmert "
-    "+x=-0.0014 +y=-0.0009 +z=0.0014 "
-    "+rx=0 +ry=0 +rz=0 +s=-0.00042 "
-    "+dx=0 +dy=-0.0001 +dz=0.0002 "
-    "+drx=0 +dry=0 +drz=0 +ds=0 "
-    "+t_epoch=2015.0 +convention=position_vector "
-    "+step +proj=helmert "
-    "+x=0 +y=0 +z=0 "
-    "+rx=0.001785 +ry=0.011151 +rz=-0.01617 +s=0 "
-    "+dx=0 +dy=0 +dz=0 "
-    "+drx=0.000085 +dry=0.000531 +drz=-0.00077 +ds=0 "
-    "+t_epoch=2010 +convention=position_vector"
+    "+x=0.0538 +y=0.0518 +z=-0.0822 "
+    "+rx=0.002106 +ry=0.012740 +rz=-0.020592 +s=0.00225 "
+    "+dx=0.0001 +dy=0.0 +dz=-0.0017 "
+    "+drx=0.000081 +dry=0.000490 +drz=-0.000792 +ds=0.00011 "
+    "+t_epoch=2015.0 +convention=position_vector"
 )
+
+_BGS2005_EPOCH = 2005.0  # Наредба № 2/2010, Чл.8 - fixed legal epoch of BGS2005
+
+# Part 10b velocity source: official EPN multi-year combined solution
+# (EPNCB), station SOFI, ITRF2020 velocity converted to ETRF2000 via TN1
+# Table 4's rotation/translation RATES - vendored with full provenance
+# (source URL, release, fetch date, conversion method) in
+# addons/geomaxima_geodesy/sofi_velocity_etrf2000.json. See this module's
+# own docstring for why SOFI's velocity is used as a regional proxy.
+_VELOCITY_FILE = (Path(__file__).resolve().parent.parent.parent /
+                  "geomaxima_geodesy" / "sofi_velocity_etrf2000.json")
+
+# PROVISIONAL (see itrf2020_to_bgs2005()'s "coordinate_provisional" note):
+# SOFI's own velocity is used as a PROXY for every station until a
+# station-specific velocity source is implemented (planned follow-up).
+_VELOCITY_SOURCE_LABEL = (
+    "SOFI00BGR EPN C2415 (proxy for this station - see "
+    "addons/geomaxima_geodesy/sofi_velocity_etrf2000.json)"
+)
+
+
+def _load_station_velocity_neu_mm_per_yr() -> dict:
+    """
+    Зарежда станционната ETRF2000 N/E/U скорост (mm/yr) от вендорирания
+    provenance JSON файл - виж _VELOCITY_FILE. Никога не фабрикува
+    измерена стойност по подразбиране (standing rule 9): ако файлът липсва
+    или е невалиден, вдига изключение - itrf2020_to_bgs2005() не продължава
+    без реален скоростен източник.
+    """
+    with open(_VELOCITY_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    return data['velocity_neu_mm_per_yr']
+
+
+def _apply_epoch_reduction(lat: float, lon: float, height: float,
+                           t_obs: float, target_epoch: float,
+                           velocity_neu_mm_per_yr: dict) -> tuple:
+    """
+    Привежда geodetic позиция от t_obs към target_epoch чрез локално ENU
+    отместване = velocity * (target_epoch - t_obs), прилагайки станционната
+    интраплочна скорост (N/E/U mm/yr). Разрешено изрично от EUREF TN1 §4.3
+    (виж модулния docstring) - точно случаят на БГС2005's фиксирана
+    легална епоха 2005.0.
+
+    Използва СЪЩАТА ENU-at-a-point конструкция като arp_to_marker() (Part
+    6a) - точен ECEF round-trip през локален ENU базис в lat/lon, не
+    малоъгълна lat/lon апроксимация.
+
+    :return: (lat, lon, height) след привеждането
+    """
+    dt_years = target_epoch - t_obs
+    north_m = (velocity_neu_mm_per_yr['north'] / 1000.0) * dt_years
+    east_m = (velocity_neu_mm_per_yr['east'] / 1000.0) * dt_years
+    up_m = (velocity_neu_mm_per_yr['up'] / 1000.0) * dt_years
+
+    lat_r = math.radians(lat)
+    lon_r = math.radians(lon)
+    X, Y, Z = _geodetic_to_geocentric.transform(lon, lat, height)
+
+    e = (-math.sin(lon_r), math.cos(lon_r), 0.0)
+    n = (-math.sin(lat_r) * math.cos(lon_r), -math.sin(lat_r) * math.sin(lon_r), math.cos(lat_r))
+    u = (math.cos(lat_r) * math.cos(lon_r), math.cos(lat_r) * math.sin(lon_r), math.sin(lat_r))
+
+    X2 = X + (e[0] * east_m + n[0] * north_m + u[0] * up_m)
+    Y2 = Y + (e[1] * east_m + n[1] * north_m + u[1] * up_m)
+    Z2 = Z + (e[2] * east_m + n[2] * north_m + u[2] * up_m)
+
+    lon2, lat2, h2 = _geocentric_to_geodetic.transform(X2, Y2, Z2)
+    return lat2, lon2, h2
+
 
 _geodetic_to_geocentric = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
 _geocentric_to_geodetic = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
-_helmert = Transformer.from_pipeline(_PIPELINE)
+_helmert_itrf2020_to_etrf2000 = Transformer.from_pipeline(_PIPELINE_ITRF2020_TO_ETRF2000)
 _geodetic_to_utm35 = Transformer.from_crs("EPSG:4979", "EPSG:9391", always_xy=True)
 
 
 def itrf2020_to_bgs2005(point: GeodeticPoint, t_obs: float) -> dict:
     """
+    Part 10b верига: ITRF2020 (t_obs) -> ETRF2000 (t_obs) -> BGS2005
+    (ETRF2000 @ epoch 2005.0). Виж модулния docstring за пълното правно и
+    техническо основание.
+
     :param point: GeodeticPoint(lat, lon, height) в ITRF2020
     :param t_obs: епоха на наблюдение (decimal year, напр. 2026.6) -
         вижте extract_observation_epoch() за извличане от RINEX файл
-    :return: dict с geographic (DMS + decimal) и UTM35N резултати - ТОВА Е
-        КООРДИНАТАТА ЗА RTCM BROADCAST, не суровата ITRF стойност
+    :return: dict с geographic (DMS + decimal) и UTM35N резултати за
+        BGS2005 (ТОВА Е КООРДИНАТАТА ЗА RTCM BROADCAST), плюс изрично
+        обозначените ITRF2020@t_obs и ETRF2000@t_obs междинни етапи, и
+        скоростта/привеждането, използвани за епохата
     """
+    velocity_neu = _load_station_velocity_neu_mm_per_yr()
+
     X, Y, Z = _geodetic_to_geocentric.transform(point.lon, point.lat, point.height)
-    X2, Y2, Z2, _t2 = _helmert.transform(X, Y, Z, t_obs)
-    lon2, lat2, h2 = _geocentric_to_geodetic.transform(X2, Y2, Z2)
+    X1, Y1, Z1, _t1 = _helmert_itrf2020_to_etrf2000.transform(X, Y, Z, t_obs)
+    lon1, lat1, h1 = _geocentric_to_geodetic.transform(X1, Y1, Z1)
+
+    lat2, lon2, h2 = _apply_epoch_reduction(
+        lat1, lon1, h1, t_obs, _BGS2005_EPOCH, velocity_neu)
+    X2, Y2, Z2 = _geodetic_to_geocentric.transform(lon2, lat2, h2)
+
     easting, northing = _geodetic_to_utm35.transform(lon2, lat2)
+    dt_years = _BGS2005_EPOCH - t_obs
 
     return {
         "lat_dd": lat2,
@@ -236,16 +361,65 @@ def itrf2020_to_bgs2005(point: GeodeticPoint, t_obs: float) -> dict:
         "coordinate_system": "BGS2005",
         "regulation_reference": (
             "Инструкция № РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1 - "
-            "изходни данни за относителни ГНСС методи (вкл. RTK) в БГС 2005"
+            "изходни данни за относителни ГНСС методи (вкл. RTK) в БГС 2005; "
+            "Инструкция № РД-02-20-12 от 03.08.2012, Чл.20 + Приложение 6 - "
+            "привеждане към епоха 2005.0"
         ),
         # Geocentric (ECEF) of the OUTPUT point (lat2/lon2/h2 above, i.e.
-        # the CORRECT - ellipsoidal-height - broadcast coordinate), exposed
-        # so survey_controller.py's apply-time invariant check
-        # (verify_rtcm_broadcast_ecef()) can verify, right before writing
-        # anything to RTCM, that what is ACTUALLY about to be broadcast
-        # still matches this point - without recomputing this transform a
-        # second time from scratch.
+        # the CORRECT - ellipsoidal-height, epoch-2005.0 - broadcast
+        # coordinate), exposed so survey_controller.py's apply-time
+        # invariant check (verify_rtcm_broadcast_ecef()) can verify, right
+        # before writing anything to RTCM, that what is ACTUALLY about to
+        # be broadcast still matches this point - without recomputing this
+        # transform a second time from scratch. Now covers the FULL Part
+        # 10b chain end to end (both the frame change and the epoch
+        # reduction), since this is the point after both steps.
         "output_ecef": (X2, Y2, Z2),
+        # Part 10b: all three stages, explicitly labeled, for UI/reports -
+        # never used for the broadcast decision itself (only the keys
+        # above are).
+        "itrf2020_t_obs": {
+            "lat_dd": point.lat, "lon_dd": point.lon, "height_m": point.height,
+            "epoch": t_obs,
+        },
+        "etrf2000_t_obs": {
+            "lat_dd": lat1, "lon_dd": lon1, "height_m": h1,
+            "epoch": t_obs,
+        },
+        "bgs2005_etrf2000_2005_0": {
+            "lat_dd": lat2, "lon_dd": lon2, "height_m": h2,
+            "epoch": _BGS2005_EPOCH,
+        },
+        "epoch_reduction": {
+            "velocity_neu_mm_per_yr": velocity_neu,
+            "velocity_source": _VELOCITY_SOURCE_LABEL,
+            "velocity_is_station_specific": False,
+            "from_epoch": t_obs,
+            "to_epoch": _BGS2005_EPOCH,
+            "dt_years": dt_years,
+        },
+        # PROVISIONAL (Part 10b interim state - not Part 10b's final
+        # state): this BGS2005 result uses SOFI's own EPN velocity as a
+        # PROXY for every station, not a station-specific velocity. Part
+        # 10 independently confirmed Bulgarian GNSS/EPN velocities span
+        # 0.2-3.8 mm/yr - a station whose true velocity differs from
+        # SOFI's (0.52 mm/yr) by 2-3 mm/yr accumulates 4-6cm of error over
+        # the ~21.7yr epoch gap, an order of magnitude above the 5mm
+        # horizontal requirement (Инструкция № РД-02-20-25/2011, Чл.7).
+        # Follow-up (planned, not yet implemented): interpolate a
+        # station-specific ETRF2000 velocity from the EPN densification
+        # (EPND) velocity field or a published Bulgarian intraplate model,
+        # vendored with provenance, falling back to SOFI's velocity only
+        # when no closer source is available - logged/stored per result.
+        "coordinate_provisional": True,
+        "coordinate_provisional_reason": (
+            "Epoch-2005.0 reduction uses SOFI's EPN velocity as a proxy for "
+            "this station, not a station-specific velocity - see "
+            "epoch_reduction.velocity_source. Potential error: up to several "
+            "cm, exceeding the 5mm/10mm accuracy requirement (Инструкция № "
+            "РД-02-20-25/2011, Чл.7) until a station-specific velocity "
+            "source is implemented."
+        ),
     }
 
 
@@ -255,12 +429,14 @@ def itrf2020_to_bgs2005(point: GeodeticPoint, t_obs: float) -> dict:
 # These two are meant to be the SAME physical point run through the SAME
 # geodetic<->geocentric transform twice - this is a write-precision
 # round-trip check, NOT a comparison against an independent measurement or
-# a different transform/grid. It does NOT involve the ITRF2020->BGS2005
-# Helmert shift (that shift already happened once, identically, on both
-# sides - see itrf2020_to_bgs2005()) and does NOT involve the ~5cm
-# residual against АГКК's official BGSTrans grid documented at the top of
-# this module (that residual is between OUR transform and a DIFFERENT,
-# independent grid-based method - it has no bearing on this round-trip).
+# a different transform/grid. It does NOT involve the Part 10b chain's own
+# transforms (ITRF2020->ETRF2000 Helmert step, nor the ETRF2000->BGS2005
+# epoch-2005.0 reduction - both already happened once, identically, on
+# both sides - see itrf2020_to_bgs2005()) and does NOT involve any
+# residual against АГКК's official BGSTrans grid or against an
+# independent EPN/SOFI acceptance measurement (Part 11a) - those are
+# comparisons between OUR transform and a DIFFERENT, independent method -
+# they have no bearing on this round-trip.
 # The only legitimate source of difference here is the precision
 # update_position() actually writes: settings.conf's position= line uses
 # "{lat:.8f} {lon:.8f} {height:.3f}" (rtkbase_config.py) - 8 decimal

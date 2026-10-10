@@ -1425,8 +1425,10 @@ class SurveyController:
                 geoid_sep = height - h_ortho
                 logger.info(f"Geoid lookup result: h_ortho={h_ortho:.3f}m (correction {geoid_sep:+.3f}m → Height MSL: {h_ortho:.3f}m)")
 
-            # Step 7: ITRF2020 -> BGS2005 transformation. Per Инструкция №
-            # РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1: relative GNSS
+            # Step 7: ITRF2020 -> BGS2005 transformation (Part 10b chain:
+            # ITRF2020@t_obs -> ETRF2000@t_obs -> BGS2005 = ETRF2000@2005.0,
+            # see bgs2005_transformer.py's module docstring). Per Инструкция
+            # № РД-02-20-25 от 20.09.2011 г., Чл.22, ал.1: relative GNSS
             # methods (RTK, classified as such in Чл.11) require base
             # station reference coordinates in BGS2005, not raw ITRF/WGS84.
             # The transformed position below - NOT the raw lat/lon/height
@@ -1451,6 +1453,13 @@ class SurveyController:
             logger.info(f"Position estimate (BGS2005, t_obs={t_obs:.4f}): "
                         f"{bgs2005['lat_dd']:.8f}°, {bgs2005['lon_dd']:.8f}°, {bgs2005['height_m']:.3f}m")
             logger.info(f"BGS2005 broadcast coordinate per {bgs2005['regulation_reference']}")
+            epoch_red = bgs2005['epoch_reduction']
+            logger.info(f"Part 10b epoch reduction: {epoch_red['velocity_source']}, "
+                        f"velocity N/E/U={epoch_red['velocity_neu_mm_per_yr']} mm/yr, "
+                        f"{epoch_red['from_epoch']:.4f} -> {epoch_red['to_epoch']:.4f} "
+                        f"(Δt={epoch_red['dt_years']:.2f}yr)")
+            if bgs2005.get('coordinate_provisional'):
+                logger.warning(f"PROVISIONAL BGS2005 coordinate: {bgs2005['coordinate_provisional_reason']}")
             logger.debug(f"BGS2005 transform: input={{'lat': {lat}, 'lon': {lon}, 'height': {height}, 't_obs': {t_obs}}}, "
                          f"output={bgs2005}")
 
@@ -1556,6 +1565,26 @@ class SurveyController:
                 'itrf2020_lat': float(lat),
                 'itrf2020_lon': float(lon),
                 'itrf2020_height': float(height),
+                # Part 10b: all three chain stages, explicitly labeled,
+                # for display/reports only - the broadcast decision above
+                # (lat/lon/height) is unaffected by these. See
+                # bgs2005_transformer.py's itrf2020_to_bgs2005() docstring.
+                'etrf2000_t_obs': {
+                    'lat': float(bgs2005['etrf2000_t_obs']['lat_dd']),
+                    'lon': float(bgs2005['etrf2000_t_obs']['lon_dd']),
+                    'height': float(bgs2005['etrf2000_t_obs']['height_m']),
+                    'epoch': float(bgs2005['etrf2000_t_obs']['epoch']),
+                },
+                'epoch_reduction': {
+                    'velocity_neu_mm_per_yr': bgs2005['epoch_reduction']['velocity_neu_mm_per_yr'],
+                    'velocity_source': bgs2005['epoch_reduction']['velocity_source'],
+                    'velocity_is_station_specific': bgs2005['epoch_reduction']['velocity_is_station_specific'],
+                    'from_epoch': float(bgs2005['epoch_reduction']['from_epoch']),
+                    'to_epoch': float(bgs2005['epoch_reduction']['to_epoch']),
+                    'dt_years': float(bgs2005['epoch_reduction']['dt_years']),
+                },
+                'coordinate_provisional': bgs2005.get('coordinate_provisional', False),
+                'coordinate_provisional_reason': bgs2005.get('coordinate_provisional_reason'),
                 # Which PPP backend produced the broadcast lat/lon/height
                 # above - see _perform_update()/_run_ppp_ar_interim()/
                 # _finalize_survey() callers.

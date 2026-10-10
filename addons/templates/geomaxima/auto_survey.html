@@ -225,6 +225,52 @@
                     <small class="text-muted">The marker position is for reports/display only - the RTCM broadcast above is always the ARP itself.</small>
                     {% endif %}
 
+                    {# GeoMaxima Part 10b: BGS2005 transform chain stages -
+                       ITRF2020@t_obs (raw PPP result, itrf2020_lat/lon/
+                       height above) -> ETRF2000@t_obs (frame change only,
+                       etrf2000_t_obs below) -> BGS2005 = ETRF2000@2005.0
+                       (epoch reduction, lat/lon/height above - the
+                       broadcast value). Shown so an operator can see the
+                       epoch-reduction's own contribution, not just the
+                       final result - see bgs2005_transformer.py's module
+                       docstring for the full legal/technical basis. #}
+                    {% if status.current_position.etrf2000_t_obs is defined %}
+                    <hr>
+                    <p class="mb-1"><strong>BGS2005 transform chain (Part 10b):</strong></p>
+                    {% if status.current_position.coordinate_provisional %}
+                    <div class="alert alert-warning mb-2">
+                        <strong>Provisional coordinate:</strong> {{ status.current_position.coordinate_provisional_reason }}
+                    </div>
+                    {% endif %}
+                    <table class="table table-sm mb-0">
+                        <tr>
+                            <th style="width: 150px;">ITRF2020 @ t_obs:</th>
+                            <td>{{ "%.8f"|format(status.current_position.itrf2020_lat) }}°, {{ "%.8f"|format(status.current_position.itrf2020_lon) }}°, {{ "%.3f"|format(status.current_position.itrf2020_height) }}m</td>
+                        </tr>
+                        <tr>
+                            <th>ETRF2000 @ t_obs:</th>
+                            <td>{{ "%.8f"|format(status.current_position.etrf2000_t_obs.lat) }}°, {{ "%.8f"|format(status.current_position.etrf2000_t_obs.lon) }}°, {{ "%.3f"|format(status.current_position.etrf2000_t_obs.height) }}m</td>
+                        </tr>
+                        <tr>
+                            <th>BGS2005 (ETRF2000 @ 2005.0):</th>
+                            <td>{{ "%.8f"|format(status.current_position.lat) }}°, {{ "%.8f"|format(status.current_position.lon) }}°, {{ "%.3f"|format(status.current_position.height) }}m <small class="text-muted">(broadcast)</small></td>
+                        </tr>
+                        {% if status.current_position.epoch_reduction %}
+                        <tr>
+                            <th>Epoch reduction:</th>
+                            <td>
+                                {{ "%.4f"|format(status.current_position.epoch_reduction.from_epoch) }} &rarr; {{ "%.1f"|format(status.current_position.epoch_reduction.to_epoch) }}
+                                (&Delta;t={{ "%.2f"|format(status.current_position.epoch_reduction.dt_years) }}yr),
+                                velocity N={{ status.current_position.epoch_reduction.velocity_neu_mm_per_yr.north }}
+                                E={{ status.current_position.epoch_reduction.velocity_neu_mm_per_yr.east }}
+                                U={{ status.current_position.epoch_reduction.velocity_neu_mm_per_yr.up }} mm/yr
+                                <br><small class="text-muted">{{ status.current_position.epoch_reduction.velocity_source }}</small>
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </table>
+                    {% endif %}
+
                     {% if status.antenna_calibrated is defined and not status.antenna_calibrated %}
                     <hr>
                     <div class="alert alert-warning mb-0">

@@ -1,0 +1,27 @@
+{
+  "_provenance": {
+    "purpose": "Part 10b: intraplate velocity used to reduce ETRF2000 coordinates to BGS2005's legal reference epoch (2005.0), per Инструкция № РД-02-20-12/2012 чл.20 + Приложение 6.",
+    "source": "EUREF Permanent Network (EPN) multi-year combined solution, official reference frame product",
+    "source_url": "https://epncb.oma.be/pub/product/referenceframe/latest/EUR0OPSSNX_1996001_00U_SOL.VEL",
+    "source_crd_url": "https://epncb.oma.be/pub/product/referenceframe/latest/EUR0OPSSNX_1996001_00U_SOL.CRD",
+    "release": "C2415 (cumulative solution of GPS weeks 0834-2415)",
+    "release_date": "2026-09-21",
+    "fetched_date": "2026-10-05",
+    "station": "SOFI",
+    "domes": "11101M002",
+    "native_frame": "ITRF2020",
+    "native_velocity_xyz_m_per_yr": {"vx": -0.01742, "vy": 0.01844, "vz": 0.00841},
+    "native_position_xyz_m_epoch_2020_0": {"x": 4319371.83995, "y": 1868688.05885, "z": 4292064.06761},
+    "conversion_method": "ITRF2020 cartesian velocity converted to ETRF2000 (Eurasian-plate-fixed) velocity using EUREF Technical Note 1 (Altamimi & Collilieux, IGN, 4 March 2024 release) Table 4 ITRF2020-row rotation RATES and translation RATES (eq. 2): V_ETRF2000 = V_ITRF2020 - dT - dD*P + Ω×P, where Ω=(drx,dry,drz) are the Table 4 rotation rates converted from mas/yr to rad/yr, dT is the Table 4 translation rate (mm/yr), dD is the Table 4 scale rate (1e-9/yr), and P is SOFI's own ITRF2020 position vector.",
+    "conversion_params_source": "EUREF Technical Note 1, Table 4 (ITRF2020 row): dT1=0.1 dT2=0.0 dT3=-1.7 mm/yr, dD=0.11e-9/yr, dR1=0.081 dR2=0.490 dR3=-0.792 mas/yr",
+    "checksum_note": "No single-file checksum published by EPNCB for .VEL/.CRD (plain-text ASCII products, regenerated each GPS week under the same filename) - provenance is the dated URL + release name (C2415) above, not a content hash.",
+    "cross_check": "Horizontal magnitude (0.52 mm/yr) falls within the independently-published Bulgarian GNSS/EPN intraplate velocity range of 0.2-3.8 mm/yr (BULREF 1993/2003 campaigns; Vassileva 2013 and related Balkan geodynamics studies) used in docs/part10_bgs2005_report.md - consistent, though smaller than that report's unconfirmed ~2mm/yr SOFI-specific figure, which this file now supersedes as SOFI's own, directly-sourced, current EPN velocity."
+  },
+  "station": "SOFI",
+  "frame": "ETRF2000",
+  "velocity_neu_mm_per_yr": {
+    "north": 0.4772,
+    "east": 0.2144,
+    "up": -0.3590
+  }
+}
