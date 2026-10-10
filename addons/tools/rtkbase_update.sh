@@ -14,6 +14,16 @@ data_dir=$3
 old_version=$4
 standard_user=$5
 checking=$6
+# GeoMaxima - 2026-10-07 review fix: run_id, matched against the
+# pre-shutdown snapshot's own run_id (see
+# addons/ota_service_snapshot.py) so a STALE snapshot from an unrelated
+# or previous run can never be mistaken for this run's pre-update state.
+# Optional - empty during the --checking dry-run call (which never
+# reaches the snapshot-reading code below) and for any older/manual
+# caller that doesn't pass it, in which case the snapshot is never
+# trusted and this script always falls back to its own in-script
+# snapshot (logged as such).
+geomaxima_run_id=${7:-}
 
 #argument checking
 [[ -d "${source_directory}" ]] || { echo 'ERROR! source_directory is not a directory'; exit 1; }
@@ -32,6 +42,169 @@ str2str_rtcm=$(systemctl is-active str2str_rtcm_svr)
 str2str_serial=$(systemctl is-active str2str_rtcm_serial)
 str2str_file=$(systemctl is-active str2str_file)
 rtkrcv_raw2nmea=$(systemctl is-active rtkbase_raw2nmea)
+
+# GeoMaxima - 2026-10-05 archive incident fix: a GENERIC, exhaustive
+# before/after service-state snapshot, covering every rtkbase/str2str/
+# geomaxima_* service (not just the 8 hand-picked above, which the
+# incident investigation found had str2str_file's own RESTORE step
+# commented out further down - a hand-maintained list is exactly the
+# kind of thing that silently drifts). Records BOTH is-active AND
+# is-enabled for every matching unit (an OTA must preserve "disabled but
+# was running" and "enabled but was stopped" just as faithfully as the
+# common "was running" case), and logs the full before/after pair to
+# audit.log so a station's service state across an OTA is always
+# reconstructable afterward - the gap that made the 2026-10-05
+# incident's own File-service outage take 4+ days to even notice.
+GEOMAXIMA_AUDIT_LOG="/var/lib/rtkbase/audit.log"
+_geomaxima_audit_log() {
+  local event="$1" details_json="$2"
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%6N")
+  mkdir -p "$(dirname "${GEOMAXIMA_AUDIT_LOG}")" 2>/dev/null
+  printf '{"timestamp": "%s", "category": "ota_service_state", "event": "%s", "details": %s}\n' \
+    "${ts}" "${event}" "${details_json}" >> "${GEOMAXIMA_AUDIT_LOG}" 2>/dev/null
+}
+
+# GeoMaxima - 2026-10-07 review fix: covers .timer units too (e.g.
+# rtkbase_archive.timer), not just .service - an OTA's own unit-file
+# redeploy (copy_unit.sh) can affect either.
+_geomaxima_service_units() {
+  systemctl list-unit-files --no-legend 2>/dev/null \
+    | awk '{print $1}' \
+    | grep -E '^(str2str_|rtkbase_|geomaxima_)[^@]*\.(service|timer)$' \
+    | sort -u
+}
+
+GEOMAXIMA_SERVICE_STATE_FILE="/var/lib/rtkbase/.ota_service_state_before_update"
+mkdir -p "$(dirname "${GEOMAXIMA_SERVICE_STATE_FILE}")" 2>/dev/null
+
+# GeoMaxima - 2026-10-05/06 incident investigation: prefer the snapshot
+# web_app/server.py's update_rtkbase() or
+# addons/features/ota_update/update_controller.py's perform_update()
+# already wrote via addons/ota_service_snapshot.py - taken BEFORE this
+# script even started (and before any shutdown-adjacent call), so it
+# reflects truly pre-update state. Fall back to taking our own snapshot
+# here (and logging that it may already be post-shutdown, since this
+# script itself starts after the Flask app's own pre-launch steps have
+# run) only if that file is missing/unreadable (e.g. a manual/CLI-run
+# update with no Flask process involved at all).
+GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT="/var/lib/rtkbase/ota/service_state_before.json"
+GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS=1800
+_geomaxima_used_pre_shutdown_snapshot=0
+if [[ -r "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" ]] && [[ -n "${geomaxima_run_id}" ]] && command -v python3 >/dev/null 2>&1; then
+  # GeoMaxima - 2026-10-07 review fix: the snapshot's raw state strings
+  # (active/inactive/failed/activating...; enabled/disabled/static/
+  # masked/indirect...) are passed through VERBATIM - no boolean
+  # collapsing. Also requires run_id to match AND the snapshot to be
+  # younger than GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS, so a stale or
+  # unrelated-run snapshot is never mistaken for this run's own
+  # pre-update state. The snapshot file is deleted after a successful,
+  # matching read (one-shot).
+  if python3 - "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" "${GEOMAXIMA_SERVICE_STATE_FILE}" "${geomaxima_run_id}" "${GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS}" << 'PYEOF'
+import json, sys
+from datetime import datetime, timezone
+snapshot_path, out_path, expected_run_id, max_age_seconds = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+try:
+    with open(snapshot_path) as f:
+        data = json.load(f)
+    if data.get("run_id") != expected_run_id:
+        sys.exit(1)
+    written_at = datetime.fromisoformat(data["timestamp"])
+    age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
+    if age_seconds > max_age_seconds or age_seconds < 0:
+        sys.exit(1)
+    with open(out_path, "w") as f:
+        for unit, state in data.get("units", {}).items():
+            active = state.get("active", "unknown")
+            enabled = state.get("enabled", "unknown")
+            f.write(f"{unit} {active} {enabled}\n")
+except (OSError, ValueError, KeyError):
+    sys.exit(1)
+PYEOF
+  then
+    _geomaxima_used_pre_shutdown_snapshot=1
+    rm -f "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" 2>/dev/null
+    echo "rtkbase_update.sh: using the pre-shutdown service-state snapshot from ${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT} (run_id matched, fresh)"
+  else
+    echo "rtkbase_update.sh: pre-shutdown snapshot exists but did not match this run (wrong run_id or too old) - ignoring it" >&2
+  fi
+fi
+
+if [[ "${_geomaxima_used_pre_shutdown_snapshot}" -eq 0 ]]; then
+  echo "rtkbase_update.sh: no usable pre-shutdown snapshot found at ${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT} - taking a snapshot now, from INSIDE this script. NOTE: this may already be AFTER whatever launched this script (e.g. the web app) performed its own shutdown/stop steps, so this snapshot's 'before' state is not guaranteed to be the true pre-update state." >&2
+  : > "${GEOMAXIMA_SERVICE_STATE_FILE}"
+  while IFS= read -r unit; do
+    [[ -z "${unit}" ]] && continue
+    active=$(systemctl is-active "${unit}" 2>/dev/null)
+    enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
+    echo "${unit} ${active} ${enabled}" >> "${GEOMAXIMA_SERVICE_STATE_FILE}"
+  done < <(_geomaxima_service_units)
+fi
+
+_geomaxima_before_json="["
+_geomaxima_first=1
+while IFS=' ' read -r unit active enabled; do
+  [[ -z "${unit}" ]] && continue
+  if [[ "${_geomaxima_first}" -eq 1 ]]; then _geomaxima_first=0; else _geomaxima_before_json+=","; fi
+  _geomaxima_before_json+="{\"unit\": \"${unit}\", \"active\": \"${active}\", \"enabled\": \"${enabled}\"}"
+done < "${GEOMAXIMA_SERVICE_STATE_FILE}"
+_geomaxima_before_json+="]"
+_geomaxima_before_json_source="in_script_fallback"
+[[ "${_geomaxima_used_pre_shutdown_snapshot}" -eq 1 ]] && _geomaxima_before_json_source="pre_shutdown_snapshot"
+_geomaxima_audit_log "before_update" "{\"source\": \"${_geomaxima_before_json_source}\", \"units\": ${_geomaxima_before_json}}"
+
+# Restore every captured unit to EXACTLY its pre-update active AND
+# enabled state. Called at the very end of this script (see the bottom)
+# once the update itself has finished, so every unit file is already in
+# its final, post-update form first.
+#
+# GeoMaxima - 2026-10-07 review fix: now ALSO restores enabled<->
+# disabled (not just active<->inactive) - directly relevant to the
+# File-service root cause: survey_controller.py's one-owner handoff
+# calls ServiceController.stop() to temporarily stop str2str_file
+# between surveys, and that method's upstream semantics are
+# DisableUnitFiles + Stop (disable AND stop, not stop alone - see
+# ServiceController.py:69-74), so every such handoff was PERMANENTLY
+# disabling the service, not just pausing it. This restore now corrects
+# that, AND is scoped tightly: it ONLY ever flips the two pairs
+# active<->inactive and enabled<->disabled - any other state
+# (activating/deactivating/failed for active; static/masked/indirect/
+# alias/generated/transient for enabled) is left exactly as found,
+# never forced into either pair, and masked units are never unmasked.
+_geomaxima_restore_service_states() {
+  [[ -f "${GEOMAXIMA_SERVICE_STATE_FILE}" ]] || return 0
+  local after_json="["
+  local first=1
+  while read -r unit active enabled; do
+    [[ -z "${unit}" ]] && continue
+    local now_active now_enabled
+    now_active=$(systemctl is-active "${unit}" 2>/dev/null)
+    now_enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
+
+    if [[ "${active}" == "active" && "${now_active}" != "active" && "${now_active}" != "activating" ]]; then
+      echo "rtkbase_update.sh: restoring ${unit} to active (was active before this update, OTA left it ${now_active})"
+      systemctl start "${unit}" 2>/dev/null
+    elif [[ "${active}" == "inactive" && "${now_active}" == "active" ]]; then
+      echo "rtkbase_update.sh: ${unit} is active but was NOT active before this update - leaving it as-is (an OTA must preserve state, not force a service off that something else started)"
+    fi
+
+    if [[ "${enabled}" == "enabled" && "${now_enabled}" == "disabled" ]]; then
+      echo "rtkbase_update.sh: restoring ${unit} to enabled (was enabled before this update, OTA/a stop-helper's DisableUnitFiles call left it disabled)"
+      systemctl enable "${unit}" 2>/dev/null
+    elif [[ "${enabled}" == "disabled" && "${now_enabled}" == "enabled" ]]; then
+      echo "rtkbase_update.sh: ${unit} is enabled but was NOT enabled before this update - leaving it as-is"
+    fi
+    # static/masked/indirect/alias/generated/transient (either side):
+    # intentionally untouched - no branch above matches them, by design.
+
+    now_active=$(systemctl is-active "${unit}" 2>/dev/null)
+    now_enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
+    if [[ "${first}" -eq 1 ]]; then first=0; else after_json+=","; fi
+    after_json+="{\"unit\": \"${unit}\", \"active_before\": \"${active}\", \"enabled_before\": \"${enabled}\", \"active_after\": \"${now_active}\", \"enabled_after\": \"${now_enabled}\"}"
+  done < "${GEOMAXIMA_SERVICE_STATE_FILE}"
+  after_json+="]"
+  _geomaxima_audit_log "after_update" "${after_json}"
+}
 
 check_before_update() {
   TOO_OLD='<b>Your Operating System is too old!</b>\n
@@ -324,22 +497,65 @@ sed -i '/^\[general\]/a updated=true' ${destination_directory}/settings.conf
 #change rtkbase's content owner
 chown -R ${standard_user}:${standard_user} ${destination_directory}
 
+#GeoMaxima - 2026-10-05 archive incident fix: ensure persistent journald
+#retention on EVERY OTA, regardless of which version a station is
+#updating from - unlike install_unit_files() in tools/install.sh (only
+#called from version-gated upd_X.Y.Z() functions, so a station already
+#past those version bumps would never receive it again), this runs
+#unconditionally in the update tail every single time. Idempotent -
+#install.sh's install_journald_retention() just rewrites the same
+#drop-in and restarts journald, safe to repeat.
+"${destination_directory}"/tools/install.sh --journald-retention
+
+#GeoMaxima - 2026-10-05/06 incident investigation: fix audit.log's
+#ownership on EVERY OTA, same unconditional pattern as journald
+#retention above - a station already past whichever version-gated
+#upd_X.Y.Z() function would otherwise ship this fix must still receive
+#it, since archive_and_clean.sh's audit-log write depends on it on every
+#single run, not just at upgrade time.
+"${destination_directory}"/tools/install.sh --audit-log-access
+
   #restart str2str if it was active before upgrading rtklib
   # restart not nedeed if RTKlib was not upgraded
-  #[ $str2str_active = 'active' ] && systemctl restart str2str_tcp 
-  #[ $str2str_file = 'active' ] && systemctl restart str2str_file 
+  #[ $str2str_active = 'active' ] && systemctl restart str2str_tcp
   #[ $rtkrcv_raw2nmea = 'active' ] && systemctl restart rtkbase_raw2nmea
-  
+  # str2str_file's own restart line used to be commented out here too -
+  # GeoMaxima - 2026-10-05 archive incident fix: a station's File
+  # service was left stopped for 4+ days after an OTA specifically
+  # because of that. REMOVED here (no longer a hand-maintained,
+  # easy-to-silently-disable single line) - superseded by the generic
+  # _geomaxima_restore_service_states() call below, which restores EVERY
+  # str2str_*/rtkbase_*/geomaxima_* service's pre-update active/inactive
+  # state exactly (not just the hand-picked list below), and logs the
+  # full before/after snapshot to audit.log.
+
   # restart previously running services
   # restart needed with all update to propagate the release number in the rtcm stream
   [ $str2str_ntrip_A_active = 'active' ] && systemctl restart str2str_ntrip_A
-  [ $str2str_ntrip_B_active = 'active' ] && systemctl restart str2str_ntrip_B  
+  [ $str2str_ntrip_B_active = 'active' ] && systemctl restart str2str_ntrip_B
   [ $str2str_local_caster = 'active' ] && systemctl restart str2str_local_ntrip_caster
   [ $str2str_rtcm = 'active' ] && systemctl restart str2str_rtcm_svr
   [ $str2str_serial = 'active' ] && systemctl restart str2str_rtcm_serial
-  
+
 #if a reboot is needed
 #systemctl reboot
+
+# GeoMaxima - 2026-10-05/06 incident investigation: restore every
+# str2str_*/rtkbase_*/geomaxima_* service to its EXACT pre-update active
+# state BEFORE restarting rtkbase_web.service, not after. The web
+# restart is now the ABSOLUTE LAST command this script runs - this
+# script is launched via `systemd-run --collect` (see
+# web_app/server.py's update_rtkbase() and
+# addons/features/ota_update/update_controller.py's perform_update()),
+# outside rtkbase_web.service's own systemd cgroup, so that restart can
+# no longer kill this script or anything after it - but the restore
+# still belongs before the restart on its own merits, independent of
+# that protection: a service "restored" after the very system it's
+# meant to interoperate with (the just-restarted web app) has already
+# come back up is restoring into a moving target, not a settled state.
+_geomaxima_restore_service_states
+rm -f "${GEOMAXIMA_SERVICE_STATE_FILE}" 2>/dev/null
+
 echo 'RTKBase update ending...'
 echo 'Restart web server'
 systemctl restart rtkbase_web.service

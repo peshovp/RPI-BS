@@ -8,6 +8,11 @@
 {% block content %}
 
 <div class="container">
+<!-- GeoMaxima - 2026-10-10: visible warning when raw GNSS data is NOT
+     being recorded (File service off/inactive) and no survey currently
+     owns it on purpose - see settings.html's identical banner for the
+     full comment; populated by the same file_logging_status.js. -->
+<div id="file_logging_warning" class="alert alert-warning" style="display:none;"></div>
 <div id="bar-chart"></div>
 
 <div class="row">
@@ -93,4 +98,5 @@ var baseCoordinates = {{ base_coordinates|tojson }};
 var maptiler_key = '{{ tms_key.maptiler_key }}';
 </script>
 <script type="text/javascript" src="{{ url_for('static', filename='status.js', v=g.version) }}" charset="utf-8"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='file_logging_status.js', v=g.version) }}" charset="utf-8"></script>
 {% endblock %}

@@ -414,11 +414,63 @@ def update_rtkbase(update_file=False):
     else : #if ok, launch update script
         print("Launch update")
         socketio.emit("updating_rtkbase", namespace="/test")
+        # GeoMaxima - 2026-10-05/06 incident investigation: snapshot
+        # service state BEFORE rtk.shutdownBase() (confirmed that call
+        # itself never touches any systemd service - only the in-process
+        # rtkrcv client and Python threads - but taking the snapshot
+        # here, before ANY OTA-adjacent step runs, means it reflects
+        # truly pre-update state regardless of what a future change to
+        # shutdownBase() or anything else between here and the update
+        # script's own later snapshot might do). unit_name doubles as
+        # the snapshot's run_id (see addons/ota_service_snapshot.py) -
+        # computed here, before the snapshot write, so both the
+        # snapshot and the systemd-run unit launched below share the
+        # exact same identifier, letting rtkbase_update.sh confirm the
+        # snapshot it reads back is THIS run's, not a stale leftover.
+        # Wrapped in try/except - a snapshot failure (missing addons
+        # import, systemctl unavailable, etc.) must never abort the OTA.
+        unit_name = f"geomaxima-ota-{int(time.time())}"
+        try:
+            from addons.ota_service_snapshot import write_snapshot
+            write_snapshot(run_id=unit_name)
+        except Exception as e:
+            print(f"WARNING: pre-OTA service snapshot failed (update proceeds anyway): {e}")
         rtk.shutdownBase()
         time.sleep(1)
         #update_service=ServiceController('rtkbase_update.service')
         #update_service.start()
-        subprocess.Popen([script_path, source_path, rtkbase_path, data_dir, current_release, standard_user])
+        # Launched OUTSIDE rtkbase_web.service's own systemd cgroup via a
+        # throwaway transient unit (systemd-run --collect), for the same
+        # reason addons/features/ota_update/update_controller.py's
+        # perform_update() now does - a plain subprocess.Popen() child is
+        # still a cgroup member of THIS service, so rtkbase_update.sh's
+        # own final "systemctl restart rtkbase_web" step would otherwise
+        # kill this script before _geomaxima_restore_service_states() (or
+        # anything after that line) ever runs.
+        #
+        # GeoMaxima - 2026-10-06/07 review fix: --no-block is required
+        # even here - without it, `systemd-run` itself (the process this
+        # Popen() call launches) would sit waiting for the transient
+        # unit to finish before IT exits, which for Type=oneshot means
+        # waiting for the entire update to complete - an unnecessary
+        # lingering process for no benefit, since this code path already
+        # doesn't wait on it (Popen never blocks the Flask request
+        # either way). subprocess.run() + a logged return-code check
+        # replaces the old fire-and-forget Popen() with no error
+        # visibility at all if systemd-run itself fails to launch
+        # (e.g. systemd-run missing, invalid argument, permission
+        # issue) - previously silent. Reuses the SAME unit_name computed
+        # above (also the snapshot's run_id) - not recomputed here.
+        launch_result = subprocess.run([
+            'systemd-run', f'--unit={unit_name}', '--collect', '--no-block',
+            f'--working-directory={rtkbase_path}',
+            f'--setenv=PATH={os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}',
+            '--description=GeoMaxima OTA update (rtkbase_update.sh)',
+            script_path, source_path, rtkbase_path, data_dir, current_release, standard_user, unit_name,
+        ], capture_output=True, text=True)
+        if launch_result.returncode != 0:
+            print(f"ERROR: systemd-run failed to launch rtkbase_update.sh: {launch_result.stderr.strip()}")
+            socketio.emit("updating_rtkbase_stopped", json.dumps({"error": [launch_result.stderr.strip()]}), namespace="/test")
         #os.execl('/var/tmp/rtkbase_update.sh', "unused arg0", source_path, rtkbase_path, data_dir, current_release, standard_user)
 
 def download_update(update_path):
@@ -1094,7 +1146,15 @@ def configure_receiver(brand="", model=""):
     time.sleep(4)
     main_service = services_list[0]
     if main_service.get("active") is True:
-        main_service["unit"].stop()
+        # GeoMaxima - 2026-10-07 review fix: TEMPORARY stop (restarted a
+        # few lines below, unconditionally if restart_main is True) -
+        # stop_temporarily() does not disable the unit, unlike stop()
+        # (see ServiceController.py's own docstrings for why this
+        # distinction exists and matters: stop() disabling is correct
+        # for the UI's own intentional on/off toggle, but was always
+        # wrong here, where this method's own job is to put the service
+        # right back once receiver configuration finishes).
+        main_service["unit"].stop_temporarily()
         restart_main = True
     else:
         restart_main = False
@@ -1294,6 +1354,21 @@ def restartServices(restart_services_list=None):
     time.sleep(1)
     getServicesStatus()
 
+@socketio.on("get file logging status", namespace="/test")
+def get_file_logging_status_request():
+    """
+        GeoMaxima - 2026-10-10: lightweight request for JUST the File
+        service's active/enabled/ownership state, for pages (status.html)
+        that don't have the full service-toggle UI "get services status"
+        assumes exists (servicesStatus[0]/#main-switch etc.) - calling
+        the heavier event there would risk a client-side error on
+        missing DOM elements. Reuses getServicesStatus()'s own
+        file_logging_status emit (unconditional there once a client is
+        connected) rather than duplicating the active/enabled/ownership
+        lookup a second time.
+    """
+    getServicesStatus(emit_pingback=False)
+
 @socketio.on("get services status", namespace="/test")
 def getServicesStatus(emit_pingback=True):
     """
@@ -1312,6 +1387,12 @@ def getServicesStatus(emit_pingback=True):
             service["active"] = service["unit"].isActive()
             service["status"] = service["unit"].status()
             service["result"] = service["unit"].get_result()
+            # GeoMaxima - 2026-10-10: enabled state, same signal
+            # gnss_monitor.py/survey_controller.py already read via
+            # `systemctl is-enabled` - exposed on the status payload so
+            # status.html/settings.html can show a File-logging warning
+            # without a second detection mechanism.
+            service["enabled"] = service["unit"].isEnabled()
             if service.get("result") == "success" and service.get("status") == "running":
                 service["state_ok"] = True
             elif service.get("result") == "exit-code":
@@ -1330,6 +1411,30 @@ def getServicesStatus(emit_pingback=True):
     services_status = repaint_services_button(services_status)
     if emit_pingback:
         socketio.emit("services status", json.dumps(services_status), namespace="/test")
+
+    # GeoMaxima - 2026-10-10: separate event, not merged into the
+    # "services status" payload above (client JS indexes that array
+    # POSITIONALLY - servicesStatus[0], [1], etc. - changing its shape
+    # to add a sibling key would risk breaking every existing index
+    # lookup). file_logging_status.js listens for this to show/hide the
+    # status/settings page warning. Emitted UNCONDITIONALLY (not gated
+    # on emit_pingback) so manager()'s own background poll - which
+    # calls this with emit_pingback=False specifically to avoid
+    # spamming "services status" when no client is connected - still
+    # keeps this warning live-refreshed the same way the rest of the
+    # status/settings pages already are.
+    if connected_clients > 0:
+        file_service = next((s for s in services_status if s["name"] == "file"), None)
+        if file_service is not None:
+            try:
+                owned_by_survey = get_survey_controller().state.get_file_service_owned() if SurveyController is not None else False
+            except Exception:
+                owned_by_survey = False
+            socketio.emit("file_logging_status", json.dumps({
+                "active": file_service["active"],
+                "enabled": file_service.get("enabled"),
+                "owned_by_survey": owned_by_survey,
+            }), namespace="/test")
     return services_status
 
 @socketio.on("services switch", namespace="/test")

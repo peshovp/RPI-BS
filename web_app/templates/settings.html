@@ -537,6 +537,15 @@
     </a>
   </div>
   </div>
+  <!-- GeoMaxima - 2026-10-10: visible warning when raw GNSS data is
+       NOT being recorded (File service off/inactive) and no survey
+       currently owns it on purpose - populated by
+       file_logging_status.js from the "file_logging_status" socketio
+       event (web_app/server.py's getServicesStatus()), the SAME
+       active/enabled/ownership signal gnss_monitor.py's Watchdog check
+       already reads, not a second detection mechanism. Hidden by
+       default; shown/hidden and its text set entirely by that script. -->
+  <div id="file_logging_warning" class="alert alert-warning" style="display:none;"></div>
     <form id="{{ file_settings.pop(0).source_section }}" class="collapse was-validated">
       <div class="form-group row">
         <label for="datadir" class="col-sm-3 col-form-label">Data directory: </label>
@@ -1404,4 +1413,5 @@
 <script type="text/javascript" src="{{ url_for('static', filename='lib/bootstrap4-toggle-3.7.1-beta.js') }}" charset="utf-8"></script>
 <script type="text/javascript" src="{{ url_for('static', filename='lib/snarkdown.js') }}" charset="utf-8"></script>
 <script type="text/javascript" src="{{ url_for('static', filename='settings.js', v=g.version) }}" charset="utf-8"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='file_logging_status.js', v=g.version) }}" charset="utf-8"></script>
 {% endblock %}

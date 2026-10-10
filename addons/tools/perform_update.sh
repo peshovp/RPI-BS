@@ -52,6 +52,14 @@ echo "=========================================="
 
 DEV_REPO_PATH="${1:?Repo path argument required}"
 STATUS_FILE="$2"
+# GeoMaxima - 2026-10-07 review fix: run_id, matched against the
+# pre-shutdown snapshot addons/ota_service_snapshot.py wrote (see
+# addons/features/ota_update/update_controller.py's perform_update(),
+# which passes this same value as argument 3) - optional, so a manual/
+# CLI run with no run_id still works (never trusts a snapshot without a
+# matching run_id, just falls back to a snapshot taken from inside this
+# script instead).
+GEOMAXIMA_RUN_ID="${3:-}"
 
 echo "DEV_REPO_PATH=$DEV_REPO_PATH"
 echo "STATUS_FILE=$STATUS_FILE"
@@ -563,12 +571,138 @@ else
     log_status "info" "⚠ copy_unit.sh or venv python not found - skipping unit redeploy"
 fi
 
-log_status "info" "Scheduling service restart..."
+# GeoMaxima - 2026-10-05/06 incident investigation: this OTA path
+# (perform_update.sh) never called tools/install.sh at all, so neither
+# the journald-retention fix nor the audit-log-access fix below would
+# EVER reach a station using only this update path (confirmed this is
+# the GeoMaxima git-based OTA, separate from the older
+# addons/tools/rtkbase_update.sh tar-based path, which DOES call
+# install.sh already) - both must be invoked here explicitly, on every
+# run, unconditionally. Idempotent/safe to re-run (install.sh's own
+# install_journald_retention()/install_audit_log_access() just rewrite
+# the same files each time).
+if [ -x "$DEV_REPO_PATH/tools/install.sh" ]; then
+    sudo "$DEV_REPO_PATH/tools/install.sh" --journald-retention 2>&1 || log_status "info" "⚠ journald-retention install reported an error - continuing anyway"
+    sudo "$DEV_REPO_PATH/tools/install.sh" --audit-log-access --user "$REPO_OWNER" 2>&1 || log_status "info" "⚠ audit-log-access install reported an error - continuing anyway"
+else
+    log_status "info" "⚠ tools/install.sh not found - skipping journald-retention/audit-log-access"
+fi
 
-# Schedule restart in background with sudo (needed for systemctl)
-(sleep 5 && sudo systemctl restart rtkbase_web) &
+# GeoMaxima - 2026-10-07 review fix: restore every str2str_*/rtkbase_*/
+# geomaxima_* service (AND timer) to its EXACT pre-update active+enabled
+# state, BEFORE restarting rtkbase_web - same logic/reasoning as
+# addons/tools/rtkbase_update.sh's own _geomaxima_restore_service_states()
+# (see that script for the fuller comment on why this matters: a
+# temporary-stop helper that also disables, or an OTA's own unit-file
+# redeploy, could otherwise leave a service permanently off). Prefers the
+# pre-shutdown snapshot (addons/ota_service_snapshot.py, matched by
+# GEOMAXIMA_RUN_ID and freshness) over one taken from inside this script.
+GEOMAXIMA_AUDIT_LOG="/var/lib/rtkbase/audit.log"
+_geomaxima_audit_log() {
+  local event="$1" details_json="$2"
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%6N")
+  mkdir -p "$(dirname "${GEOMAXIMA_AUDIT_LOG}")" 2>/dev/null
+  printf '{"timestamp": "%s", "category": "ota_service_state", "event": "%s", "details": %s}\n' \
+    "${ts}" "${event}" "${details_json}" >> "${GEOMAXIMA_AUDIT_LOG}" 2>/dev/null
+}
+_geomaxima_service_units() {
+  systemctl list-unit-files --no-legend 2>/dev/null \
+    | awk '{print $1}' \
+    | grep -E '^(str2str_|rtkbase_|geomaxima_)[^@]*\.(service|timer)$' \
+    | sort -u
+}
+GEOMAXIMA_SERVICE_STATE_FILE="/var/lib/rtkbase/.ota_service_state_before_update"
+GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT="/var/lib/rtkbase/ota/service_state_before.json"
+GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS=1800
+mkdir -p "$(dirname "${GEOMAXIMA_SERVICE_STATE_FILE}")" 2>/dev/null
+_geomaxima_used_pre_shutdown_snapshot=0
+if [[ -r "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" ]] && [[ -n "${GEOMAXIMA_RUN_ID}" ]] && command -v python3 >/dev/null 2>&1; then
+  if python3 - "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" "${GEOMAXIMA_SERVICE_STATE_FILE}" "${GEOMAXIMA_RUN_ID}" "${GEOMAXIMA_SNAPSHOT_MAX_AGE_SECONDS}" << 'PYEOF'
+import json, sys
+from datetime import datetime, timezone
+snapshot_path, out_path, expected_run_id, max_age_seconds = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+try:
+    with open(snapshot_path) as f:
+        data = json.load(f)
+    if data.get("run_id") != expected_run_id:
+        sys.exit(1)
+    written_at = datetime.fromisoformat(data["timestamp"])
+    age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
+    if age_seconds > max_age_seconds or age_seconds < 0:
+        sys.exit(1)
+    with open(out_path, "w") as f:
+        for unit, state in data.get("units", {}).items():
+            f.write(f"{unit} {state.get('active', 'unknown')} {state.get('enabled', 'unknown')}\n")
+except (OSError, ValueError, KeyError):
+    sys.exit(1)
+PYEOF
+  then
+    _geomaxima_used_pre_shutdown_snapshot=1
+    rm -f "${GEOMAXIMA_PRE_SHUTDOWN_SNAPSHOT}" 2>/dev/null
+    log_status "info" "Using the pre-shutdown service-state snapshot (run_id matched, fresh)"
+  else
+    log_status "info" "⚠ pre-shutdown snapshot did not match this run (wrong run_id or too old) - ignoring it"
+  fi
+fi
+if [[ "${_geomaxima_used_pre_shutdown_snapshot}" -eq 0 ]]; then
+  log_status "info" "⚠ no usable pre-shutdown snapshot - taking one now from inside this script (may already be post-shutdown)"
+  : > "${GEOMAXIMA_SERVICE_STATE_FILE}"
+  while IFS= read -r unit; do
+    [[ -z "${unit}" ]] && continue
+    active=$(systemctl is-active "${unit}" 2>/dev/null)
+    enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
+    echo "${unit} ${active} ${enabled}" >> "${GEOMAXIMA_SERVICE_STATE_FILE}"
+  done < <(_geomaxima_service_units)
+fi
+
+_geomaxima_restore_service_states() {
+  [[ -f "${GEOMAXIMA_SERVICE_STATE_FILE}" ]] || return 0
+  local after_json="[" first=1
+  while read -r unit active enabled; do
+    [[ -z "${unit}" ]] && continue
+    local now_active now_enabled
+    now_active=$(systemctl is-active "${unit}" 2>/dev/null)
+    now_enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
+    if [[ "${active}" == "active" && "${now_active}" != "active" && "${now_active}" != "activating" ]]; then
+      log_status "info" "Restoring ${unit} to active (was active before this update)"
+      systemctl start "${unit}" 2>/dev/null
+    fi
+    if [[ "${enabled}" == "enabled" && "${now_enabled}" == "disabled" ]]; then
+      log_status "info" "Restoring ${unit} to enabled (was enabled before this update)"
+      systemctl enable "${unit}" 2>/dev/null
+    fi
+    now_active=$(systemctl is-active "${unit}" 2>/dev/null)
+    now_enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
+    if [[ "${first}" -eq 1 ]]; then first=0; else after_json+=","; fi
+    after_json+="{\"unit\": \"${unit}\", \"active_before\": \"${active}\", \"enabled_before\": \"${enabled}\", \"active_after\": \"${now_active}\", \"enabled_after\": \"${now_enabled}\"}"
+  done < "${GEOMAXIMA_SERVICE_STATE_FILE}"
+  after_json+="]"
+  _geomaxima_audit_log "after_update" "${after_json}"
+}
+_geomaxima_restore_service_states
+rm -f "${GEOMAXIMA_SERVICE_STATE_FILE}" 2>/dev/null
 
 GM_UPDATE_DONE=1
-log_status "success" "✅ Update completed successfully! Service will restart in 5 seconds."
+log_status "success" "✅ Update completed successfully! Restarting the web service now."
+
+# GeoMaxima - 2026-10-05/06 incident investigation: the restart used to
+# be backgrounded (`(sleep 5 && systemctl restart rtkbase_web) &`) so
+# this script's own `exit 0` ran before the restart fired - intended to
+# let the HTTP response complete first, but it meant the restart command
+# became an orphaned child of this script's process once the script
+# exited, with no guarantee it would survive whatever happens to this
+# process tree's cgroup after that (this script is now launched via
+# `systemd-run --unit=... --collect`, which abandons/cleans up its
+# transient unit's cgroup once the unit's main process exits - a
+# detached grandchild is not protected from that cleanup the way it
+# would be inside a durable, unrelated unit). The restart is now the
+# LAST command this script runs, synchronously, not backgrounded - any
+# process this script's own update steps started (e.g. a rebuilt
+# PRIDE-PPPAR binary's build step) has already completed by this point
+# (every step above is synchronous, `set -e` would have aborted
+# otherwise), so there is nothing left running in this script's cgroup
+# that the restart could prematurely kill.
+sudo systemctl restart rtkbase_web
 
 exit 0

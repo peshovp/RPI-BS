@@ -6,6 +6,7 @@ Handles web-based updates for GeoMaxima
 import subprocess
 import os
 import logging
+import time
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
@@ -494,32 +495,115 @@ fi
             # Make script executable
             import os
             os.chmod(update_script, 0o755)
-            
-            # Launch update script in fully detached background process
-            logger.info(f"Launching detached update script: {update_script}")
+
+            # GeoMaxima - 2026-10-05/06/07 incident investigation:
+            # snapshot service state BEFORE launching the update script
+            # at all - see addons/ota_service_snapshot.py's own module
+            # docstring. unit_name (computed here, reused below for the
+            # actual systemd-run unit) doubles as the snapshot's run_id,
+            # so perform_update.sh can confirm the snapshot it reads
+            # back is THIS run's, not a stale leftover from an earlier
+            # one. Wrapped in try/except - a snapshot failure (missing
+            # addons import, systemctl unavailable, etc.) must never
+            # abort the OTA.
+            unit_name = f"geomaxima-ota-{int(time.time())}"
+            try:
+                from addons.ota_service_snapshot import write_snapshot
+                write_snapshot(run_id=unit_name)
+            except Exception as e:
+                logger.warning(f"Pre-OTA service snapshot failed (update proceeds anyway): {e}")
+
+            # Launch update script OUTSIDE rtkbase_web.service's own
+            # systemd cgroup entirely, via a throwaway transient unit
+            # (systemd-run --collect) - NOT nohup+start_new_session.
+            #
+            # GeoMaxima - 2026-10-05/06 incident investigation: Popen's
+            # child process (even with start_new_session=True, which only
+            # detaches the POSIX session/TTY) is STILL a member of
+            # rtkbase_web.service's systemd cgroup, because cgroup
+            # membership is inherited independently of session/process-
+            # group membership. A prior commit (909a021, 2026-09-24)
+            # claimed to fix exactly this via "KillMode=process" in
+            # unit/rtkbase_web.service - but that commit's own diff shows
+            # ONLY an explanatory comment was added; the actual
+            # `KillMode=process` directive was never written. The web
+            # restart this very update performs at its own end therefore
+            # still kills this detached script (and anything after it)
+            # via the default KillMode=control-group, unconfirmed to have
+            # ever NOT reproduced this since 2026-09-24. Deliberately NOT
+            # fixed by adding KillMode=process now either - that would
+            # leave str2str/rtkrcv/PRIDE-PPPAR child processes spawned by
+            # THIS web server orphaned on every future restart, and risk
+            # the new instance starting duplicates. The actual fix is
+            # here: launch the updater as its OWN systemd unit, with no
+            # cgroup relationship to rtkbase_web.service at all, so that
+            # service's own restart (any KillMode) can never reach it.
+            logger.info(f"Launching OTA update as a transient systemd unit: {update_script}")
             logger.info(f"Status file: {status_file}")
 
-            # Use nohup and background process to survive Flask restart
-            # Pass repo_path and status_file as arguments (dev repo and
-            # deployed app are the same single repo, so only one path is needed)
+            # GeoMaxima - 2026-10-06/07 review fix: `systemd-run` WITHOUT
+            # --no-block waits for the transient unit's start job to
+            # complete - and for Type=oneshot specifically, "started"
+            # means "ExecStart has already exited". Without --no-block
+            # this call would block the Flask worker handling this HTTP
+            # request for the ENTIRE OTA duration (the PRIDE-PPPAR
+            # rebuild alone is 1-2 minutes), and since the OTA itself
+            # restarts rtkbase_web.service at its own end, the request
+            # would never get a response at all. --no-block makes
+            # systemd-run return as soon as the unit is QUEUED, which is
+            # the actually-detached behavior this call needs.
+            #
+            # A transient unit also starts with a CLEAN environment and
+            # cwd=/ - neither self.repo_path's cwd nor this process's own
+            # env (HOME, PATH, LANG) carry over on their own.
+            # perform_update.sh itself does not rely on $HOME/$USER/CWD
+            # (confirmed by reading it: PRIDE-PPPAR's build step derives
+            # its own user/home via getent passwd, not environment
+            # variables; git operations run via `sudo -u <owner>`, not
+            # $HOME-dependent config) - --working-directory is still set
+            # explicitly, for defense in depth and for any future step
+            # that might assume it, and PATH is passed through so `git`/
+            # `systemctl`/`python3`/etc. resolve the same way they would
+            # under a normal shell. Reuses the SAME unit_name computed
+            # above (also the snapshot's run_id) - not recomputed here -
+            # and passes it as perform_update.sh's 3rd argument so the
+            # script can match it against the snapshot it reads back.
             cmd = [
-                'nohup',
+                'systemd-run',
+                f'--unit={unit_name}',
+                '--collect',
+                '--no-block',
+                f'--working-directory={self.repo_path}',
+                f'--setenv=PATH={os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}',
+                '--description=GeoMaxima OTA update (perform_update.sh)',
                 'bash',
                 str(update_script),
                 str(self.repo_path),
-                str(status_file)
+                str(status_file),
+                unit_name,
             ]
 
-            subprocess.Popen(
+            result = subprocess.run(
                 cmd,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                cwd=str(self.repo_path)
+                capture_output=True,
+                text=True,
             )
-            
-            logger.info("✓ Update script launched successfully in background")
+            if result.returncode != 0:
+                error_msg = f"systemd-run failed to launch the update unit: {result.stderr.strip()}"
+                logger.error(error_msg)
+                self.last_update_status = {
+                    'success': False,
+                    'error': error_msg,
+                    'log': f'❌ {error_msg}',
+                    'completed': True
+                }
+                self._save_status_to_file()
+                self.update_in_progress = False
+                return self.last_update_status
+
+            logger.info(f"✓ Update script launched successfully as systemd unit {unit_name} "
+                        f"(output goes to the journal - 'journalctl -u {unit_name}')")
             
             # Update status to indicate background process started
             self.last_update_status = {
