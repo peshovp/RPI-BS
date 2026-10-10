@@ -325,6 +325,44 @@ passing. The feature branch was fast-forwarded to this fix's commit a
 second time so the Orange Pi's next OTA (which still resolves its reset
 target by local branch name until this fix lands) can reach it.
 
+## 2026-10-14 (continued): Orange Pi fully migrated to main - verified live
+
+The Orange Pi's OTA to `69487ce` verified the branch-rename fix
+completely: `git status -sb` now shows only `## main...origin/main`
+(the LOCAL branch is genuinely `main`, not just its upstream), and the
+station's startup self-heal/OTA hand-off chain ran correctly end-to-end
+on real hardware for the first time -
+`self_heal_audit_log_access`/`self_heal_journald_retention`,
+`branch_switch`/`switch_completed`, and - the first time this has ever
+happened on any real station - `post_update.sh` itself actually ran
+(`audit_log_access_applied`, `journald_retention_applied`,
+`before_update`, `after_update` all logged to `audit.log`), no failed
+units. Final OTA status was "completed with warnings", with exactly
+one warning: `raspi-config SPI enable failed`, because `raspi-config`
+simply doesn't exist on Armbian.
+
+Fixed: the SPI-enable step in `perform_update.sh` is now gated on
+`GM_PLATFORM` (`tools/platform_detect.sh`, sourced directly in
+`perform_update.sh` for this - previously only `tools/post_update.sh`
+did) - runs `raspi-config` only when `GM_PLATFORM == rpi`; any other
+platform logs a plain INFO "SPI enable step skipped: not a Raspberry
+Pi", never a warning. Checked for other unconditional RPi-only steps
+across `perform_update.sh`/`install.sh`/`tools/install.sh` - none found
+(`install.sh`'s own SPI step already did its own `command -v
+raspi-config` check; the `fonts-dejavu-core` install is genuinely
+platform-agnostic, since an LCD display is just as possible on
+Armbian). The remote `feature/armbian-opi4pro-support` branch has been
+deleted (`git push origin --delete`) - the Orange Pi is now a normal
+`main`-tracking station like every other one.
+
+The Topolchane station is still pending verification of this entire
+chain (post_update.sh path fix, branch-switch completeness, best-
+effort/critical split) - it has been offline since a village-wide
+power outage, unrelated to any of this project's code. Its next OTA
+is expected to show the same `post_update`/`ota_service_state` audit
+events now confirmed on the Orange Pi, on RPi hardware instead of
+Armbian.
+
 ## Standing rules (apply to every part below, no exceptions found so far)
 
 1. **Diff first, wait for explicit approval, before every commit.** Not
@@ -449,13 +487,13 @@ target by local branch name until this fix lands) can reach it.
   out of the git checkout** the way `geomaxima_survey/`/`geomaxima_geoid/`
   were (`76ccadd`) - explicitly deferred (`survey_controller.py`'s own
   NOTE comment), tracked separately, not yet scheduled.
-- **Orange Pi branch (`feature/armbian-opi4pro-support`) has NOT been
-  updated with `main`'s work** - as of this doc, its tip (`68c61fe`) is
-  itself an ancestor of `main`'s much earlier history (before `f751930`);
-  it has received none of the DNS migration (`2b01198`), anything from
-  the Part 5-10b session (`f751930` through `f8b7914`), or the archive/
-  OTA incident hardening (`329cd8b`, `72584ad`). Needs an explicit
-  merge/rebase decision before that branch is usable again.
+- **RESOLVED (2026-10-14)**: the Orange Pi branch
+  (`feature/armbian-opi4pro-support`) was migrated to `main` through
+  code (`tools/branch_switch.sh`) and verified live - the station's
+  local branch is now genuinely `main`, and the remote feature branch
+  has been deleted. See the two "2026-10-14" sections above for the
+  full story (the first switch attempt only repointed the upstream and
+  had to be finished with a follow-up fix).
 - **Part 9's QZSS fixture is synthetic** - replace with real data once a
   station produces a genuine multi-GNSS (QZSS-containing) AR run; the
   INFO-level stdout logging needed to capture it already exists.
@@ -473,11 +511,13 @@ the 2026-10-13 section above.
 ## How to resume
 
 1. Read this file.
-2. Confirm the two ls-remote hashes below still match
-   `git ls-remote origin refs/heads/main` /
-   `refs/heads/feature/armbian-opi4pro-support` (if they don't, something
-   happened between this doc's last update and now - investigate before
-   assuming the table above is still accurate).
+2. Confirm the hash below still matches `git ls-remote origin
+   refs/heads/main` (if it doesn't, something happened between this
+   doc's last update and now - investigate before assuming the table
+   above is still accurate). There is no longer a
+   `feature/armbian-opi4pro-support` branch to check - it was deleted
+   on 2026-10-14 after the Orange Pi station was confirmed fully
+   migrated to `main`.
 3. Pick up at the station-specific ETRF2000 velocity follow-up, or
    check whether the next OTA to a station confirms the
    post_update.sh hand-off fix (audit.log ownership, journald drop-in,

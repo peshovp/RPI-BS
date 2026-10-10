@@ -429,8 +429,25 @@ gm_restart_web() {
     sudo systemctl restart rtkbase_web
 }
 
-log_status "info" "Ensuring SPI is enabled (idempotent, needed for optional LCD display feature)..."
-sudo raspi-config nonint do_spi 0 2>&1 || gm_warn "raspi-config SPI enable failed - continuing anyway"
+# GeoMaxima - 2026-10-14 review fix: confirmed live on an Orange Pi 4
+# Pro (Armbian) - raspi-config enable SPI unconditionally ran on every
+# platform and reported "raspi-config SPI enable failed" as a WARNING
+# on Armbian, where raspi-config simply doesn't exist. That's not a
+# real problem (nothing is actually broken), just noise in the final
+# "completed with warnings" status - gate it on platform detection so
+# an Armbian station reports a plain INFO "skipped", not a warning.
+# tools/platform_detect.sh is sourced here (previously only
+# tools/post_update.sh did, per that file's own fix comment promising
+# to add it elsewhere "the day either needs to" - this is that day).
+if [[ -r "${DEV_REPO_PATH}/tools/platform_detect.sh" ]]; then
+    source "${DEV_REPO_PATH}/tools/platform_detect.sh"
+fi
+if [[ "${GM_PLATFORM:-unknown}" == "rpi" ]]; then
+    log_status "info" "Ensuring SPI is enabled (idempotent, needed for optional LCD display feature)..."
+    sudo raspi-config nonint do_spi 0 2>&1 || gm_warn "raspi-config SPI enable failed - continuing anyway"
+else
+    log_status "info" "SPI enable step skipped: not a Raspberry Pi (GM_PLATFORM=${GM_PLATFORM:-unknown})"
+fi
 
 log_status "info" "Ensuring fonts-dejavu-core is installed (idempotent, needed for optional LCD display feature)..."
 sudo apt-get install -y -qq --no-remove fonts-dejavu-core 2>&1 || gm_warn "fonts-dejavu-core install failed - continuing anyway"
