@@ -43,3 +43,7 @@ test.conf
 # location ever being re-created (e.g. by a station still running pre-
 # migration code) and then caught up in a `git reset --hard`/`git clean`.
 /settings_conf_backups/
+# aider's own state/cache files and this repo's task-spec working files
+# for the local coder model - never meant to be committed
+.aider*
+.aider-tasks/
