@@ -7,6 +7,87 @@ This file exists so a fresh session (after a context reset/new
 conversation) can resume work without re-deriving the plan, the
 standing rules, or what's already done.
 
+## 2026-10-21: live diagnostic access to Topolchane + findings (read-only)
+
+**Access (exception to CLAUDE.md §3 "no manual station changes"):** on
+2026-10-21 Pesho added ONE line to `~/.ssh/authorized_keys` of the
+station user (options `restrict`, key comment `claude-diag-topolchane`).
+Key pair and `topolchane.env` live OUTSIDE the repo in
+`%USERPROFILE%\.gm-stations\` (ACL: owner only); the host key is
+pinned in that folder's own `known_hosts` (SHA256 checked against the
+value Pesho read on the station). Revoke: delete the line containing
+`claude-diag-topolchane` on the station and delete `.gm-stations` on the
+PC. The key is passphrase-less and the user has passwordless sudo, so it
+is effectively root: all use is read-only (no restarts, no web-app HTTP
+calls, no `status`/`ps` on units whose command line carries NTRIP
+credentials, no `cat` of settings/tokens). Verified 2026-10-21: exactly
+one `claude-diag-topolchane` line, starting with `restrict`. *Proposed,
+not approved:* a forced-command allowlist (`gm-diag`) shipped via
+repo/OTA.
+
+**Findings - Autosurvey of 2026-10-19 (start 04:53 UTC, state/audit
+timestamps are UTC) died at 13:53 UTC with `completed_hours: 0`:**
+- *Confirmed:* the 540-min watchdog killed it ("No successful coordinate
+  update for 540 minutes"); the UI shows "unknown error" because
+  `last_failure_reason` is None on that path.
+- *Confirmed:* raw logging worked: current-survey RINEX segment has
+  29 801 epochs at 1 Hz (04:54:10-13:10:50 UTC), header intact.
+- *Confirmed (task 3):* pdp3 ran on `2026/285-286` = 12-13 Oct, i.e. data
+  of the PREVIOUS survey extracted from an old zip
+  (`2026-10-13_00-00-00_GNSS-1.ubx`), `obs_duration` 278 min.
+- *Confirmed (new bug):* `merge_rinex_obs` never merges any segment after
+  the first. `rinex_converter.py:550` compares
+  `line[60:].rstrip('\r\n') == 'END OF HEADER'`, but RINEX lines are
+  space-padded to col 80, so the header end is never found ("has no END
+  OF HEADER line - nothing appended"). Fix: compare the stripped label.
+- *Confirmed:* BRDC for DOY 285 is a 0-byte file on igs.gnsswhu.cn
+  (HEAD: DOY 285 = 0 B, DOY 286 = 1.3 MB, DOY 292 = 1.24 MB) and the slot
+  dir holds a local 0-byte `BRDC00IGS_R_20262850000_01D_MN.rnx.gz`.
+  *Likely, not proven:* that empty file is what made pdp3 fail (pdp3 has
+  brdm/brdc fallbacks and its captured stderr shows only FTP warnings and
+  one `curl: (28) Timeout was reached`), and that it only matters because
+  of the old-data window. *Seen from the station:* DNS, FTPS listing and
+  HEAD work; one transfer timeout was logged. *Not measured:* a real
+  download of a full-size product from the station.
+- *Confirmed (task 7):* all 15 attempts carry the same meaningless reason
+  ("no result from _run_ppp_ar (...)") with `frequency_selection` and
+  `obs_duration` empty.
+- *Confirmed (task 8):* `antenna_info='ADVNULLANTENNA'` is stored with
+  literal quotes; the journal gets an `_resolve_antenna_calibration`
+  WARNING about every minute.
+- *Confirmed:* File service was started by the survey at 04:53 and is
+  stopped now (`file_service_owned: False`), per the survey-only policy.
+- *Confirmed:* Pi has no RTC; after the power loss it booted with the
+  11 Jul clock and chronyd stepped it by 8 206 656 s at 2026-10-14
+  16:28, so units show `ActiveEnterTimestamp` of 11 Jul. Impact beyond
+  timestamps: unproven. (Production note: add an RTC/UPS.)
+- *Confirmed:* `/var/log/journal/<machine-id>/` exists (retention drop-in
+  present since 10 Oct) but holds only the CURRENT boot (3 files, 88 MB);
+  the journal of earlier boots, incl. the 2026-10-13 04:44 WORKER TIMEOUT
+  window, is gone after the hard power loss + 95-day clock step. *Unproven
+  why* (corruption on power loss, clock step vs retention, other). If the
+  persistent journal does not survive a hard power cut, that undermines
+  the "logs survive reboots" assumption of the data-loss hardening.
+- *Confirmed (task 1 premise changed):* the 10 Oct OTA (status JSON
+  `update_status.json`, 09:52:48, `c3634fd`) DID run `copy_unit.sh`: all
+  unit files in `/etc/systemd/system` have mtime 09:53:24, the status says
+  "✓ Systemd units redeployed", and `rtkbase_archive.service` on disk has
+  the `-/var/lib/rtkbase/audit.log` ReadWritePaths line. `copy_unit.sh`
+  ends with `systemctl daemon-reload`, so "OTA never reloads" is NOT
+  supported. Why `NeedDaemonReload=yes` was seen on 13 Oct is *unproven*
+  (`/tmp/ota_update.log` was lost with the reboot). Same OTA log:
+  "⚠ tools/post_update.sh not found" (the path bug, fixed later).
+- *Confirmed:* "Status: Failed - unknown error" is
+  `web_app/static/settings.js:981`: `last_failure_reason || "unknown
+  error"`, while `survey_state.json` has `last_failure_reason: None` (the
+  reason lives only in `errors[]` and the audit event).
+- *Confirmed:* the merge bug is in the code deployed on the station
+  (`c3634fd`, same line 550). No other exact-match RINEX label compare
+  exists in `addons/` (the others use `.strip()`), so this bug class does
+  NOT explain the null `frequency_selection` (task 4 stays open).
+- Station state: `c3634fd`, `main`/`origin/main`, no failed units, disk
+  30 %, `throttled=0x0`.
+
 ## 2026-10-05/06/07/10 data-loss incident - summary
 
 A test station lost every raw archive (several zips spanning Sep 23 -
