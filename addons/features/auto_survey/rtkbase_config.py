@@ -7,9 +7,10 @@ Auto-discovery and parsing of RTKBase settings.conf
 
 import configparser
 import logging
+import math
 import os
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 # convbin/receiver_format_for() actually knows how to convert; kept as one
 # source of truth rather than a second hardcoded list here).
 _RAW_LOG_SUFFIXES = tuple(s.lstrip('.') for s in _FORMAT_BY_SUFFIX.keys())
+
+_DEFAULT_ROTATE_HOURS = 24.0
+_SEGMENT_END_TOLERANCE_SECONDS = 120.0
 
 
 class RTKBaseConfig:
@@ -209,6 +213,33 @@ class RTKBaseConfig:
         tcp_log = self.find_latest_log("str2str_tcp_*.log")
         return tcp_log
 
+    def _max_segment_seconds(self) -> float:
+        """
+        Longest time one raw log file can cover: rotation hours * 3600 +
+        overlap seconds + tolerance. Used to cap a segment's end when the
+        next segment's start is far away (e.g. File service was off between
+        surveys).
+        """
+        try:
+            raw_hours = self.config.get('local_storage', 'file_rotate_time', fallback='').strip("'\" ")
+            rotate_hours = float(raw_hours)
+            if not (math.isfinite(rotate_hours) and 0 < rotate_hours <= 8760):
+                raise ValueError
+        except (ValueError, TypeError):
+            logger.warning(f"_max_segment_seconds: invalid file_rotate_time, using default {_DEFAULT_ROTATE_HOURS}h")
+            rotate_hours = _DEFAULT_ROTATE_HOURS
+
+        try:
+            raw_overlap = self.config.get('local_storage', 'file_overlap_time', fallback='').strip("'\" ")
+            overlap_seconds = float(raw_overlap)
+            if not (math.isfinite(overlap_seconds) and 0 <= overlap_seconds <= 31536000):
+                raise ValueError
+        except (ValueError, TypeError):
+            logger.warning("_max_segment_seconds: invalid file_overlap_time, using 0")
+            overlap_seconds = 0.0
+
+        return rotate_hours * 3600.0 + overlap_seconds + _SEGMENT_END_TOLERANCE_SECONDS
+
     def get_data_files_since(self, start_time: datetime, extract_dir: Optional[Path] = None) -> List[Path]:
         """
         Every raw GNSS log segment overlapping [start_time, now] - unlike
@@ -235,10 +266,13 @@ class RTKBaseConfig:
         once) AND its start time is not so far after start_time that it
         couldn't contain any data from the window - in practice: keep
         every segment whose [start, end) range overlaps [start_time, now)
-        - a segment's END is the NEXT segment's start (str2str's
-        rotation is back-to-back, file_overlap_time defaults to '0'), or
-        "now" for whichever segment is the newest. The caller's convbin
-        -ts/-te (time_start passed through from _run_ppp_ar_interim()/
+        - a segment's END is the earlier of the NEXT segment's start and
+        start + the configured rotation period (+ overlap + tolerance),
+        or "now" for whichever segment is the newest. Capping at the
+        rotation period prevents an old file from appearing to cover the
+        window when there is a gap between files (e.g. File service was
+        switched off between surveys). The caller's convbin -ts/-te
+        (time_start passed through from _run_ppp_ar_interim()/
         _finalize_survey()) still trims any data each kept segment has
         outside [start_time, now] - this method only decides WHICH
         segments to hand to convbin at all, same as get_data_file()
@@ -301,11 +335,24 @@ class RTKBaseConfig:
         dated = sorted((c for c in candidates if c[0] is not None), key=lambda c: c[0])
         undated = [c for c in candidates if c[0] is None]
 
+        max_len = timedelta(seconds=self._max_segment_seconds())
         kept = []
+        skipped_names = []
         for i, (seg_start, is_plain, ref) in enumerate(dated):
-            seg_end = dated[i + 1][0] if i + 1 < len(dated) else now
+            next_start = dated[i + 1][0] if i + 1 < len(dated) else now
+            seg_end = min(next_start, seg_start + max_len)
             if seg_end >= start_time and seg_start <= now:
                 kept.append((is_plain, ref))
+            else:
+                if isinstance(ref, tuple):
+                    name = ref[1]
+                else:
+                    name = ref.name
+                skipped_names.append(name)
+        if skipped_names:
+            shown = skipped_names[:5]
+            suffix = ", ..." if len(skipped_names) > 5 else ""
+            logger.info(f"get_data_files_since: skipped {len(skipped_names)} segment(s) that end before window start {start_time.isoformat()}: {', '.join(shown)}{suffix}")
         kept += [(is_plain, ref) for _seg_start, is_plain, ref in undated]
 
         found: List[Path] = []
