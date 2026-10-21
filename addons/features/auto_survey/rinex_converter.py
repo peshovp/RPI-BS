@@ -547,7 +547,8 @@ def merge_rinex_obs(obs_files: List[Path], output_path: Path) -> Optional[Path]:
                     past_header = False
                     for line in f:
                         if not past_header:
-                            if line[60:].rstrip('\r\n') == 'END OF HEADER':
+                            # Real RINEX lines are space-padded to 80 columns
+                            if line[60:].strip() == 'END OF HEADER':
                                 past_header = True
                             continue
                         out.write(line)
