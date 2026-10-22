@@ -2297,11 +2297,14 @@ class SurveyController:
         antenna = self._resolve_antenna_calibration()
         receiver_info = self.rtkbase.get_receiver_info()
         receiver_hr = f"/{receiver_info.get('model', '')}/{receiver_info.get('firmware', '')}"
+        # time_start trims segments that began before the survey (e.g. a
+        # file left running by the File service before the survey started).
         rinex_result = self.rinex.convert_raw_files_to_rinex_obs(
             raw_files, rinex_dir,
             antenna_type=antenna['antenna_type'] if antenna['antenna_calibrated'] else None,
             receiver_info=receiver_hr,
             zero_antenna_delta=True,
+            time_start=survey_start_time,
         )
         if not rinex_result:
             logger.warning("_run_ppp_ar: RINEX conversion failed - skipping this run")

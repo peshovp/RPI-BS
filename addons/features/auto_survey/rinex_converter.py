@@ -411,7 +411,9 @@ class RINEXConverter:
                                        marker_name: str = "BASE",
                                        antenna_type: Optional[str] = None,
                                        receiver_info: Optional[str] = None,
-                                       zero_antenna_delta: bool = False) -> Optional[Tuple[Path, Path]]:
+                                       zero_antenna_delta: bool = False,
+                                       time_start: Optional[datetime] = None,
+                                       time_end: Optional[datetime] = None) -> Optional[Tuple[Path, Path]]:
         """
         Convert MULTIPLE raw log segments (e.g. a window spanning a
         UTC-midnight str2str rotation, or an older segment that
@@ -451,6 +453,10 @@ class RINEXConverter:
                 (taken from the first segment - see merge_rinex_obs())
                 carries the same, consistent values regardless of which
                 segment happened to be first.
+            time_start, time_end: optional UTC window passed to every
+                segment conversion (convbin -ts/-te), so data outside
+                [time_start, time_end] is trimmed from each segment
+                before merging.
 
         Returns:
             (merged_obs_file, nav_file) or None on failure. nav_file may be
@@ -467,7 +473,8 @@ class RINEXConverter:
         if len(raw_files) == 1:
             return self.convert_raw_to_rinex_obs(raw_files[0], output_dir, marker_name=marker_name,
                                                  antenna_type=antenna_type, receiver_info=receiver_info,
-                                                 zero_antenna_delta=zero_antenna_delta)
+                                                 zero_antenna_delta=zero_antenna_delta,
+                                                 time_start=time_start, time_end=time_end)
 
         ordered = sorted(raw_files, key=lambda p: parse_log_start_time(p) or
                          datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None))
@@ -479,7 +486,8 @@ class RINEXConverter:
             segment_dir = output_dir / f"_segment_{i}"
             result = self.convert_raw_to_rinex_obs(raw_file, segment_dir, marker_name=marker_name,
                                                    antenna_type=antenna_type, receiver_info=receiver_info,
-                                                   zero_antenna_delta=zero_antenna_delta)
+                                                   zero_antenna_delta=zero_antenna_delta,
+                                                   time_start=time_start, time_end=time_end)
             if not result:
                 logger.error(f"convert_raw_files_to_rinex_obs: segment {i} ({raw_file.name}) "
                             f"failed to convert - aborting merge (a partial/wrong-window obs "
