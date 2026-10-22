@@ -2246,10 +2246,19 @@ class SurveyController:
         """
         logger.info(f"_run_ppp_ar: starting PRIDE-PPPAR run (slot={slot_label})")
 
+        # Context of THIS run for the attempt record: when the run fails the
+        # caller gets None, and without this the persisted record loses the
+        # frequency combination pdp3 was given, the obs duration and the
+        # stage that failed (see _build_ppp_ar_attempt_record()).
+        self._last_ppp_ar_run_context = {
+            'stage': 'start', 'frequency_selection': None, 'obs_duration_minutes': None,
+        }
+
         try:
             pride = PridePpparProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
         except Pdp3NotFoundError as e:
             logger.warning(f"_run_ppp_ar: PPP-AR enabled but pdp3 not available - skipping this run: {e}")
+            self._last_ppp_ar_run_context['stage'] = 'pdp3_unavailable'
             return None
 
         # Window = [survey start, now] - the WHOLE survey so far, not just
@@ -2284,6 +2293,7 @@ class SurveyController:
         raw_files = self.rtkbase.get_data_files_since(survey_start_time, extract_dir=extract_dir)
         if not raw_files:
             logger.warning("_run_ppp_ar: no raw data file found - skipping this run")
+            self._last_ppp_ar_run_context['stage'] = 'no_raw_data'
             return None
 
         logger.debug(f"_run_ppp_ar: raw_files={raw_files}")
@@ -2310,6 +2320,7 @@ class SurveyController:
         )
         if not rinex_result:
             logger.warning("_run_ppp_ar: RINEX conversion failed - skipping this run")
+            self._last_ppp_ar_run_context['stage'] = 'rinex_conversion_failed'
             return None
 
         obs_file, _nav_file = rinex_result
@@ -2323,6 +2334,7 @@ class SurveyController:
         except Exception as e:
             logger.warning(f"_run_ppp_ar: failed to compute observation duration from {obs_file}: {e}")
             obs_duration_minutes = None
+        self._last_ppp_ar_run_context['obs_duration_minutes'] = obs_duration_minutes
 
         logger.info(
             f"_run_ppp_ar: obs_file={obs_file}, "
@@ -2347,6 +2359,9 @@ class SurveyController:
             obs_file, work_dir=ppp_ar_dir,
             custom_antex_path=self.spp.resolve_augmented_custom_antex(),
         )
+        # The combination is chosen inside process_ppp_ar() before pdp3 runs,
+        # so it is known even when pdp3 itself fails.
+        self._last_ppp_ar_run_context['frequency_selection'] = getattr(pride, '_last_freq_selection', None)
 
         # Prune old slot directories AFTER this attempt (whether it
         # succeeded or failed) - never before, so a failed attempt's own
@@ -2370,6 +2385,7 @@ class SurveyController:
                 f"(obs_duration={obs_duration_minutes:.1f}min)" if obs_duration_minutes is not None
                 else "_run_ppp_ar: pdp3 run failed or produced no result - skipping this run (obs_duration=unknown)"
             )
+            self._last_ppp_ar_run_context['stage'] = 'pdp3_failed'
             return None
 
         result = pride.parse_ppp_ar_result(pos_file)
@@ -2379,6 +2395,7 @@ class SurveyController:
                 f"(obs_duration={obs_duration_minutes:.1f}min)" if obs_duration_minutes is not None
                 else "_run_ppp_ar: could not parse pdp3 result - skipping this run (obs_duration=unknown)"
             )
+            self._last_ppp_ar_run_context['stage'] = 'parse_failed'
             return None
 
         logger.info(f"_run_ppp_ar: result: {result['lat']:.8f}°, {result['lon']:.8f}°, "
@@ -2643,8 +2660,15 @@ class SurveyController:
             'obs_duration_minutes': None,
             'fix_rate_mismatch': None,
             'band_calibration': None,
+            'failure_stage': None,
         }
         if ppp_ar_result is None:
+            # The run produced no result: take what _run_ppp_ar() learned
+            # before it failed (frequency combination, obs duration, stage).
+            ctx = getattr(self, '_last_ppp_ar_run_context', None) or {}
+            record['frequency_selection'] = ctx.get('frequency_selection')
+            record['obs_duration_minutes'] = ctx.get('obs_duration_minutes')
+            record['failure_stage'] = ctx.get('stage')
             return record
 
         obs_duration_minutes = ppp_ar_result.get('obs_duration_minutes')
