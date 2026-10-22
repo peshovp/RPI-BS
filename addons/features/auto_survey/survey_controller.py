@@ -43,6 +43,7 @@ from .ppp_processor import PPPProcessor, antenna_type_in_antex, classify_band_ca
 from .ppp_downloader import PPPDownloader, PPPDownloaderError
 from .pride_pppar_processor import (
     PridePpparProcessor, Pdp3NotFoundError, check_processed_window_coverage,
+    PPP_AR_SAMPLE_INTERVAL_S,
 )
 from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef, arp_to_marker, verify_arp_to_marker_offset
 from .position_estimator import PositionEstimator
@@ -2305,6 +2306,7 @@ class SurveyController:
             receiver_info=receiver_hr,
             zero_antenna_delta=True,
             time_start=survey_start_time,
+            sample_interval=PPP_AR_SAMPLE_INTERVAL_S,
         )
         if not rinex_result:
             logger.warning("_run_ppp_ar: RINEX conversion failed - skipping this run")

@@ -8,6 +8,7 @@ Converts UBX/RTCM logs to RINEX format using convbin
 import subprocess
 import logging
 import re
+import math
 from pathlib import Path
 from typing import List, Optional, Tuple
 from datetime import datetime, timezone
@@ -88,7 +89,8 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
                        time_end: Optional[datetime] = None,
                        antenna_type: Optional[str] = None,
                        receiver_type: Optional[str] = None,
-                       zero_antenna_delta: bool = False) -> List[str]:
+                       zero_antenna_delta: bool = False,
+                       sample_interval: Optional[float] = None) -> List[str]:
     """
     convbin argument list for one raw log.
 
@@ -163,6 +165,8 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
     - rtcm3: -tr from rtcm_time_reference() (week resolution, see there).
     - Optional time window -ts/-te (UTC), e.g. a frozen survey window;
       unused (whole file) by default.
+    - Optional output sampling interval -ti (seconds); None = keep every
+      epoch (default).
     """
     args = [str(convbin), "-r", receiver_format, "-v", RINEX_VERSION, "-d", str(output_dir)]
     if marker_name:
@@ -181,6 +185,10 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
         args += _convbin_time("-ts", time_start)
     if time_end:
         args += _convbin_time("-te", time_end)
+    if sample_interval is not None:
+        if not math.isfinite(sample_interval) or sample_interval <= 0:
+            raise ValueError(f"sample_interval must be a positive finite number, got {sample_interval}")
+        args += ["-ti", f"{sample_interval:g}"]
     args.append(str(raw_file))
     return args
 
@@ -328,7 +336,8 @@ class RINEXConverter:
                                  time_end: Optional[datetime] = None,
                                  antenna_type: Optional[str] = None,
                                  receiver_info: Optional[str] = None,
-                                 zero_antenna_delta: bool = False) -> Optional[Tuple[Path, Path]]:
+                                 zero_antenna_delta: bool = False,
+                                 sample_interval: Optional[float] = None) -> Optional[Tuple[Path, Path]]:
         """
         Convert raw data to RINEX observation and navigation files
 
@@ -354,6 +363,8 @@ class RINEXConverter:
                 rtcm3/ubx/etc - not the receiver model/version string).
             zero_antenna_delta: Part 6a - see build_convbin_args()'s own
                 docstring. Pass True ONLY for PRIDE-PPPAR callers.
+            sample_interval: output sampling interval in seconds (convbin
+                -ti); None = keep every epoch (default).
 
         Returns:
             Tuple of (obs_file, nav_file) or None on failure
@@ -372,7 +383,8 @@ class RINEXConverter:
                                      marker_name=marker_name,
                                      time_start=time_start, time_end=time_end,
                                      antenna_type=antenna_type, receiver_type=receiver_info,
-                                     zero_antenna_delta=zero_antenna_delta)
+                                     zero_antenna_delta=zero_antenna_delta,
+                                     sample_interval=sample_interval)
 
             logger.info(f"Converting to RINEX {RINEX_VERSION} obs+nav: {raw_file.name}"
                         + (f" (window {time_start} .. {time_end} UTC)" if time_start or time_end else ""))
@@ -413,7 +425,8 @@ class RINEXConverter:
                                        receiver_info: Optional[str] = None,
                                        zero_antenna_delta: bool = False,
                                        time_start: Optional[datetime] = None,
-                                       time_end: Optional[datetime] = None) -> Optional[Tuple[Path, Path]]:
+                                       time_end: Optional[datetime] = None,
+                                       sample_interval: Optional[float] = None) -> Optional[Tuple[Path, Path]]:
         """
         Convert MULTIPLE raw log segments (e.g. a window spanning a
         UTC-midnight str2str rotation, or an older segment that
@@ -457,6 +470,8 @@ class RINEXConverter:
                 segment conversion (convbin -ts/-te), so data outside
                 [time_start, time_end] is trimmed from each segment
                 before merging.
+            sample_interval: output sampling interval in seconds (convbin
+                -ti); None = keep every epoch (default).
 
         Returns:
             (merged_obs_file, nav_file) or None on failure. nav_file may be
@@ -474,7 +489,8 @@ class RINEXConverter:
             return self.convert_raw_to_rinex_obs(raw_files[0], output_dir, marker_name=marker_name,
                                                  antenna_type=antenna_type, receiver_info=receiver_info,
                                                  zero_antenna_delta=zero_antenna_delta,
-                                                 time_start=time_start, time_end=time_end)
+                                                 time_start=time_start, time_end=time_end,
+                                                 sample_interval=sample_interval)
 
         ordered = sorted(raw_files, key=lambda p: parse_log_start_time(p) or
                          datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None))
@@ -487,7 +503,8 @@ class RINEXConverter:
             result = self.convert_raw_to_rinex_obs(raw_file, segment_dir, marker_name=marker_name,
                                                    antenna_type=antenna_type, receiver_info=receiver_info,
                                                    zero_antenna_delta=zero_antenna_delta,
-                                                   time_start=time_start, time_end=time_end)
+                                                   time_start=time_start, time_end=time_end,
+                                                   sample_interval=sample_interval)
             if not result:
                 logger.error(f"convert_raw_files_to_rinex_obs: segment {i} ({raw_file.name}) "
                             f"failed to convert - aborting merge (a partial/wrong-window obs "

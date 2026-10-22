@@ -398,6 +398,9 @@ _SAT_SCAN_SECONDS = 1800
 _FREQ_FALLBACK = ['G12', 'R12', 'E17', 'C27']
 _OBS_TYPES_LABEL = 'SYS / # / OBS TYPES'
 
+# pdp3 processing interval; matches the 30 s RINEX standard
+PPP_AR_SAMPLE_INTERVAL_S = 30.0
+
 
 def _bds_band(band: str, rinex_version: float) -> str:
     """
@@ -1096,6 +1099,25 @@ def _log_download_failure_kinds(text: str, level: int) -> None:
                    f"({len(other)} line(s), not DNS): {other[:5]}")
 
 
+def build_pdp3_args(pdp3, freq, obs_name, sample_interval=PPP_AR_SAMPLE_INTERVAL_S):
+    """
+    Build the pdp3 command-line argument list.
+
+    The obs file must stay last because pdp3 treats the last argument as
+    the observation file.
+    """
+    import math
+    args = [str(pdp3), "-m", "S", "-frq", *freq['frq']]
+    if freq['sys']:
+        args += ["-sys", freq['sys']]
+    if sample_interval is not None:
+        if not math.isfinite(sample_interval) or sample_interval <= 0 or sample_interval > 300:
+            raise ValueError(f"sample_interval must be in (0, 300], got {sample_interval}")
+        args += ["-i", f"{sample_interval:g}"]
+    args.append(str(obs_name))
+    return args
+
+
 class PridePpparProcessor:
     """
     Process RINEX for PPP-AR positioning using PRIDE-PPPAR's pdp3.
@@ -1227,10 +1249,8 @@ class PridePpparProcessor:
         # per-run -frq/-sys selection above. No config file, no sp3/clk
         # arguments - see module docstring. The obs file must stay LAST:
         # pdp3's ParseCmdArgs() treats the last argument as the obs file.
-        pdp3_args = [str(self.pdp3), "-m", "S", "-frq", *freq['frq']]
-        if freq['sys']:
-            pdp3_args += ["-sys", freq['sys']]
-        pdp3_args.append(local_obs_file.name)
+        # The -i flag sets the 30 s processing interval.
+        pdp3_args = build_pdp3_args(self.pdp3, freq, local_obs_file.name)
 
         # CRITICAL: pdp3 must run under an enlarged stack ulimit, set in
         # the SAME shell process that execs it (see module docstring) - a
