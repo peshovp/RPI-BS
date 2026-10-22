@@ -45,6 +45,7 @@ from .pride_pppar_processor import (
     PridePpparProcessor, Pdp3NotFoundError, check_processed_window_coverage,
     PPP_AR_SAMPLE_INTERVAL_S,
 )
+from .ppp_ar_failure import describe_failure, should_retry, STAGE_PDP3_FAILED, STAGE_FIX_RATE_BELOW_THRESHOLD, STAGE_APPLY_FAILED
 from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef, arp_to_marker, verify_arp_to_marker_offset
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
@@ -264,6 +265,9 @@ class SurveyController:
         # generic, context-free message. None until the first PPP-AR
         # attempt of this instance's lifetime.
         self._last_ppp_ar_attempt_summary = None
+        # Classified failure of the last PPP-AR attempt (ppp_ar_failure),
+        # read by the slot retry loop to decide whether a rerun can help.
+        self._last_ppp_ar_failure_info = None
 
         # Hard timeout: fail survey if no successful coordinate update happens for X minutes.
         # Configurable via env var AUTOSURVEY_UPDATE_TIMEOUT_MINUTES.
@@ -1053,11 +1057,22 @@ class SurveyController:
                         # different/older one.
                         slot_ok = False
                         for attempt_num in range(1, self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS + 1):
+                            self._last_ppp_ar_failure_info = None
                             slot_ok = self._run_ppp_ar_interim(elapsed_hours, latest_due)
                             if slot_ok:
                                 logger.info(
                                     f"PPP-AR slot={latest_due}h: succeeded on attempt "
                                     f"{attempt_num}/{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS}"
+                                )
+                                break
+                            failure_info = self._last_ppp_ar_failure_info
+                            if failure_info is not None and not should_retry(failure_info, attempt_num):
+                                logger.warning(
+                                    f"PPP-AR slot={latest_due}h attempt {attempt_num} failed "
+                                    f"[{failure_info['error_class']}: {failure_info['reason']}] - "
+                                    f"not retrying: rerunning with the same input cannot help "
+                                    f"(max {failure_info['max_attempts']} attempt(s) for this class); "
+                                    f"will wait for the next fixed slot"
                                 )
                                 break
                             if attempt_num < self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS:
@@ -2252,6 +2267,7 @@ class SurveyController:
         # stage that failed (see _build_ppp_ar_attempt_record()).
         self._last_ppp_ar_run_context = {
             'stage': 'start', 'frequency_selection': None, 'obs_duration_minutes': None,
+            'failure_kind': None,
         }
 
         try:
@@ -2362,6 +2378,7 @@ class SurveyController:
         # The combination is chosen inside process_ppp_ar() before pdp3 runs,
         # so it is known even when pdp3 itself fails.
         self._last_ppp_ar_run_context['frequency_selection'] = getattr(pride, '_last_freq_selection', None)
+        self._last_ppp_ar_run_context['failure_kind'] = getattr(pride, '_last_failure_kind', None)
 
         # Prune old slot directories AFTER this attempt (whether it
         # succeeded or failed) - never before, so a failed attempt's own
@@ -2551,8 +2568,26 @@ class SurveyController:
             'ar_band_calibration': ppp_ar_result.get('band_calibration'),
         }
 
+    def _ppp_ar_failure_info(self, stage: Optional[str] = None) -> Dict:
+        """
+        Classified failure (error_class / max_attempts / reason, see
+        ppp_ar_failure.describe_failure()) for the PPP-AR run that just
+        failed. `stage` overrides the stage recorded by _run_ppp_ar() (used
+        for failures after a successful pdp3 run: fix-rate gate, apply).
+        Remembers the result on self._last_ppp_ar_failure_info for the slot
+        retry loop.
+        """
+        ctx = getattr(self, '_last_ppp_ar_run_context', None) or {}
+        if stage is None:
+            stage = ctx.get('stage')
+        kind = ctx.get('failure_kind') if stage == STAGE_PDP3_FAILED else None
+        info = describe_failure(stage, kind)
+        self._last_ppp_ar_failure_info = info
+        return info
+
     def _log_ppp_ar_attempt(self, slot_label: str, result: str, reason: str,
-                             ppp_ar_result: Optional[Dict] = None) -> None:
+                             ppp_ar_result: Optional[Dict] = None,
+                             failure_info: Optional[Dict] = None) -> None:
         """
         Log one single-line, grep-able PPP-AR attempt summary, fired from
         EVERY return path of both _run_ppp_ar_interim() and the
@@ -2625,13 +2660,23 @@ class SurveyController:
 
         try:
             self.state.record_ppp_ar_attempt(
-                self._build_ppp_ar_attempt_record(slot_label, result, reason, ppp_ar_result)
+                self._build_ppp_ar_attempt_record(slot_label, result, reason, ppp_ar_result,
+                                                  failure_info=failure_info)
             )
         except Exception as e:
             logger.error(f"_log_ppp_ar_attempt: failed to persist attempt record: {e}", exc_info=True)
 
+        # A failed/skipped attempt produced no coordinate: surface the reason
+        # in last_failure_reason (the UI otherwise shows "unknown error").
+        if result in ("FAILED", "SKIPPED"):
+            try:
+                self.state.record_update_failure(f"PPP-AR slot={slot_label}: {reason}")
+            except Exception as e:
+                logger.error(f"_log_ppp_ar_attempt: failed to record failure reason: {e}", exc_info=True)
+
     def _build_ppp_ar_attempt_record(self, slot_label: str, result: str, reason: str,
-                                      ppp_ar_result: Optional[Dict]) -> Dict:
+                                      ppp_ar_result: Optional[Dict],
+                                      failure_info: Optional[Dict] = None) -> Dict:
         """
         Build the Part 5 per-attempt quality-evidence dict persisted by
         StateManager.record_ppp_ar_attempt(). Separated from
@@ -2661,6 +2706,7 @@ class SurveyController:
             'fix_rate_mismatch': None,
             'band_calibration': None,
             'failure_stage': None,
+            'error_class': failure_info['error_class'] if failure_info else None,
         }
         if ppp_ar_result is None:
             # The run produced no result: take what _run_ppp_ar() learned
@@ -2768,7 +2814,9 @@ class SurveyController:
         if ppp_ar_result is None:
             logger.warning(f"PPP-AR interim slot={slot_hours}h: no result - "
                             f"this attempt failed (caller may retry within this same slot)")
-            self._log_ppp_ar_attempt(slot_label, "FAILED", "no result from _run_ppp_ar (pdp3 unavailable/no raw file/RINEX conversion failed/run failed/parse failed)")
+            info = self._ppp_ar_failure_info()
+            self._log_ppp_ar_attempt(slot_label, "FAILED", f"{info['reason']} [{info['error_class']}]",
+                                     failure_info=info)
             return False
 
         if not self._ppp_ar_fix_rate_ok(ppp_ar_result):
@@ -2779,7 +2827,12 @@ class SurveyController:
                 f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
                 f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) - skipping this slot"
             )
-            self._log_ppp_ar_attempt(slot_label, "SKIPPED", "fix rate below threshold", ppp_ar_result)
+            info = self._ppp_ar_failure_info(STAGE_FIX_RATE_BELOW_THRESHOLD)
+            self._log_ppp_ar_attempt(
+                slot_label, "SKIPPED",
+                f"{info['reason']} (WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                f"NL={ppp_ar_result.get('nl_fix_rate')}%) [{info['error_class']}]",
+                ppp_ar_result, failure_info=info)
             return False
 
         logger.info(
@@ -2826,7 +2879,9 @@ class SurveyController:
         if not applied:
             logger.warning(f"PPP-AR interim slot={slot_hours}h: broadcast/state update failed - "
                             f"skipping this slot")
-            self._log_ppp_ar_attempt(slot_label, "FAILED", "apply_geodetic_position failed (geoid/BGS2005/broadcast step)", ppp_ar_result)
+            info = self._ppp_ar_failure_info(STAGE_APPLY_FAILED)
+            self._log_ppp_ar_attempt(slot_label, "FAILED", f"{info['reason']} [{info['error_class']}]",
+                                     ppp_ar_result, failure_info=info)
             return False
 
         self._log_ppp_ar_attempt(slot_label, "SUCCESS", "applied successfully", ppp_ar_result)
@@ -2881,7 +2936,9 @@ class SurveyController:
                             "PPP-AR final run produced no result - no final update this run "
                             "(any prior interim PRIDE-PPPAR position, if any, is still used below)"
                         )
-                        self._log_ppp_ar_attempt("final", "FAILED", "no result from _run_ppp_ar (pdp3 unavailable/no raw file/RINEX conversion failed/run failed/parse failed)")
+                        info = self._ppp_ar_failure_info()
+                        self._log_ppp_ar_attempt("final", "FAILED", f"{info['reason']} [{info['error_class']}]",
+                                                 failure_info=info)
                     elif not self._ppp_ar_fix_rate_ok(ppp_ar_result):
                         logger.warning(
                             f"PPP-AR final run: fix rate below threshold "
@@ -2890,7 +2947,12 @@ class SurveyController:
                             f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
                             f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) - no final update this run"
                         )
-                        self._log_ppp_ar_attempt("final", "SKIPPED", "fix rate below threshold", ppp_ar_result)
+                        info = self._ppp_ar_failure_info(STAGE_FIX_RATE_BELOW_THRESHOLD)
+                        self._log_ppp_ar_attempt(
+                            "final", "SKIPPED",
+                            f"{info['reason']} (WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                            f"NL={ppp_ar_result.get('nl_fix_rate')}%) [{info['error_class']}]",
+                            ppp_ar_result, failure_info=info)
                     else:
                         logger.info(
                             f"✓ PPP-AR final run: fix rate cleared threshold "
@@ -2928,7 +2990,9 @@ class SurveyController:
                         if final_applied:
                             self._log_ppp_ar_attempt("final", "SUCCESS", "applied successfully", ppp_ar_result)
                         else:
-                            self._log_ppp_ar_attempt("final", "FAILED", "apply_geodetic_position failed (geoid/BGS2005/broadcast step)", ppp_ar_result)
+                            info = self._ppp_ar_failure_info(STAGE_APPLY_FAILED)
+                            self._log_ppp_ar_attempt("final", "FAILED", f"{info['reason']} [{info['error_class']}]",
+                                                     ppp_ar_result, failure_info=info)
                 except Exception as ppp_ar_err:
                     logger.error(f"PPP-AR final step failed: {ppp_ar_err}", exc_info=True)
                     self._log_ppp_ar_attempt("final", "FAILED", f"unhandled exception: {ppp_ar_err}")

@@ -1099,6 +1099,23 @@ def _log_download_failure_kinds(text: str, level: int) -> None:
                    f"({len(other)} line(s), not DNS): {other[:5]}")
 
 
+def _looks_like_product_download_failure(stdout, stderr) -> bool:
+    """
+    True when pdp3's own output reports a precise-product download failure,
+    i.e. a line starting with "error:" that mentions PrepareProducts,
+    download or product (CONFIRMED LIVE: pdp3 can exit 0 and still print
+    "error: PrepareProducts failed"). A bare "curl: (28) Timeout" warning
+    line does not match - pdp3 falls back to other mirrors after those.
+    """
+    for text in (stdout, stderr):
+        for line in (text or '').splitlines():
+            low = line.strip().lower()
+            if low.startswith('error:') and any(
+                    word in low for word in ('prepareproducts', 'download', 'product')):
+                return True
+    return False
+
+
 def build_pdp3_args(pdp3, freq, obs_name, sample_interval=PPP_AR_SAMPLE_INTERVAL_S):
     """
     Build the pdp3 command-line argument list.
@@ -1212,6 +1229,10 @@ class PridePpparProcessor:
         Returns:
             Path to the generated pos_* file, or None on failure/timeout.
         """
+        # Why the last run failed (None on success): read by the caller to
+        # tell transient failures (product download) from deterministic ones.
+        self._last_failure_kind = None
+
         if not obs_file.exists():
             logger.error(f"process_ppp_ar: observation file not found: {obs_file}")
             return None
@@ -1285,10 +1306,12 @@ class PridePpparProcessor:
         except subprocess.TimeoutExpired:
             elapsed = (datetime.utcnow() - run_start).total_seconds()
             logger.error(f"process_ppp_ar: pdp3 timeout (>40 minutes) after {elapsed:.1f}s wall-clock")
+            self._last_failure_kind = 'timeout'
             return None
         except Exception as e:
             elapsed = (datetime.utcnow() - run_start).total_seconds()
             logger.error(f"process_ppp_ar: pdp3 processing failed after {elapsed:.1f}s: {e}", exc_info=True)
+            self._last_failure_kind = 'exception'
             return None
 
         elapsed = (datetime.utcnow() - run_start).total_seconds()
@@ -1320,6 +1343,9 @@ class PridePpparProcessor:
         if result.returncode != 0:
             logger.error(f"process_ppp_ar: pdp3 failed (exit {result.returncode}): {result.stderr}")
             _log_pdp3_error_lines(result.stdout, result.stderr, level=logging.ERROR)
+            self._last_failure_kind = ('product_download'
+                                       if _looks_like_product_download_failure(result.stdout, result.stderr)
+                                       else 'nonzero_exit')
             return None
 
         # Search order (first match wins), most-confirmed location first:
@@ -1405,6 +1431,9 @@ class PridePpparProcessor:
             # failure that exit code alone cannot distinguish from
             # success.
             _log_pdp3_error_lines(result.stdout, result.stderr, level=logging.ERROR)
+            self._last_failure_kind = ('product_download'
+                                       if _looks_like_product_download_failure(result.stdout, result.stderr)
+                                       else 'no_pos_file')
             return None
 
         if len(pos_files) > 1:
