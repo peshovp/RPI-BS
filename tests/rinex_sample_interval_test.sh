@@ -60,6 +60,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
             ok("A: no -ti flag without sample_interval")
         else:
             bad("A: unexpected -ti flag without sample_interval")
+        if '-tt' not in args_a:
+            ok("A: no -tt flag without sample_interval")
+        else:
+            bad("A: unexpected -tt flag without sample_interval")
         if args_a[-1] == 'x.ubx':
             ok("A: raw file is last element")
         else:
@@ -78,6 +82,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 bad(f"B: -ti not followed by 30 (got {args_b[ti_idx + 1] if ti_idx + 1 < len(args_b) else 'MISSING'})")
         else:
             bad("B: -ti flag missing")
+        if '-tt' in args_b:
+            tt_idx = args_b.index('-tt')
+            if tt_idx == ti_idx + 2 and args_b[tt_idx + 1] == '0.05':
+                ok("B: -tt 0.05 follows -ti value")
+            else:
+                bad(f"B: -tt not in correct position or value (idx={tt_idx}, val={args_b[tt_idx + 1] if tt_idx + 1 < len(args_b) else 'MISSING'})")
+        else:
+            bad("B: -tt flag missing")
         if args_b[-1] == 'x.ubx':
             ok("B: raw file is last element")
         else:
@@ -98,6 +110,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 ok("C: -ti appears after -te")
             else:
                 bad("C: -ti not after -te")
+            if '-tt' in args_c:
+                tt_idx = args_c.index('-tt')
+                if tt_idx == ti_idx + 2 and args_c[tt_idx + 1] == '0.05':
+                    ok("C: -tt 0.05 follows -ti value")
+                else:
+                    bad(f"C: -tt not in correct position or value (idx={tt_idx}, val={args_c[tt_idx + 1] if tt_idx + 1 < len(args_c) else 'MISSING'})")
+            else:
+                bad("C: -tt flag missing")
             if args_c[-1] == 'x.ubx':
                 ok("C: raw file is last element")
             else:

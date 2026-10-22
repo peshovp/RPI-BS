@@ -88,6 +88,42 @@ timestamps are UTC) died at 13:53 UTC with `completed_hours: 0`:**
 - Station state: `c3634fd`, `main`/`origin/main`, no failed units, disk
   30 %, `throttled=0x0`.
 
+## 2026-10-22: autosurvey repair progress (tasks 3, 4, 5, 7) + offline replay on real data
+
+Committed on `main` (each with tests that fail on the previous code):
+- `e79b03a` task 3a: raw-segment end capped at the configured rotation
+  (the 19-Oct survey had pulled in a 13-Oct file).
+- `6bc481a` task 3b: `time_start` (survey start) passed to every convbin
+  segment conversion.
+- `5ddcb01` task 4: `convbin -ti 30` and `pdp3 -i 30`.
+- `1db0159` task 5: failed attempts keep frequency selection, obs
+  duration and `failure_stage`. *Confirmed:* `-frq` WAS passed to pdp3;
+  the `null` was only the failed-attempt record.
+- `8d36353` task 7: failure classes (`ppp_ar_failure.py`), meaningful
+  reasons, `last_failure_reason` filled, no identical reruns of
+  deterministic failures.
+
+**Offline replay (2026-10-22), read-only copy of `2026-10-19_00.zip`
+from Topolchane, RTKLIB 2.5.0 `convbin` built locally in WSL (same
+flags as the station binary), real repo code:**
+- *Confirmed:* the raw log is complete: 32 399 RAWX epochs, 1 Hz,
+  04:53:52 to 13:53:50 UTC, no gaps. The survey died by the 540-min
+  watchdog, not for lack of data.
+- *Confirmed:* data selection returns only the 19-Oct file (the old
+  13-Oct file is no longer selected).
+- *Confirmed:* frequency selection on that log is `G12 R12 E17` (`-sys
+  GRE`), BeiDou excluded because only 1 satellite carries both bands.
+- *Confirmed BUG in `5ddcb01` (found by this replay, not by its unit
+  tests):* `convbin -ti 30` alone kept only 472 of 1080 epochs, because
+  convbin's default epoch tolerance is 0.005 s and the F9P epoch
+  timestamps jitter ~0.01 s around the whole second. With `-ti 30 -tt
+  0.05` all 1080 epochs are kept (9 h at 30 s). Fix: `-tt 0.05` is
+  added with `-ti` (`SAMPLE_EPOCH_TOLERANCE_S`).
+- *Not yet verified:* a real pdp3 run on this data (pdp3 needs gfortran
+  and the PRIDE products; it cannot be built in this WSL). Quality of
+  the K700 PPP-AR result (WL/NL fix rates vs the 90 % gate) is unknown
+  until a station runs it.
+
 ## 2026-10-05/06/07/10 data-loss incident - summary
 
 A test station lost every raw archive (several zips spanning Sep 23 -

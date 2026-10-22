@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 # default, but relying on a default is how "-f 2" slipped in (below).
 RINEX_VERSION = "3.04"
 
+# convbin's default -tt (0.005 s) drops most epochs of receivers whose
+# timestamps jitter around the whole second; 0.05 s keeps them.
+SAMPLE_EPOCH_TOLERANCE_S = 0.05
+
 # convbin -r format by log file extension. RTKBase names its raw logs
 # "<name>.<receiver_format>" (run_cast.sh out_file), so the extension IS the
 # format settings.conf configured.
@@ -166,7 +170,8 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
     - Optional time window -ts/-te (UTC), e.g. a frozen survey window;
       unused (whole file) by default.
     - Optional output sampling interval -ti (seconds); None = keep every
-      epoch (default).
+      epoch (default). When -ti is given, -tt is added with it (see
+      SAMPLE_EPOCH_TOLERANCE_S).
     """
     args = [str(convbin), "-r", receiver_format, "-v", RINEX_VERSION, "-d", str(output_dir)]
     if marker_name:
@@ -189,6 +194,7 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
         if not math.isfinite(sample_interval) or sample_interval <= 0:
             raise ValueError(f"sample_interval must be a positive finite number, got {sample_interval}")
         args += ["-ti", f"{sample_interval:g}"]
+        args += ["-tt", f"{SAMPLE_EPOCH_TOLERANCE_S:g}"]
     args.append(str(raw_file))
     return args
 
