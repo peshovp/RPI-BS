@@ -27,6 +27,9 @@ _RAW_LOG_SUFFIXES = tuple(s.lstrip('.') for s in _FORMAT_BY_SUFFIX.keys())
 
 _DEFAULT_ROTATE_HOURS = 24.0
 _SEGMENT_END_TOLERANCE_SECONDS = 120.0
+# Plain files are written continuously; their mtime is the last write.
+# Add tolerance for write buffering.
+_MTIME_END_TOLERANCE_SECONDS = 60.0
 
 
 class RTKBaseConfig:
@@ -279,7 +282,11 @@ class RTKBaseConfig:
         or "now" for whichever segment is the newest. Capping at the
         rotation period prevents an old file from appearing to cover the
         window when there is a gap between files (e.g. File service was
-        switched off between surveys). The caller's convbin -ts/-te
+        switched off between surveys). For a plain file the end is also
+        capped at its last-write time (+60 s), so a file that stopped
+        being written before the window started is never selected just
+        because the next file starts shortly after the window start.
+        The caller's convbin -ts/-te
         (time_start passed through from _run_ppp_ar_interim()/
         _finalize_survey()) still trims any data each kept segment has
         outside [start_time, now] - this method only decides WHICH
@@ -354,6 +361,16 @@ class RTKBaseConfig:
         for i, (seg_start, is_plain, ref) in enumerate(dated):
             next_start = dated[i + 1][0] if i + 1 < len(dated) else now
             seg_end = min(next_start, seg_start + max_len)
+            # For plain files, cap at last-write time (+ tolerance) so a
+            # file that stopped being written before the window started
+            # is not selected just because the next file starts shortly
+            # after the window start.
+            if is_plain:
+                try:
+                    mtime_end = datetime.utcfromtimestamp(ref.stat().st_mtime) + timedelta(seconds=_MTIME_END_TOLERANCE_SECONDS)
+                    seg_end = min(seg_end, mtime_end)
+                except OSError:
+                    pass  # fail open: keep seg_end unchanged
             if seg_end >= start_time and seg_start <= now:
                 kept.append((is_plain, ref))
             else:
