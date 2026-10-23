@@ -88,6 +88,37 @@ timestamps are UTC) died at 13:53 UTC with `completed_hours: 0`:**
 - Station state: `c3634fd`, `main`/`origin/main`, no failed units, disk
   30 %, `throttled=0x0`.
 
+## 2026-10-24: live validation on Topolchane (test station, full control) - findings
+
+OTA to `e48e389`, then to `5ce3573`, `edd962e`, `32a08be` (each: position unchanged,
+no failed units, `post_update` audit events). Confirmed live:
+- Survey service: start/stop/reset through the request protocol work; a runner restart
+  resumes a running survey ("resumed after interruption"), also while the survey is in the
+  final retry (same frozen window); File service ownership/stop per the survey-only policy.
+- Real `pdp3` on the 2026-10-19 data (9 h, 30 s, ZED-F9P + K700): WL 100 % / NL 96.7 %,
+  frequencies `G12 R12 E17`, products `rapid`; ~10 min on the Pi.
+- *Bugs found by the live runs and fixed (each with a test that fails on the old code):*
+  audit events of the runner were dropped (import of `audit_logger`); false File-service
+  "crash" at the first health check; `convbin -ti 30` kept only 472 of 1080 epochs
+  (`-tt 0.05`); a raw file that stopped before the survey start was selected because of the
+  next file's start (segment end now capped at the file's last write); pdp3 product failures
+  were not classified because pdp3 output carries ANSI colour codes.
+- *Confirmed product-availability limit (important for the survey design):* for an
+  observation day whose precise products are not published yet, `pdp3` cannot finish. It
+  takes RTS orbit/clock (`WUM0MGXRTS`, OK) but the RTS ERP of the current day has no data
+  row, so `sp3orb` aborts with `***ERROR(read_igserp): end of file igserp` and no `pos_*`
+  is written (exit code 0). The normal RAP ERP/products of a day appear ~13-19 h after the
+  day ends (observed: day 294 published 2026-10-23 12:53 UTC). Consequences: interim PPP-AR
+  slots of a running survey fail on the same day (unless that day's RTS ERP has data); the
+  FINAL position needs the RAP products of every UTC day in the window, i.e. up to ~1-1.5
+  days after the survey ends - exactly what the infinite final retry (Part 7) is for.
+- *Not yet confirmed:* a live final success + application of the position (`_apply_geodetic_position`:
+  BGS2005, ECEF invariant, settings.conf, service restart). A 1 h survey started 2026-10-23
+  21:06 UTC (window 21:06-22:06 UTC, DOY 296) is in the final retry loop on Topolchane; its
+  RAP products are expected on ~2026-10-25 afternoon UTC.
+- Known limitation: the File service keeps logging while the final result is being retried
+  (the survey stays `running`, so the watchdog would flag a stopped File service as critical).
+
 ## 2026-10-23: autosurvey repair progress (tasks 1, 2, 6) - survey as its own service
 
 Committed on `main` (hashes in `git log`): verified daemon-reload in
