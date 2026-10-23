@@ -97,6 +97,38 @@ try:
 except Exception as e:
     bad(f"A6: exception: {e}")
 
+try:
+    if mod._looks_like_product_download_failure('\x1b[0;31merror:\x1b[0m PrepareProducts failed', ''):
+        ok("A7: ANSI-coloured error line detected")
+    else:
+        bad("A7: ANSI-coloured error line not detected")
+except Exception as e:
+    bad(f"A7: exception: {e}")
+
+try:
+    if mod._looks_like_product_download_failure('\x1b[1;33mwarning:\x1b[0m PrepareProducts: failed to download RAP satellite orbit product WUM0MGXRTS_20262960000_01D_05M_ORB.SP3.gz, try downloading RTS products', ''):
+        ok("A8: ANSI-coloured download failure warning detected")
+    else:
+        bad("A8: ANSI-coloured download failure warning not detected")
+except Exception as e:
+    bad(f"A8: exception: {e}")
+
+try:
+    if mod._looks_like_product_download_failure('%%%MESSAGE(read_igserp): ERP read igserp\n***ERROR(read_igserp): end of file igserp', ''):
+        ok("A9: ERP read error detected")
+    else:
+        bad("A9: ERP read error not detected")
+except Exception as e:
+    bad(f"A9: exception: {e}")
+
+try:
+    if not mod._looks_like_product_download_failure('\x1b[1;33mwarning:\x1b[0m no navigation message for GNSS (E): brdm2960.26p', ''):
+        ok("A10: no navigation message warning not flagged")
+    else:
+        bad("A10: no navigation message warning incorrectly flagged")
+except Exception as e:
+    bad(f"A10: exception: {e}")
+
 # Setup for process_ppp_ar tests
 def make_processor():
     p = mod.PridePpparProcessor.__new__(mod.PridePpparProcessor)

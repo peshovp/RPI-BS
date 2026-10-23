@@ -1111,17 +1111,30 @@ def _log_download_failure_kinds(text: str, level: int) -> None:
 
 def _looks_like_product_download_failure(stdout, stderr) -> bool:
     """
-    True when pdp3's own output reports a precise-product download failure,
-    i.e. a line starting with "error:" that mentions PrepareProducts,
-    download or product (CONFIRMED LIVE: pdp3 can exit 0 and still print
-    "error: PrepareProducts failed"). A bare "curl: (28) Timeout" warning
-    line does not match - pdp3 falls back to other mirrors after those.
+    True when pdp3's own output reports a precise-product download failure.
+    pdp3 colours its lines with ANSI escape sequences (e.g. "\x1b[0;31merror:\x1b[0m ..."),
+    so those are stripped before matching.
+
+    Matches when any line (after stripping ANSI codes) satisfies one of:
+      (a) starts with 'error:' and mentions 'prepareproducts', 'download' or 'product';
+      (b) contains 'prepareproducts' and 'failed to download' (e.g. when precise
+          products for the observation day are not published yet - they may appear
+          hours or days later);
+      (c) contains 'read_igserp' (sp3orb aborts with this when the ERP file is empty).
+
+    A bare "curl: (28) Timeout" warning line does not match - pdp3 falls back to
+    other mirrors after those.
     """
+    ansi_re = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
     for text in (stdout, stderr):
         for line in (text or '').splitlines():
-            low = line.strip().lower()
+            low = ansi_re.sub('', line).strip().lower()
             if low.startswith('error:') and any(
                     word in low for word in ('prepareproducts', 'download', 'product')):
+                return True
+            if 'prepareproducts' in low and 'failed to download' in low:
+                return True
+            if 'read_igserp' in low:
                 return True
     return False
 
