@@ -2,12 +2,15 @@
 GNSS Monitor - Monitor GNSS receiver connectivity
 """
 
+import json
 import logging
 import subprocess
 import serial
 import time
 from typing import Dict, Optional
 from pathlib import Path
+
+_DEFAULT_SURVEY_STATE_FILE = "/var/lib/rtkbase/survey_state.json"
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,33 @@ class GNSSMonitor:
                 return resolved
         return None
 
+    def _survey_active(self) -> Optional[bool]:
+        """
+        Whether a survey is currently running or paused. Reads the
+        survey state JSON file persisted by the survey controller.
+        Returns True if running/paused, False if idle/completed/failed
+        or file missing, None if the file exists but cannot be read
+        or parsed (unknown state).
+        """
+        state_file = Path(self.config.get('survey_state_file', _DEFAULT_SURVEY_STATE_FILE))
+
+        if not state_file.exists():
+            return False
+
+        try:
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+            if not isinstance(state, dict) or not isinstance(state.get('survey_state'), str):
+                logger.warning(f"_survey_active: no usable 'survey_state' in {state_file}")
+                return None
+            survey_state = state.get('survey_state')
+            if survey_state in ('running', 'paused'):
+                return True
+            return False
+        except (OSError, ValueError) as e:
+            logger.warning(f"_survey_active: failed to read survey state from {state_file}: {e}")
+            return None
+
     def _file_logging_active(self) -> Optional[bool]:
         """
         Whether str2str_file.service is currently active. None if the
@@ -164,25 +194,45 @@ class GNSSMonitor:
         find the newest RAW (not archived) file's mtime and alert if
         it's older than the warning/critical thresholds.
 
-        SURVEY INTERACTION: Autosurvey's one-owner rule
-        (survey_controller.py's _ensure_file_logging()/
-        _stop_file_logging()) legitimately starts and stops this SAME
-        str2str_file.service - it never writes raw data anywhere else.
-        So "str2str_file is not active" is NOT itself a failure; it's
-        either the user's own choice or a survey intentionally not
-        running continuous logging. Checking is-active FIRST and
-        reporting that state explicitly (rather than only measuring raw
-        file age) avoids a false CRITICAL whenever logging is
-        legitimately stopped, while still raising a real alert if the
-        service IS active but nothing is actually being written (the
-        exact, confirmed failure mode of the incident - the service can
-        show as active while wedged, if the underlying issue is the
-        serial port/receiver rather than the service itself).
+        SURVEY INTERACTION: The File service is survey-only - it runs
+        only while an Autosurvey is running or paused. No survey and
+        service off is normal. A survey running with the service down
+        is critical. The service running without a survey is a warning.
+        Raw data freshness is only checked while a survey is active.
 
         Best-effort and non-fatal - any failure here is logged as a
         warning on the results dict, never raised, since a monitoring
         check must never itself take down the watchdog.
         """
+        survey_active = self._survey_active()
+        file_logging_active = self._file_logging_active()
+
+        if survey_active is False:
+            results['receiver']['raw_data_check'] = (
+                'no survey running - raw logging is survey-only, freshness not checked'
+            )
+            results['receiver']['str2str_file_active'] = file_logging_active
+            if file_logging_active is True:
+                results['status'] = 'warning' if results['status'] == 'ok' else results['status']
+                results['incidents'].append({
+                    'type': 'file_logging_without_survey',
+                    'severity': 'warning',
+                    'message': 'File logging running without a survey'
+                })
+            return
+
+        if survey_active is True and file_logging_active is False:
+            results['status'] = 'critical'
+            results['incidents'].append({
+                'type': 'file_service_down_during_survey',
+                'severity': 'critical',
+                'message': 'A survey is running but str2str_file.service is not active - raw data is NOT being recorded'
+            })
+            results['receiver']['raw_data_check'] = (
+                'survey running but str2str_file.service is not active'
+            )
+            return
+
         data_dir = self._resolve_data_dir()
 
         if data_dir is None:
@@ -210,8 +260,6 @@ class GNSSMonitor:
                 'message': f'Resolved raw-data directory {data_dir} does not exist on disk'
             })
             return
-
-        file_logging_active = self._file_logging_active()
 
         newest_mtime = None
         newest_name = None

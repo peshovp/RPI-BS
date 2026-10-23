@@ -82,6 +82,8 @@ class StateManager:
                 state['consecutive_failures'] = 0
             if 'file_service_owned' not in state:
                 state['file_service_owned'] = False
+            if 'file_service_started_at' not in state:
+                state['file_service_started_at'] = None
             if 'ppp_tier' not in state:
                 state['ppp_tier'] = 'rapid'
             if 'broadcast_height_type' not in state:
@@ -133,6 +135,9 @@ class StateManager:
             # (vs. it already being active before start_survey() was called),
             # so _stop_file_logging() only stops a service it actually owns.
             'file_service_owned': False,
+            # Timestamp (naive UTC ISO string) when the survey took ownership
+            # of the File service (str2str_file.service). None when not owned.
+            'file_service_started_at': None,
             # Which CDDIS precise-product tier this PPP-static survey is
             # using ("ultra-rapid" | "rapid" | "final") - persisted so the
             # Settings UI can display it and recovery (recover_survey())
@@ -245,8 +250,19 @@ class StateManager:
         self.save_state()
 
     def set_file_service_owned(self, owned: bool) -> bool:
-        """Record whether this survey session started str2str_file.service"""
+        """
+        Record whether this survey session started str2str_file.service.
+
+        When owned is truthy, records the current UTC timestamp as the moment
+        the survey took ownership of the File service. When falsy, clears the
+        timestamp. The timestamp is naive UTC (ISO string), consistent with
+        other timestamps in this file.
+        """
         self._state['file_service_owned'] = bool(owned)
+        if owned:
+            self._state['file_service_started_at'] = datetime.utcnow().isoformat()
+        else:
+            self._state['file_service_started_at'] = None
         return self.save_state()
 
     def get_file_service_owned(self) -> bool:

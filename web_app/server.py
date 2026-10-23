@@ -1431,12 +1431,15 @@ def getServicesStatus(emit_pingback=True):
         if file_service is not None:
             try:
                 owned_by_survey = get_survey_controller().state.get_file_service_owned() if SurveyController is not None else False
+                survey_running = get_survey_controller().state.get_status().get("survey_state") in ("running", "paused") if SurveyController is not None else False
             except Exception:
                 owned_by_survey = False
+                survey_running = False
             socketio.emit("file_logging_status", json.dumps({
                 "active": file_service["active"],
                 "enabled": file_service.get("enabled"),
                 "owned_by_survey": owned_by_survey,
+                "survey_running": survey_running,
             }), namespace="/test")
     return services_status
 

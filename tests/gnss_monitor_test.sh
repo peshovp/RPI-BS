@@ -3,6 +3,8 @@
 # raw-data-freshness check (2026-10-05 archive incident fix) and for
 # WatchdogController's config merge bringing the new keys to an existing
 # station's saved watchdog_config.json that predates them.
+# SURVEY-ONLY policy: the File service should only be active during a survey;
+# freshness is only checked when a survey is running or paused.
 #
 # LINUX-ONLY NOTE: this test uses `touch -d`/`stat -c` (GNU coreutils
 # syntax) and mocks `systemctl` - it is written for, and should only be
@@ -45,11 +47,18 @@ chmod +x "$W/bin/systemctl"
 export PATH="$W/bin:$PATH"
 
 run_py() {
-  # $1 = data_dir, $2 = systemctl mock state file (exported for the
-  # mock systemctl script this function's own subshell inherits)
-  GM_TEST_STR2STR_FILE_STATE="$2" "$PYTHON" - "$REPO" "$1" << 'PYEOF'
+  # $1 = data_dir, $2 = systemctl mock state file, $3 = survey state mode (default: running)
+  local survey_mode="${3:-running}"
+  local survey_file="$W/survey_state_$$"
+  case "$survey_mode" in
+    running) echo '{"survey_state": "running"}' > "$survey_file" ;;
+    idle) echo '{"survey_state": "idle"}' > "$survey_file" ;;
+    missing) rm -f "$survey_file" ;;
+    garbage) echo 'not json' > "$survey_file" ;;
+  esac
+  GM_TEST_STR2STR_FILE_STATE="$2" "$PYTHON" - "$REPO" "$1" "$survey_file" << 'PYEOF'
 import sys, importlib.util
-repo, data_dir = sys.argv[1], sys.argv[2]
+repo, data_dir, survey_file = sys.argv[1], sys.argv[2], sys.argv[3]
 spec = importlib.util.spec_from_file_location(
     "gnss_monitor", repo + "/addons/features/watchdog/monitors/gnss_monitor.py")
 gnss_monitor = importlib.util.module_from_spec(spec)
@@ -61,6 +70,7 @@ config = {
     'check_data_stream': False,
     'check_raw_data_freshness': True,
     'data_dir': data_dir,
+    'survey_state_file': survey_file,
 }
 mon = GNSSMonitor(config)
 results = {'status': 'ok', 'receiver': {}, 'incidents': []}
@@ -105,14 +115,14 @@ echo "$OUT"
 echo "$OUT" | grep -q "^STATUS warning" && ok "Case C: status warning (45min stale, active)" || bad "Case C: expected warning status"
 echo "$OUT" | grep -q "^INCIDENT raw_data_stale warning" && ok "Case C: raw_data_stale warning incident raised" || bad "Case C: missing warning incident"
 
-echo "== Case D: str2str_file INACTIVE, old raw file -> no false critical (survey/user stopped it on purpose) =="
+echo "== Case D: survey NOT running, str2str_file INACTIVE, old raw file -> normal (no incident) =="
 D="$W/case_d"; mkdir -p "$D"
 f="$D/2026-10-01_00-00-00_GNSS-1.ubx"
 touch "$f"
 old_epoch=$(( $(date +%s) - 300*60 ))
 python3 -c "import os; os.utime('$f', ($old_epoch, $old_epoch))"
 echo "inactive" > "$W/str2str_file_state_d"
-OUT=$(run_py "$D" "$W/str2str_file_state_d")
+OUT=$(run_py "$D" "$W/str2str_file_state_d" "idle")
 echo "$OUT"
 echo "$OUT" | grep -q "^STATUS ok" && ok "Case D: status ok (inactive = expected stale, not an incident)" || bad "Case D: should be ok, not a false critical"
 echo "$OUT" | grep -q "^INCIDENT" && bad "Case D: false incident raised while logging intentionally stopped" || ok "Case D: no false incident"
@@ -131,10 +141,60 @@ echo "$OUT"
 echo "$OUT" | grep -q "^STATUS critical" && ok "Case E: status critical - fresh .zip did NOT mask the stale raw file" || bad "Case E: a fresh .zip wrongly masked stale raw data"
 
 echo "== Case F: data_dir does not exist -> visible warning, not silent =="
-OUT=$(run_py "$W/nonexistent_dir_xyz" "$W/str2str_file_state_f_missing")
+echo "active" > "$W/str2str_file_state_f"
+OUT=$(run_py "$W/nonexistent_dir_xyz" "$W/str2str_file_state_f" "running")
 echo "$OUT"
 echo "$OUT" | grep -q "^STATUS warning" && ok "Case F: missing data_dir surfaced as a warning" || bad "Case F: missing data_dir not surfaced"
 echo "$OUT" | grep -q "^INCIDENT raw_data_dir_unresolved warning" && ok "Case F: raw_data_dir_unresolved incident raised" || bad "Case F: missing raw_data_dir_unresolved incident"
+
+echo "== Case H: survey running, File service INACTIVE -> critical =="
+D="$W/case_h"; mkdir -p "$D"
+touch "$D/2026-10-06_00-00-00_GNSS-1.ubx"
+echo "inactive" > "$W/str2str_file_state_h"
+OUT=$(run_py "$D" "$W/str2str_file_state_h" "running")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS critical" && ok "Case H: status critical (service down during survey)" || bad "Case H: expected critical status"
+echo "$OUT" | grep -q "^INCIDENT file_service_down_during_survey critical" && ok "Case H: file_service_down_during_survey critical incident raised" || bad "Case H: missing critical incident"
+
+echo "== Case I: survey idle, File service active, fresh raw file -> warning =="
+D="$W/case_i"; mkdir -p "$D"
+touch "$D/2026-10-06_00-00-00_GNSS-1.ubx"
+echo "active" > "$W/str2str_file_state_i"
+OUT=$(run_py "$D" "$W/str2str_file_state_i" "idle")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS warning" && ok "Case I: status warning (logging without survey)" || bad "Case I: expected warning status"
+echo "$OUT" | grep -q "^INCIDENT file_logging_without_survey warning" && ok "Case I: file_logging_without_survey warning incident raised" || bad "Case I: missing warning incident"
+
+echo "== Case J: survey state file missing, service inactive -> ok =="
+D="$W/case_j"; mkdir -p "$D"
+touch "$D/2026-10-06_00-00-00_GNSS-1.ubx"
+echo "inactive" > "$W/str2str_file_state_j"
+OUT=$(run_py "$D" "$W/str2str_file_state_j" "missing")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS ok" && ok "Case J: status ok (no survey state, service inactive)" || bad "Case J: expected ok status"
+echo "$OUT" | grep -q "^INCIDENT" && bad "Case J: unexpected incident raised" || ok "Case J: no incident raised"
+
+echo "== Case K: survey state file garbage, service active, fresh raw file -> ok =="
+D="$W/case_k"; mkdir -p "$D"
+touch "$D/2026-10-06_00-00-00_GNSS-1.ubx"
+echo "active" > "$W/str2str_file_state_k"
+OUT=$(run_py "$D" "$W/str2str_file_state_k" "garbage")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS ok" && ok "Case K: status ok (unknown survey state, fresh data)" || bad "Case K: expected ok status"
+echo "$OUT" | grep -q "^INCIDENT" && bad "Case K: unexpected incident raised" || ok "Case K: no incident raised"
+
+echo "== Case L: survey idle, service active, raw file 300 min old -> warning only (no raw_data_stale) =="
+D="$W/case_l"; mkdir -p "$D"
+f="$D/2026-10-01_00-00-00_GNSS-1.ubx"
+touch "$f"
+old_epoch=$(( $(date +%s) - 300*60 ))
+python3 -c "import os; os.utime('$f', ($old_epoch, $old_epoch))"
+echo "active" > "$W/str2str_file_state_l"
+OUT=$(run_py "$D" "$W/str2str_file_state_l" "idle")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS warning" && ok "Case L: status warning (logging without survey)" || bad "Case L: expected warning status"
+echo "$OUT" | grep -q "^INCIDENT file_logging_without_survey warning" && ok "Case L: file_logging_without_survey warning incident raised" || bad "Case L: missing warning incident"
+echo "$OUT" | grep -q "^INCIDENT raw_data_stale" && bad "Case L: raw_data_stale should not be raised when survey is idle" || ok "Case L: no raw_data_stale incident"
 
 echo "== Case G: existing watchdog_config.json without the new keys still works (defaults merge in) =="
 CFG_OUT=$("$PYTHON" - "$REPO" "$W" << 'PYEOF'

@@ -305,60 +305,36 @@ class SurveyController:
     
     def _ensure_file_logging(self) -> bool:
         """
-        Ensure RTKBase file logging service is enabled.
+        Make sure RTKBase file logging (str2str_file.service) runs for
+        this survey.
 
-        ONE-OWNER rule (confirmed-live incident, 2026-10-01): if the user
-        has ENABLED str2str_file.service via the UI (web_app/
-        ServiceController.start() -> EnableUnitFiles - the same signal
-        0b2dfe5's Watchdog fix uses to recognize a service turned off on
-        purpose), this survey must NEVER claim ownership of it, no matter
-        whether it also happens to be active right now - a plain
-        `systemctl start` (what THIS method does when it starts the
-        service itself) does NOT enable the unit, so "enabled" is a
-        reliable, persistent signal specifically of the user's own
-        choice, never a side effect of Autosurvey's own start call.
-        Ownership is set based on is-enabled, not merely is-active, for
-        exactly this reason - an active-but-not-enabled service is the
-        one case this survey may have started itself (or a previous
-        survey instance did and left it running), the only case where
-        this survey should ever later stop it.
+        SURVEY-ONLY policy (Pesho's decision, 2026-10-14): the File service
+        is OFF by default and runs only while an Autosurvey runs. The
+        survey therefore ALWAYS owns it: it starts it at survey start (a
+        plain `systemctl start`, which does not enable the unit) and
+        _stop_file_logging() stops it when the survey ends for ANY reason.
+        There is no "claim only if inactive" / "only if the user has not
+        enabled it" heuristic any more - the earlier one-owner heuristic
+        (2026-10-01) existed because a stale ownership latch stopped a
+        service while no survey ran; the policy removes the ambiguity
+        instead: ownership lasts exactly as long as the survey. The start
+        time is recorded in the survey state (file_service_started_at).
 
         Returns:
             True if logging is active or successfully started
         """
         try:
-            is_enabled = self._file_logging_enabled_by_user()
-
             result = subprocess.run(
                 ['systemctl', 'is-active', 'str2str_file.service'],
                 capture_output=True,
                 text=True
             )
-            was_already_active = (result.returncode == 0)
-
-            if was_already_active:
-                if is_enabled:
-                    logger.info("✓ File logging service already running and ENABLED "
-                                "(user turned it on via the UI) - never owned by this survey")
-                else:
-                    logger.info("✓ File logging service already running (not owned by this survey)")
-                self.state.set_file_service_owned(False)
+            if result.returncode == 0:
+                logger.info("✓ File logging service already running - owned by this survey "
+                            "for its duration (survey-only policy)")
+                self.state.set_file_service_owned(True)
                 return True
 
-            if is_enabled:
-                # Enabled but not currently active (e.g. transient receiver
-                # hiccup, service restarting) - systemd/the user's own
-                # enablement owns its lifecycle, not this survey. Do NOT
-                # start it ourselves and do NOT claim ownership; a service
-                # the user persistently enabled restarting itself (or via
-                # Watchdog, which DOES still monitor an ENABLED service -
-                # see 0b2dfe5) is not this survey's concern.
-                logger.info("File logging service is ENABLED (user-managed) but not currently "
-                            "active - leaving it alone, not owned by this survey")
-                self.state.set_file_service_owned(False)
-                return True
-
-            # Try to start the service
             logger.info("Starting file logging service...")
             result = subprocess.run(
                 ['systemctl', 'start', 'str2str_file.service'],
@@ -566,30 +542,18 @@ class SurveyController:
 
     def _stop_file_logging(self, reason: str = "unknown") -> bool:
         """
-        Stop RTKBase file logging service to prevent disk space issues.
+        Stop RTKBase file logging service when the survey ends.
 
-        STALE-OWNERSHIP FIX (confirmed-live incident, 2026-10-01):
-        file_service_owned used to be a one-way latch - set True when this
-        survey started the service, but NEVER cleared back to False here,
-        even on a successful stop. It therefore survived indefinitely in
-        survey_state.json, across the survey's own completion, future
-        unrelated recovery attempts, and app restarts (an OTA restarting
-        rtkbase_web.service, confirmed as the trigger for the live
-        incident this comment describes: a stale True from a LONG-FINISHED
-        survey caused an unrelated recovery attempt's _fail() path to stop
-        str2str_file.service ~12h into otherwise-healthy, independent raw
-        logging the user had separately relied on). Now reset to False on
-        every path that leaves this survey definitively not responsible
-        for the service any more (an actual stop, an already-stopped
-        confirmation, or discovering the user has since enabled it) - so
-        ownership never outlives the one survey session that earned it.
-
-        Also re-checks is-enabled (see _file_logging_enabled_by_user())
-        immediately before stopping: if the user has ENABLED the service
-        via the UI since this survey started it (e.g. mid-survey, from
-        the Main Service page), this survey's prior ownership is moot -
-        the service is now user-managed and must never be stopped by this
-        code path, regardless of what file_service_owned still says.
+        SURVEY-ONLY policy (Pesho's decision, 2026-10-14): the survey owns
+        str2str_file.service for its whole duration and stops it when it
+        ends for ANY reason (success, failure, cancel, runner death found
+        on reconcile). No ownership-latch precondition and no is-enabled
+        check: the stale-latch incident of 2026-10-01 (a stale True from a
+        long-finished survey stopped a service the user relied on) is
+        resolved by the policy itself - there is no legitimate File
+        service use outside a survey. A plain `systemctl stop` (never
+        disable - disabling is reserved for the UI toggle) is used, and the
+        ownership flag is cleared on every path.
 
         Args:
             reason: Short label identifying which code path triggered the stop
@@ -597,19 +561,8 @@ class SurveyController:
                 logged for future diagnosis.
 
         Returns:
-            True if logging stopped successfully (or was never this
-            survey's to stop in the first place).
+            True if logging is stopped (or already was).
         """
-        if not self.state.get_file_service_owned():
-            logger.info(f"Skipping file logging stop (reason: {reason}) - service was not started by this survey")
-            return True
-
-        if self._file_logging_enabled_by_user():
-            logger.info(f"Skipping file logging stop (reason: {reason}) - the user has since ENABLED "
-                        f"str2str_file.service via the UI; it is no longer this survey's to stop")
-            self.state.set_file_service_owned(False)
-            return True
-
         logger.info(f"Stopping file logging (reason: {reason})")
         try:
             # Check if service is running first

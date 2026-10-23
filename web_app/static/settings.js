@@ -342,7 +342,22 @@ $(document).ready(function () {
             var switchStatus = $(this).prop('checked');
             //console.log(" e : " + e);
             //console.log("File SwitchStatus : " + switchStatus);
-            socket.emit("services switch", {"name" : "file", "active" : switchStatus});          
+            // GeoMaxima - File service is SURVEY-ONLY: it normally runs only
+            // while an Autosurvey runs (window.gmSurveyRunning is set by
+            // file_logging_status.js). Switching it ON without a survey needs
+            // an explicit confirmation; on cancel the switch goes back to off
+            // silently (no event is sent).
+            if (switchStatus === true && window.gmSurveyRunning !== true) {
+                var proceed = window.confirm(
+                    "The File service is survey-only: it normally runs only while an Autosurvey is running.\n\n" +
+                    "Switching it ON now records raw GNSS data without a survey (disk usage grows and the " +
+                    "Watchdog will warn: \"File logging running without a survey\").\n\nContinue?");
+                if (!proceed) {
+                    fileSwitch.bootstrapToggle('off', true);
+                    return;
+                }
+            }
+            socket.emit("services switch", {"name" : "file", "active" : switchStatus});
         })
 
         // ####################  WIREGUARD service Switch #########################

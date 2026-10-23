@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
-# Unit-style test for survey_controller.py's one-owner rule
-# (_ensure_file_logging()/_stop_file_logging()) - 2026-10-07 review:
-# exhaustively confirmed, by reading the code and by git history search
-# (git log -S"disable"/-S"DisableUnitFiles" across every relevant file,
-# since before the 2026-10-01 incident), that this code path calls PLAIN
-# `systemctl start`/`systemctl stop` via subprocess.run - NEVER
-# ServiceController's pystemd wrapper (whose own stop() ALSO calls
-# DisableUnitFiles, by upstream design, for the UI's own on/off toggle -
-# see web_app/ServiceController.py). This test proves that a survey's
-# own start/stop cycle preserves str2str_file.service's enabled state
-# exactly (start does not enable; stop does not disable) - the actual,
-# confirmed root cause of the 2026-10-01 incident (d8e817a's stale
-# file_service_owned bug) was entirely about WHEN stop was called, never
-# about stop disabling anything it shouldn't have.
+# Unit-style test for survey_controller.py's SURVEY-ONLY policy
+# (_ensure_file_logging()/_stop_file_logging()): the File service is
+# survey-only. The survey ALWAYS owns it: _ensure_file_logging() starts
+# it when inactive (plain start, never enable) or adopts it when already
+# active, and sets ownership True in every case; _stop_file_logging()
+# stops it unconditionally (plain stop, never disable) and clears
+# ownership. There is no "user enabled it, so the survey must not touch
+# it" rule any more.
 #
 # LINUX-ONLY: mocks `systemctl`. Confirmed passing on WSL Ubuntu 24.04
 # this session.
@@ -150,16 +144,12 @@ with open(state_file) as f:
 PYEOF
 }
 
-# GeoMaxima - 2026-10-10 review follow-up: Case C below - the survey
-# claims ownership (service was off), then the USER enables+starts the
-# service mid-survey via the UI toggle (simulated here by mutating the
-# state file directly between _ensure_file_logging() and
-# _stop_file_logging(), standing in for switchService() running in
-# between), then the survey ends. Hand-back must leave the service
-# active+enabled - _stop_file_logging()'s own is-enabled re-check
-# (survey_controller.py's _file_logging_enabled_by_user(), called again
-# immediately before stopping) is the mechanism this test actually
-# exercises, not a new code path.
+# Case C below: the survey claims ownership (service was off), then the
+# user enables+starts the service mid-survey via the UI toggle
+# (simulated by mutating the state file directly between
+# _ensure_file_logging() and _stop_file_logging()), then the survey
+# ends. Under the survey-only policy, the survey stops the service at
+# its end regardless of mid-survey user changes.
 run_py_mid_survey_enable() {
   GM_TEST_STATE_FILE="$1" "$PYTHON" - "$REPO" << 'PYEOF'
 import sys, types, os
@@ -257,22 +247,166 @@ echo "$OUT" | grep -q "^STOP_RESULT True" && ok "Case A: _stop_file_logging() su
 echo "$OUT" | grep -q "^OWNED_AFTER_STOP False" && ok "Case A: ownership released after stop" || bad "Case A: ownership not released"
 echo "$OUT" | grep -q "^STATE_AFTER_STOP inactive,disabled" && ok "Case A: service is inactive and STILL not-enabled after stop (plain systemctl stop, no DisableUnitFiles - was already disabled, stop must not change that either way)" || bad "Case A: service state wrong after stop"
 
-echo "== Case B: service was already enabled+active by the user BEFORE the survey - survey must never claim ownership or touch it =="
+echo "== Case B: service already enabled+active before the survey - the survey owns it anyway (survey-only policy) =="
 echo "active,enabled" > "$W/state_b"
 OUT=$(run_py "$W/state_b")
 echo "$OUT"
-echo "$OUT" | grep -q "^OWNED_AFTER_ENSURE False" && ok "Case B: survey does NOT claim ownership of a user-enabled service" || bad "Case B: survey wrongly claimed ownership"
-echo "$OUT" | grep -q "^STATE_AFTER_ENSURE active,enabled" && ok "Case B: service state completely untouched after ensure (still active+enabled)" || bad "Case B: service state was changed after ensure"
-echo "$OUT" | grep -q "^STATE_AFTER_STOP active,enabled" && ok "Case B: service state completely untouched after stop too (still active+enabled - never this survey's to stop)" || bad "Case B: service state was changed after stop"
+echo "$OUT" | grep -q "^OWNED_AFTER_ENSURE True" && ok "Case B: survey claims ownership (survey-only policy)" || bad "Case B: survey did not claim ownership"
+echo "$OUT" | grep -q "^STATE_AFTER_ENSURE active,enabled" && ok "Case B: service state unchanged after ensure (already active+enabled)" || bad "Case B: service state changed after ensure"
+echo "$OUT" | grep -q "^STOP_RESULT True" && ok "Case B: _stop_file_logging() succeeds" || bad "Case B: _stop_file_logging() failed"
+echo "$OUT" | grep -q "^OWNED_AFTER_STOP False" && ok "Case B: ownership released after stop" || bad "Case B: ownership not released"
+echo "$OUT" | grep -q "^STATE_AFTER_STOP inactive,enabled" && ok "Case B: service stopped but enabled flag untouched (stop never disables)" || bad "Case B: service state wrong after stop"
 
-echo "== Case C: survey claims ownership (service was off), user enables+starts it MID-SURVEY, survey ends - hand-back must leave it active+enabled =="
+echo "== Case C: survey claims ownership (service was off), user enables+starts it MID-SURVEY, survey ends - survey stops it anyway (survey-only policy) =="
 echo "inactive,disabled" > "$W/state_c"
 OUT=$(run_py_mid_survey_enable "$W/state_c")
 echo "$OUT"
 echo "$OUT" | grep -q "^OWNED_AFTER_ENSURE True" && ok "Case C: survey takes ownership initially (service was off)" || bad "Case C: ownership not taken initially"
 echo "$OUT" | grep -q "^STOP_RESULT True" && ok "Case C: _stop_file_logging() succeeds" || bad "Case C: _stop_file_logging() failed"
-echo "$OUT" | grep -q "^OWNED_AFTER_STOP False" && ok "Case C: ownership released (recognized the service is now user-managed)" || bad "Case C: ownership not released"
-echo "$OUT" | grep -q "^STATE_AFTER_STOP active,enabled" && ok "Case C: service left active+enabled after hand-back (mid-survey user-enable preserved, not stopped)" || bad "Case C: service state wrong after hand-back - mid-survey enable was NOT preserved"
+echo "$OUT" | grep -q "^OWNED_AFTER_STOP False" && ok "Case C: ownership released after stop" || bad "Case C: ownership not released"
+echo "$OUT" | grep -q "^STATE_AFTER_STOP inactive,enabled" && ok "Case C: service stopped at survey end regardless of mid-survey user-enable (survey-only policy)" || bad "Case C: service state wrong after stop"
+
+run_py_stop_without_ownership() {
+  GM_TEST_STATE_FILE="$1" "$PYTHON" - "$REPO" << 'PYEOF'
+import sys, types, os
+
+repo = sys.argv[1]
+sys.path.insert(0, repo)
+
+class _Any:
+    def __init__(self, *a, **k): pass
+    def __call__(self, *a, **k): return _Any()
+    def __getattr__(self, n): return _Any()
+for name in ('flask', 'flask_login', 'serial', 'scipy', 'scipy.stats', 'requests'):
+    m = types.ModuleType(name)
+    m.__getattr__ = lambda n: _Any()
+    sys.modules.setdefault(name, m)
+
+class _NoMatch: pass
+npmod = types.ModuleType('numpy')
+npmod.bool_ = _NoMatch; npmod.integer = _NoMatch; npmod.floating = _NoMatch; npmod.ndarray = _NoMatch
+sys.modules.setdefault('numpy', npmod)
+
+try:
+    import pyproj  # noqa
+except ImportError:
+    class _FakeTransformer:
+        def __init__(self, kind): self._kind = kind
+        @classmethod
+        def from_crs(cls, src, dst, always_xy=True): return cls('x')
+        @classmethod
+        def from_pipeline(cls, pipeline): return cls('x')
+        def transform(self, *a): return (0.0, 0.0, 0.0)
+    pyproj_mod = types.ModuleType('pyproj')
+    pyproj_mod.Transformer = _FakeTransformer
+    sys.modules['pyproj'] = pyproj_mod
+
+try:
+    from addons.features.auto_survey import survey_controller as mod
+except Exception as e:
+    print("IMPORT_FAILED", repr(e))
+    sys.exit(0)
+
+class FakeState:
+    def __init__(self):
+        self.owned = False
+    def get_file_service_owned(self):
+        return self.owned
+    def set_file_service_owned(self, v):
+        self.owned = v
+
+class FakeController:
+    pass
+
+ctrl = FakeController()
+ctrl.state = FakeState()
+ctrl._stop_file_logging = mod.SurveyController._stop_file_logging.__get__(ctrl)
+
+import logging
+logging.getLogger().addHandler(logging.NullHandler())
+mod.logger = logging.getLogger("test")
+
+state_file = os.environ["GM_TEST_STATE_FILE"]
+
+print("STOP_RESULT", ctrl._stop_file_logging(reason="test"))
+with open(state_file) as f:
+    print("STATE_AFTER_STOP", f.read().strip())
+PYEOF
+}
+
+echo "== Case D: service active+enabled but ownership flag lost (stale latch) - survey still stops it =="
+echo "active,enabled" > "$W/state_d"
+OUT=$(run_py_stop_without_ownership "$W/state_d")
+echo "$OUT"
+echo "$OUT" | grep -q "^STOP_RESULT True" && ok "Case D: _stop_file_logging() succeeds even without ownership flag" || bad "Case D: _stop_file_logging() failed"
+echo "$OUT" | grep -q "^STATE_AFTER_STOP inactive,enabled" && ok "Case D: service stopped at survey end even if ownership flag was lost" || bad "Case D: service state wrong after stop"
+
+echo "== Case E: StateManager file_service_started_at timestamp lifecycle =="
+STATE_FILE_E="$W/state_e.json"
+OUT=$("$PYTHON" - "$REPO" "$STATE_FILE_E" << 'PYEOF'
+import sys, types, os, json, datetime
+
+repo = sys.argv[1]
+state_file = sys.argv[2]
+sys.path.insert(0, repo)
+
+class _Any:
+    def __init__(self, *a, **k): pass
+    def __call__(self, *a, **k): return _Any()
+    def __getattr__(self, n): return _Any()
+for name in ('flask', 'flask_login', 'serial', 'scipy', 'scipy.stats', 'requests'):
+    m = types.ModuleType(name)
+    m.__getattr__ = lambda n: _Any()
+    sys.modules.setdefault(name, m)
+
+class _NoMatch: pass
+npmod = types.ModuleType('numpy')
+npmod.bool_ = _NoMatch; npmod.integer = _NoMatch; npmod.floating = _NoMatch; npmod.ndarray = _NoMatch
+sys.modules.setdefault('numpy', npmod)
+
+try:
+    import pyproj  # noqa
+except ImportError:
+    class _FakeTransformer:
+        def __init__(self, kind): self._kind = kind
+        @classmethod
+        def from_crs(cls, src, dst, always_xy=True): return cls('x')
+        @classmethod
+        def from_pipeline(cls, pipeline): return cls('x')
+        def transform(self, *a): return (0.0, 0.0, 0.0)
+    pyproj_mod = types.ModuleType('pyproj')
+    pyproj_mod.Transformer = _FakeTransformer
+    sys.modules['pyproj'] = pyproj_mod
+
+try:
+    from addons.features.auto_survey.state_manager import StateManager
+except Exception as e:
+    print("IMPORT_FAILED", repr(e))
+    sys.exit(0)
+
+sm = StateManager(state_file=state_file)
+started = sm.get_status()['file_service_started_at']
+print("STARTED_INITIAL", started)
+
+sm.set_file_service_owned(True)
+started = sm.get_status()['file_service_started_at']
+print("STARTED_AFTER_SET", started)
+try:
+    datetime.datetime.fromisoformat(started)
+    print("PARSE_OK")
+except Exception as e:
+    print("PARSE_FAILED", repr(e))
+
+sm.set_file_service_owned(False)
+started = sm.get_status()['file_service_started_at']
+print("STARTED_AFTER_CLEAR", started)
+PYEOF
+)
+echo "$OUT"
+echo "$OUT" | grep -q "^STARTED_INITIAL None" && ok "Case E: file_service_started_at is None initially" || bad "Case E: initial timestamp not None"
+echo "$OUT" | grep -q "^STARTED_AFTER_SET [0-9]" && ok "Case E: timestamp set after set_file_service_owned(True)" || bad "Case E: timestamp not set"
+echo "$OUT" | grep -q "^PARSE_OK" && ok "Case E: timestamp is valid ISO format" || bad "Case E: timestamp not parseable"
+echo "$OUT" | grep -q "^STARTED_AFTER_CLEAR None" && ok "Case E: timestamp cleared after set_file_service_owned(False)" || bad "Case E: timestamp not cleared"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

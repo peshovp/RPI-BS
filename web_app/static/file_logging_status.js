@@ -1,14 +1,5 @@
-// GeoMaxima - 2026-10-10: visible warning when raw GNSS data is NOT
-// being recorded (File service off or inactive) and no survey
-// currently owns it on purpose - shared by status.html and
-// settings.html, both of which have an
-// <div id="file_logging_warning"> element for this script to fill in.
-//
-// Uses the SAME active/enabled/ownership signal gnss_monitor.py's
-// Watchdog check already reads (server-side, via
-// web_app/server.py's getServicesStatus()'s "file_logging_status"
-// socketio event) - no second detection logic here, this file only
-// renders what the server already computed.
+// GeoMaxima - 2026-10-10: File service is survey-only (OFF by default,
+// runs only while an Autosurvey runs). Shows warnings for abnormal states.
 $(document).ready(function () {
     var warningElt = document.getElementById("file_logging_warning");
     if (!warningElt) {
@@ -20,25 +11,24 @@ $(document).ready(function () {
 
     fileLoggingSocket.on("file_logging_status", function (msg) {
         var status = JSON.parse(msg);
-        if (status.owned_by_survey) {
+        window.gmSurveyRunning = status.survey_running === true;
+
+        if (status.survey_running === true && status.active === true) {
             warningElt.className = "alert alert-info";
-            warningElt.textContent = "Raw logging owned by Autosurvey.";
+            warningElt.textContent = "Raw logging is running for the Autosurvey.";
             warningElt.style.display = "";
-        } else if (status.active !== true || status.enabled !== true) {
+        } else if (status.survey_running === true && status.active !== true) {
+            warningElt.className = "alert alert-danger";
+            warningElt.textContent = "CRITICAL: a survey is running but File logging is NOT active - raw GNSS data is NOT being recorded.";
+            warningElt.style.display = "";
+        } else if (status.survey_running !== true && status.active === true) {
             warningElt.className = "alert alert-warning";
-            warningElt.textContent = "File logging is OFF - raw GNSS data is NOT being recorded.";
+            warningElt.textContent = "File logging is running without a survey. The File service is survey-only; switch it off unless you really need raw logging.";
             warningElt.style.display = "";
         } else {
             warningElt.style.display = "none";
         }
     });
 
-    // Ask once on page load - status.html has no other trigger for
-    // this (it never emits the heavier "get services status" event,
-    // which assumes service-toggle DOM elements this page doesn't
-    // have); settings.html already requests "get services status" at
-    // load, whose handler emits "file_logging_status" too, but asking
-    // again here is harmless (idempotent) and keeps this script
-    // self-contained regardless of which page includes it.
     fileLoggingSocket.emit("get file logging status");
 });
