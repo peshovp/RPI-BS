@@ -113,6 +113,25 @@ class ServiceMonitor:
                         'timestamp': datetime.utcnow().isoformat()
                     })
         
+        # GeoMaxima: Check for units running outdated definitions.
+        # NeedDaemonReload=yes means systemd still runs an old unit file;
+        # the watchdog reports this but never reloads or restarts anything.
+        try:
+            from addons.unit_reload_check import units_needing_reload
+            stale_units = units_needing_reload()
+            for unit in stale_units:
+                results['incidents'].append({
+                    'type': 'unit_needs_reload',
+                    'severity': 'warning',
+                    'service': unit,
+                    'message': f'Unit {unit} is running an outdated definition (NeedDaemonReload=yes) - a daemon-reload is required',
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+            if stale_units and results['status'] == 'ok':
+                results['status'] = 'warning'
+        except Exception as e:
+            logger.debug(f"Failed to check for units needing reload: {e}")
+        
         return results
     
     def _check_service(self, service_name: str) -> Dict:

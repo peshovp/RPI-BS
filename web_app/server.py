@@ -1750,12 +1750,42 @@ def _self_heal_audit_log_and_journald():
     except Exception as e:
         print(f"Self-heal: branch-switch check failed (continuing anyway): {e}")
 
+def _self_heal_unit_reload():
+    """
+        GeoMaxima - 2026-10-23: start-up self-heal for systemd units that
+        need a daemon-reload (systemd still running an OLD unit definition).
+        Covers stations updated by any OTA launcher; idempotent; silent when
+        nothing is wrong.
+    """
+    try:
+        from addons.unit_reload_check import reload_and_restart_changed
+        result = reload_and_restart_changed()
+        if not result.get("reloaded"):
+            return
+        ok = result.get("returncode") == 0 and not result.get("still_needing_reload")
+        details = {
+            "units": result.get("units", []),
+            "restarted": result.get("restarted", []),
+            "restart_failed": result.get("restart_failed", []),
+            "still_needing_reload": result.get("still_needing_reload", []),
+            "returncode": result.get("returncode"),
+        }
+        if ok:
+            print(f"Self-heal: daemon-reload applied for {details['units']}, restarted {details['restarted']}")
+            log_event("startup", "self_heal_unit_reload", details)
+        else:
+            print(f"Self-heal: daemon-reload did NOT clear NeedDaemonReload: {details}")
+            log_event("startup", "self_heal_unit_reload_failed", details)
+    except Exception as e:
+        print(f"Self-heal: unit reload check failed (continuing anyway): {e}")
+
 if __name__ == "__main__":
     args=arg_parse()
     try:
         # GeoMaxima - self-heal BEFORE anything else - covers a station
         # updated by any older OTA launcher, not just the current one.
         _self_heal_audit_log_and_journald()
+        _self_heal_unit_reload()
         #check if a new password is defined in settings.conf
         update_password(rtkbaseconfig)
         #check if authentification is required
