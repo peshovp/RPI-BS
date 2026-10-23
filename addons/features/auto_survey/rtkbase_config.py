@@ -91,12 +91,20 @@ class RTKBaseConfig:
         return None
     
     def get_receiver_info(self) -> Dict[str, str]:
-        """Get receiver information"""
+        """
+        Get receiver information.
+
+        Values are returned without the settings.conf single/double quotes
+        (e.g. antenna_info='ADVNULLANTENNA' -> 'ADVNULLANTENNA').
+        """
+        # settings.conf wraps values in single quotes; strip them and any
+        # surrounding whitespace (including inside the quotes) so the
+        # antenna type matches the ANTEX file and RINEX headers are clean.
         return {
-            'model': self.config.get('main', 'receiver', fallback='Unknown'),
-            'format': self.config.get('main', 'receiver_format', fallback='ubx'),
-            'firmware': self.config.get('main', 'receiver_firmware', fallback=''),
-            'antenna': self.config.get('main', 'antenna_info', fallback=''),
+            'model': self.config.get('main', 'receiver', fallback='Unknown').strip().strip("'\"").strip(),
+            'format': self.config.get('main', 'receiver_format', fallback='ubx').strip().strip("'\"").strip(),
+            'firmware': self.config.get('main', 'receiver_firmware', fallback='').strip().strip("'\"").strip(),
+            'antenna': self.config.get('main', 'antenna_info', fallback='').strip().strip("'\"").strip(),
         }
 
     def get_antenna_arp_offset(self) -> Dict[str, float]:
