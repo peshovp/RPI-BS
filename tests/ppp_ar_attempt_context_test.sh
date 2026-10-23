@@ -86,7 +86,7 @@ def make_controller(tmp, raw_files, rinex_result, pdp3_behaviour):
     c = SC.__new__(SC)
     c.rtkbase = SimpleNamespace(
         rtkbase_root=tmp,
-        get_data_files_since=lambda start_time, extract_dir=None: raw_files,
+        get_data_files_since=lambda start_time, extract_dir=None, end_time=None: raw_files,
         get_receiver_info=lambda: {'model': 'ZED-F9P', 'firmware': '1.0'}
     )
     c.state = SimpleNamespace(

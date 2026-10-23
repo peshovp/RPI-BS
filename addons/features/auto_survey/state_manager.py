@@ -88,6 +88,14 @@ class StateManager:
                 state['last_resumed_at'] = None
             if 'resume_count' not in state:
                 state['resume_count'] = 0
+            if 'final_attempts' not in state:
+                state['final_attempts'] = 0
+            if 'final_next_retry_at' not in state:
+                state['final_next_retry_at'] = None
+            if 'final_last_reason' not in state:
+                state['final_last_reason'] = None
+            if 'last_heartbeat_at' not in state:
+                state['last_heartbeat_at'] = None
             if 'ppp_tier' not in state:
                 state['ppp_tier'] = 'rapid'
             if 'broadcast_height_type' not in state:
@@ -145,6 +153,11 @@ class StateManager:
             # Set when a survey is resumed after an interruption (crash, reboot, service restart).
             'last_resumed_at': None,
             'resume_count': 0,
+            # Final-result retry bookkeeping and liveness heartbeat, shown on the status page
+            'final_attempts': 0,
+            'final_next_retry_at': None,
+            'final_last_reason': None,
+            'last_heartbeat_at': None,
             # Which CDDIS precise-product tier this PPP-static survey is
             # using ("ultra-rapid" | "rapid" | "final") - persisted so the
             # Settings UI can display it and recovery (recover_survey())
@@ -323,6 +336,47 @@ class StateManager:
         if not isinstance(count, int):
             count = 0
         self._state['resume_count'] = count + 1
+        return self.save_state()
+
+    def record_final_attempt(self, attempt: int, reason: str, next_retry_at: Optional[str]) -> bool:
+        """
+        Record a final-position retry attempt.
+
+        Args:
+            attempt: Attempt number
+            reason: Why the attempt failed
+            next_retry_at: ISO timestamp of next retry, or None
+        """
+        self._state['final_attempts'] = int(attempt)
+        self._state['final_last_reason'] = str(reason)[:500]
+        self._state['final_next_retry_at'] = next_retry_at
+        return self.save_state()
+
+    def clear_final_attempts(self) -> bool:
+        """Reset final-position retry bookkeeping."""
+        self._state['final_attempts'] = 0
+        self._state['final_next_retry_at'] = None
+        self._state['final_last_reason'] = None
+        return self.save_state()
+
+    def record_heartbeat(self, min_interval_seconds: float = 0.0) -> bool:
+        """
+        Record a liveness heartbeat, throttled by min_interval_seconds.
+
+        If min_interval_seconds > 0 and the last heartbeat is younger than
+        that interval, skip the write. An unparsable last_heartbeat_at
+        counts as old.
+        """
+        if min_interval_seconds > 0:
+            last = self._state.get('last_heartbeat_at')
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(last)
+                    if (datetime.utcnow() - last_dt).total_seconds() < min_interval_seconds:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+        self._state['last_heartbeat_at'] = datetime.utcnow().isoformat()
         return self.save_state()
 
     def get_file_service_owned(self) -> bool:

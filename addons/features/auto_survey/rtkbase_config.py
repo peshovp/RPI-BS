@@ -248,7 +248,7 @@ class RTKBaseConfig:
 
         return rotate_hours * 3600.0 + overlap_seconds + _SEGMENT_END_TOLERANCE_SECONDS
 
-    def get_data_files_since(self, start_time: datetime, extract_dir: Optional[Path] = None) -> List[Path]:
+    def get_data_files_since(self, start_time: datetime, extract_dir: Optional[Path] = None, end_time: Optional[datetime] = None) -> List[Path]:
         """
         Every raw GNSS log segment overlapping [start_time, now] - unlike
         get_data_file() (latest file only), this follows a survey/slot
@@ -308,12 +308,17 @@ class RTKBaseConfig:
             them chronologically itself. Empty list if nothing overlaps
             (caller should treat this the same as get_data_file()
             returning None).
+
+        end_time (default now) is the end of the window; a segment that
+        starts after it is not selected. The final survey run passes
+        start + target duration so retries hours later still cover
+        exactly the same window.
         """
         if not self.data_dir.exists():
             logger.warning(f"get_data_files_since: data_dir does not exist: {self.data_dir}")
             return []
 
-        now = datetime.utcnow()
+        now = end_time if end_time is not None else datetime.utcnow()
 
         # First pass: every CANDIDATE segment (plain file or zip member)
         # with its parsed start time, unfiltered by the window - needed
@@ -387,9 +392,10 @@ class RTKBaseConfig:
                 logger.warning(f"get_data_files_since: failed to extract {member} from "
                                f"{zip_path.name}: {e}")
 
+        window_end_str = end_time.isoformat() if end_time is not None else "now"
         if not found:
             logger.warning(f"get_data_files_since: no raw segments found overlapping "
-                           f"[{start_time.isoformat()}, now] in {self.data_dir}")
+                           f"[{start_time.isoformat()}, {window_end_str}] in {self.data_dir}")
         else:
             logger.info(f"get_data_files_since({start_time.isoformat()}): "
                        f"{len(found)} segment(s): {[f.name for f in found]}")

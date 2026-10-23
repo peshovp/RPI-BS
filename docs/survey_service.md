@@ -70,3 +70,21 @@ systemctl show -p NeedDaemonReload --value geomaxima_survey.service      # expec
 ls -la /var/lib/rtkbase/survey_requests/                                  # pending/ should be empty
 grep -E 'survey_service_|recovered|self_heal' /var/lib/rtkbase/audit.log | tail
 ```
+
+## Final result: frozen window, infinite retry, no fatal watchdog (Part 7, 2026-10-23)
+
+- The final PPP-AR run processes the FROZEN window [survey start, start + target hours]
+  (`window_end` is derived from the persisted start time and target, so a retry hours
+  later, or after a restart, uses exactly the same data; `get_data_files_since(...,
+  end_time=)` and convbin `-te` enforce it).
+- If the final position fails (no data, conversion, pdp3 error, product download, fix
+  rate below the gate, apply failure) `_finalize_survey` retries it until it is accepted:
+  every 10 min for the first 5 attempts, then hourly. Visible indicators in the status JSON:
+  `final_attempts`, `final_last_reason`, `final_next_retry_at`, and `last_heartbeat_at`
+  (written at most once a minute by the survey loop and during the retry waits).
+- The loop only exits early when the survey is stopped/paused/reset or the service shuts
+  down; the state then stays `running`, so a restart resumes the retry.
+- The 540-minute "no successful update" watchdog is no longer fatal in PPP-AR mode (an
+  hourly warning instead); it still applies to the non-PPP-AR (rnx2rtkp) path.
+- Not done: the Settings UI does not display the new indicators yet (they are in
+  `/api/auto_survey/status`).

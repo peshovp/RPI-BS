@@ -938,6 +938,7 @@ class SurveyController:
             logger.info(f"Using RINEX conversion workflow (RTKBase raw logs → RINEX → PPP-static, tier={self.ppp_tier})")
 
         last_file_logging_check = datetime.min
+        last_overdue_warning = datetime.min
 
         try:
             while self._running:
@@ -957,6 +958,10 @@ class SurveyController:
                 if (now - last_file_logging_check).total_seconds() >= self.FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS:
                     self._check_file_logging_health()
                     last_file_logging_check = now
+
+                # Liveness heartbeat for the status page / operator (written at most
+                # once per HEARTBEAT_INTERVAL_SECONDS).
+                self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
 
                 # Hard timeout: fail if no successful update for too long.
                 # PPP-AR mode uses PPP_AR_UPDATE_TIMEOUT_MINUTES instead of
@@ -983,10 +988,21 @@ class SurveyController:
                             f"No successful coordinate update for {minutes_since_success:.0f} minutes "
                             f"(timeout={effective_timeout_minutes}): {reason}"
                         )
-                        logger.error(msg)
-                        self._fail(msg)
-                        self._running = False
-                        break
+                        if self.ppp_ar_enabled:
+                            # PPP-AR mode: the final result is what counts and it
+                            # is retried until it succeeds; a run of failed or
+                            # skipped interim slots (e.g. an uncalibrated antenna
+                            # below the fix-rate gate) must not kill a survey
+                            # that is still collecting good data. Warn hourly.
+                            if (now - last_overdue_warning).total_seconds() >= 3600:
+                                logger.warning(f"{msg} - not fatal in PPP-AR mode (the final "
+                                               f"result is retried until it succeeds)")
+                                last_overdue_warning = now
+                        else:
+                            logger.error(msg)
+                            self._fail(msg)
+                            self._running = False
+                            break
                 except Exception as timeout_err:
                     logger.warning(f"Timeout check failed: {timeout_err}")
 
@@ -2191,8 +2207,14 @@ class SurveyController:
                 f"(non-fatal, survey will start anyway): {e}"
             )
 
-    def _run_ppp_ar(self, slot_label: str = "unknown") -> Optional[Dict]:
+    def _run_ppp_ar(self, slot_label: str = "unknown",
+                    window_end: Optional[datetime] = None) -> Optional[Dict]:
         """
+        `window_end` (naive UTC) freezes the END of the processed window; the
+        FINAL run passes survey start + target duration so a retry hours
+        later still processes exactly [start, start+target]. None (interim
+        slots) means "up to now".
+
         Run PRIDE-PPPAR (pdp3) for ambiguity-resolved PPP-static
         positioning - the shared worker behind BOTH:
         - the PRIDE-PPPAR-only interim path (_run_ppp_ar_interim(),
@@ -2306,7 +2328,8 @@ class SurveyController:
         rinex_dir = self.work_dir / "rinex" / f"slot_{safe_slot_label}_{run_id}"
 
         extract_dir = rinex_dir / "_extracted_from_zip"
-        raw_files = self.rtkbase.get_data_files_since(survey_start_time, extract_dir=extract_dir)
+        raw_files = self.rtkbase.get_data_files_since(survey_start_time, extract_dir=extract_dir,
+                                                      end_time=window_end)
         if not raw_files:
             logger.warning("_run_ppp_ar: no raw data file found - skipping this run")
             self._last_ppp_ar_run_context['stage'] = 'no_raw_data'
@@ -2332,6 +2355,7 @@ class SurveyController:
             receiver_info=receiver_hr,
             zero_antenna_delta=True,
             time_start=survey_start_time,
+            time_end=window_end,
             sample_interval=PPP_AR_SAMPLE_INTERVAL_S,
         )
         if not rinex_result:
@@ -2887,6 +2911,106 @@ class SurveyController:
         self._log_ppp_ar_attempt(slot_label, "SUCCESS", "applied successfully", ppp_ar_result)
         return True
 
+    # Final-result retry (PPP-AR mode): the final coordinates are retried
+    # until they succeed (CLAUDE.md: "infinite retry until success"), with
+    # visible indicators (state: final_attempts / final_last_reason /
+    # final_next_retry_at, plus last_heartbeat_at). Short delay for the first
+    # attempts (a missing product or a transient network problem usually
+    # clears quickly), then hourly - e.g. rapid precise products for the last
+    # hours of a survey are only published many hours later.
+    FINAL_RETRY_FAST_ATTEMPTS = 5
+    FINAL_RETRY_FAST_SECONDS = 600
+    FINAL_RETRY_SLOW_SECONDS = 3600
+    HEARTBEAT_INTERVAL_SECONDS = 60
+
+    def _final_retry_delay_seconds(self, attempt: int) -> int:
+        """Delay before the next final attempt after `attempt` failed ones."""
+        return (self.FINAL_RETRY_FAST_SECONDS if attempt <= self.FINAL_RETRY_FAST_ATTEMPTS
+                else self.FINAL_RETRY_SLOW_SECONDS)
+
+    def _wait_while_running(self, seconds: float) -> None:
+        """Sleep up to `seconds`, in short steps, returning early as soon as the
+        survey is stopped/paused/reset; keeps the heartbeat fresh meanwhile."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if not self._running or self.state.survey_state != SurveyState.RUNNING:
+                return
+            self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+
+    def _attempt_final_ppp_ar(self, window_end: datetime) -> bool:
+        """
+        One attempt at the FINAL PRIDE-PPPAR position over the frozen window
+        [survey start, window_end]. Returns True only if the position was
+        computed, cleared the fix-rate gate and was applied.
+        """
+        try:
+            ppp_ar_result = self._run_ppp_ar(slot_label="final", window_end=window_end)
+            if ppp_ar_result is None:
+                logger.warning("PPP-AR final run produced no result")
+                info = self._ppp_ar_failure_info()
+                self._log_ppp_ar_attempt("final", "FAILED", f"{info['reason']} [{info['error_class']}]",
+                                         failure_info=info)
+                return False
+            if not self._ppp_ar_fix_rate_ok(ppp_ar_result):
+                logger.warning(
+                    f"PPP-AR final run: fix rate below threshold "
+                    f"(WL={ppp_ar_result.get('wl_fix_rate')}%, need >= "
+                    f"{self.PPP_AR_MIN_WL_FIX_RATE_PERCENT}%; "
+                    f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
+                    f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%)"
+                )
+                info = self._ppp_ar_failure_info(STAGE_FIX_RATE_BELOW_THRESHOLD)
+                self._log_ppp_ar_attempt(
+                    "final", "SKIPPED",
+                    f"{info['reason']} (WL={ppp_ar_result.get('wl_fix_rate')}%, "
+                    f"NL={ppp_ar_result.get('nl_fix_rate')}%) [{info['error_class']}]",
+                    ppp_ar_result, failure_info=info)
+                return False
+            logger.info(
+                f"✓ PPP-AR final run: fix rate cleared threshold "
+                f"(WL={ppp_ar_result['wl_fix_rate']}%, "
+                f"NL={ppp_ar_result['nl_fix_rate']}%) - applying final position"
+            )
+            final_applied = self._apply_geodetic_position(
+                lat=ppp_ar_result['lat'],
+                lon=ppp_ar_result['lon'],
+                height=ppp_ar_result['height'],
+                obs_file=ppp_ar_result['obs_file'],
+                is_final=True,
+                ppp_backend='pride-pppar',
+                position_std={
+                    # No direct N/E/U std available from PRIDE-PPPAR's ECEF
+                    # sigmas - see _run_ppp_ar_interim()'s comment.
+                    'std_lat': 0.0,
+                    'std_lon': 0.0,
+                    'std_height': 0.0,
+                    'std_h_meters': 0.0,
+                },
+                num_epochs=int(ppp_ar_result.get('nobs', 0)),
+                quality_metrics={
+                    'is_final': True,
+                    'ppp_tier': self.ppp_tier,
+                    'still_converging': False,
+                    'ppp_ar_sig0': ppp_ar_result.get('sig0'),
+                    'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
+                    'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
+                },
+                extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
+                ppp_ar_dir=ppp_ar_result.get('ppp_ar_dir'),
+            )
+            if final_applied:
+                self._log_ppp_ar_attempt("final", "SUCCESS", "applied successfully", ppp_ar_result)
+                return True
+            info = self._ppp_ar_failure_info(STAGE_APPLY_FAILED)
+            self._log_ppp_ar_attempt("final", "FAILED", f"{info['reason']} [{info['error_class']}]",
+                                     ppp_ar_result, failure_info=info)
+            return False
+        except Exception as ppp_ar_err:
+            logger.error(f"PPP-AR final step failed: {ppp_ar_err}", exc_info=True)
+            self._log_ppp_ar_attempt("final", "FAILED", f"unhandled exception: {ppp_ar_err}")
+            return False
+
     def _finalize_survey(self):
         """
         Finalize survey at completion:
@@ -2929,73 +3053,37 @@ class SurveyController:
                 # PRIDE-PPPAR-ONLY final update - rnx2rtkp/CDDIS is never
                 # invoked when ppp_ar_enabled is True (see docstring).
                 logger.info("PPP-AR enabled: running PRIDE-PPPAR-only final update (rnx2rtkp/CDDIS skipped)")
-                try:
-                    ppp_ar_result = self._run_ppp_ar(slot_label="final")
-                    if ppp_ar_result is None:
-                        logger.warning(
-                            "PPP-AR final run produced no result - no final update this run "
-                            "(any prior interim PRIDE-PPPAR position, if any, is still used below)"
-                        )
-                        info = self._ppp_ar_failure_info()
-                        self._log_ppp_ar_attempt("final", "FAILED", f"{info['reason']} [{info['error_class']}]",
-                                                 failure_info=info)
-                    elif not self._ppp_ar_fix_rate_ok(ppp_ar_result):
-                        logger.warning(
-                            f"PPP-AR final run: fix rate below threshold "
-                            f"(WL={ppp_ar_result.get('wl_fix_rate')}%, need >= "
-                            f"{self.PPP_AR_MIN_WL_FIX_RATE_PERCENT}%; "
-                            f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
-                            f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) - no final update this run"
-                        )
-                        info = self._ppp_ar_failure_info(STAGE_FIX_RATE_BELOW_THRESHOLD)
-                        self._log_ppp_ar_attempt(
-                            "final", "SKIPPED",
-                            f"{info['reason']} (WL={ppp_ar_result.get('wl_fix_rate')}%, "
-                            f"NL={ppp_ar_result.get('nl_fix_rate')}%) [{info['error_class']}]",
-                            ppp_ar_result, failure_info=info)
-                    else:
-                        logger.info(
-                            f"✓ PPP-AR final run: fix rate cleared threshold "
-                            f"(WL={ppp_ar_result['wl_fix_rate']}%, "
-                            f"NL={ppp_ar_result['nl_fix_rate']}%) - applying final position"
-                        )
-                        final_applied = self._apply_geodetic_position(
-                            lat=ppp_ar_result['lat'],
-                            lon=ppp_ar_result['lon'],
-                            height=ppp_ar_result['height'],
-                            obs_file=ppp_ar_result['obs_file'],
-                            is_final=True,
-                            ppp_backend='pride-pppar',
-                            position_std={
-                                # Same "no direct N/E/U std available"
-                                # caveat as _run_ppp_ar_interim() - see
-                                # that method's comment.
-                                'std_lat': 0.0,
-                                'std_lon': 0.0,
-                                'std_height': 0.0,
-                                'std_h_meters': 0.0,
-                            },
-                            num_epochs=int(ppp_ar_result.get('nobs', 0)),
-                            quality_metrics={
-                                'is_final': True,
-                                'ppp_tier': self.ppp_tier,
-                                'still_converging': False,
-                                'ppp_ar_sig0': ppp_ar_result.get('sig0'),
-                                'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
-                                'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
-                            },
-                            extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
-                            ppp_ar_dir=ppp_ar_result.get('ppp_ar_dir'),
-                        )
-                        if final_applied:
-                            self._log_ppp_ar_attempt("final", "SUCCESS", "applied successfully", ppp_ar_result)
-                        else:
-                            info = self._ppp_ar_failure_info(STAGE_APPLY_FAILED)
-                            self._log_ppp_ar_attempt("final", "FAILED", f"{info['reason']} [{info['error_class']}]",
-                                                     ppp_ar_result, failure_info=info)
-                except Exception as ppp_ar_err:
-                    logger.error(f"PPP-AR final step failed: {ppp_ar_err}", exc_info=True)
-                    self._log_ppp_ar_attempt("final", "FAILED", f"unhandled exception: {ppp_ar_err}")
+                # FROZEN final window: [survey start, start + target]. Derived from
+                # the persisted start time and target, so a retry hours later (or
+                # after a restart) processes exactly the same window.
+                start_raw = before_status.get('start_time')
+                window_end = (datetime.fromisoformat(start_raw) if start_raw else datetime.utcnow()) \
+                    + timedelta(hours=self.target_hours)
+                logger.info(f"Final window frozen at {window_end.isoformat()} (UTC)")
+                attempt = 0
+                final_applied = False
+                # INFINITE RETRY until the final position is accepted (policy);
+                # leaves the loop early only when the survey is stopped/paused/
+                # reset or the service is shutting down (state stays 'running'
+                # so a restart resumes the retry).
+                while self._running and self.state.survey_state == SurveyState.RUNNING:
+                    attempt += 1
+                    self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
+                    final_applied = self._attempt_final_ppp_ar(window_end)
+                    if final_applied:
+                        break
+                    delay = self._final_retry_delay_seconds(attempt)
+                    next_retry = (datetime.utcnow() + timedelta(seconds=delay)).isoformat()
+                    reason = self._last_ppp_ar_attempt_summary or "final attempt failed"
+                    self.state.record_final_attempt(attempt, reason, next_retry)
+                    logger.warning(f"FINAL attempt {attempt} failed - retrying in {delay // 60} min "
+                                   f"(infinite retry until success): {reason}")
+                    self._wait_while_running(delay)
+                if not final_applied:
+                    logger.info("Final retry loop left before success (survey stopped or service "
+                                "shutting down); the survey stays resumable")
+                    return
+                self.state.clear_final_attempts()
             else:
                 # Standard rnx2rtkp/CDDIS final update - unchanged.
                 self._perform_update(is_final=True)
