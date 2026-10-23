@@ -113,7 +113,7 @@ def make_test_env():
 
 # Save original functions
 orig_select = mod.select_frequency_combination
-orig_run = mod.subprocess.run
+orig_run = mod.run_in_process_group
 
 # Replace select_frequency_combination
 mod.select_frequency_combination = lambda f: {'frq': ['G12', 'R12', 'E17'], 'sys': 'GRE', 'fallback': False, 'bands': {}, 'reasons': {}}
@@ -126,7 +126,7 @@ try:
     def fake_run_timeout(*args, **kwargs):
         raise mod.subprocess.TimeoutExpired(cmd='x', timeout=1)
     
-    mod.subprocess.run = fake_run_timeout
+    mod.run_in_process_group = fake_run_timeout
     result = p.process_ppp_ar(obs_file, work_dir)
     if result is None and p._last_failure_kind == 'timeout':
         ok("B: timeout failure kind set")
@@ -135,7 +135,7 @@ try:
 except Exception as e:
     bad(f"B: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case C: exception
@@ -146,7 +146,7 @@ try:
     def fake_run_exception(*args, **kwargs):
         raise OSError('boom')
     
-    mod.subprocess.run = fake_run_exception
+    mod.run_in_process_group = fake_run_exception
     result = p.process_ppp_ar(obs_file, work_dir)
     if result is None and p._last_failure_kind == 'exception':
         ok("C: exception failure kind set")
@@ -155,7 +155,7 @@ try:
 except Exception as e:
     bad(f"C: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case D: product download failure via stdout
@@ -166,7 +166,7 @@ try:
     def fake_run_product_fail(*args, **kwargs):
         return types.SimpleNamespace(returncode=1, stdout='error: PrepareProducts failed', stderr='')
     
-    mod.subprocess.run = fake_run_product_fail
+    mod.run_in_process_group = fake_run_product_fail
     result = p.process_ppp_ar(obs_file, work_dir)
     if result is None and p._last_failure_kind == 'product_download':
         ok("D: product download failure kind set")
@@ -175,7 +175,7 @@ try:
 except Exception as e:
     bad(f"D: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case E: nonzero exit
@@ -186,7 +186,7 @@ try:
     def fake_run_nonzero(*args, **kwargs):
         return types.SimpleNamespace(returncode=1, stdout='whatever', stderr='')
     
-    mod.subprocess.run = fake_run_nonzero
+    mod.run_in_process_group = fake_run_nonzero
     result = p.process_ppp_ar(obs_file, work_dir)
     if result is None and p._last_failure_kind == 'nonzero_exit':
         ok("E: nonzero exit failure kind set")
@@ -195,7 +195,7 @@ try:
 except Exception as e:
     bad(f"E: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case F: product download failure via stdout with returncode 0
@@ -206,7 +206,7 @@ try:
     def fake_run_product_fail_rc0(*args, **kwargs):
         return types.SimpleNamespace(returncode=0, stdout='error: download of clock product failed', stderr='')
     
-    mod.subprocess.run = fake_run_product_fail_rc0
+    mod.run_in_process_group = fake_run_product_fail_rc0
     result = p.process_ppp_ar(obs_file, work_dir)
     if result is None and p._last_failure_kind == 'product_download':
         ok("F: product download failure kind set (rc=0)")
@@ -215,7 +215,7 @@ try:
 except Exception as e:
     bad(f"F: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case G: no pos file
@@ -226,7 +226,7 @@ try:
     def fake_run_ok_no_pos(*args, **kwargs):
         return types.SimpleNamespace(returncode=0, stdout='ok', stderr='')
     
-    mod.subprocess.run = fake_run_ok_no_pos
+    mod.run_in_process_group = fake_run_ok_no_pos
     result = p.process_ppp_ar(obs_file, work_dir)
     if result is None and p._last_failure_kind == 'no_pos_file':
         ok("G: no pos file failure kind set")
@@ -235,7 +235,7 @@ try:
 except Exception as e:
     bad(f"G: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case H: success
@@ -250,7 +250,7 @@ try:
     def fake_run_ok(*args, **kwargs):
         return types.SimpleNamespace(returncode=0, stdout='ok', stderr='')
     
-    mod.subprocess.run = fake_run_ok
+    mod.run_in_process_group = fake_run_ok
     result = p.process_ppp_ar(obs_file, work_dir)
     if result == pos_file and p._last_failure_kind is None:
         ok("H: success returns pos file path")
@@ -259,7 +259,7 @@ try:
 except Exception as e:
     bad(f"H: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Case I: staleness - kind is cleared on success
@@ -271,7 +271,7 @@ try:
     def fake_run_fail(*args, **kwargs):
         return types.SimpleNamespace(returncode=1, stdout='error: PrepareProducts failed', stderr='')
     
-    mod.subprocess.run = fake_run_fail
+    mod.run_in_process_group = fake_run_fail
     p.process_ppp_ar(obs_file, work_dir)
     
     # Now succeed
@@ -281,7 +281,7 @@ try:
     def fake_run_ok2(*args, **kwargs):
         return types.SimpleNamespace(returncode=0, stdout='ok', stderr='')
     
-    mod.subprocess.run = fake_run_ok2
+    mod.run_in_process_group = fake_run_ok2
     result = p.process_ppp_ar(obs_file, work_dir)
     if result == pos_file and p._last_failure_kind is None:
         ok("I: failure kind cleared on success")
@@ -290,12 +290,12 @@ try:
 except Exception as e:
     bad(f"I: exception: {e}")
 finally:
-    mod.subprocess.run = orig_run
+    mod.run_in_process_group = orig_run
     shutil.rmtree(tmp)
 
 # Restore original functions
 mod.select_frequency_combination = orig_select
-mod.subprocess.run = orig_run
+mod.run_in_process_group = orig_run
 
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 sys.exit(FAIL)

@@ -14,6 +14,16 @@ from typing import List, Optional, Tuple
 from datetime import datetime, timezone
 import platform
 import shutil
+import os
+try:
+    from .process_group import run_in_process_group
+except ImportError:  # loaded standalone (tests): load the sibling module by path
+    import importlib.util as _ilu
+    _pg_spec = _ilu.spec_from_file_location(
+        "process_group", os.path.join(os.path.dirname(os.path.abspath(__file__)), "process_group.py"))
+    _pg_mod = _ilu.module_from_spec(_pg_spec)
+    _pg_spec.loader.exec_module(_pg_mod)
+    run_in_process_group = _pg_mod.run_in_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -300,12 +310,7 @@ class RINEXConverter:
             logger.info(f"Converting {input_file.name} to RINEX...")
             logger.debug(f"Command: {' '.join(cmd)}")
             
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
+            result = run_in_process_group(cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
             
             if result.returncode != 0:
                 logger.error(f"convbin failed: {result.stderr}")
@@ -396,7 +401,7 @@ class RINEXConverter:
                         + (f" (window {time_start} .. {time_end} UTC)" if time_start or time_end else ""))
             logger.info(f"convbin command: {' '.join(cmd)}")
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = run_in_process_group(cmd, capture_output=True, text=True, timeout=300)
             
             if result.returncode != 0:
                 logger.warning(f"convbin warning: {result.stderr}")

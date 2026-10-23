@@ -93,6 +93,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+try:
+    from .process_group import run_in_process_group
+except ImportError:  # loaded standalone (tests): load the sibling module by path
+    import importlib.util as _ilu
+    _pg_spec = _ilu.spec_from_file_location(
+        "process_group", os.path.join(os.path.dirname(os.path.abspath(__file__)), "process_group.py"))
+    _pg_mod = _ilu.module_from_spec(_pg_spec)
+    _pg_spec.loader.exec_module(_pg_mod)
+    run_in_process_group = _pg_mod.run_in_process_group
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -1277,7 +1287,9 @@ class PridePpparProcessor:
         # the SAME shell process that execs it (see module docstring) - a
         # bash -c wrapper with `ulimit -s unlimited; exec pdp3 ...`, not a
         # direct argv subprocess call and not a Python-side
-        # resource.setrlimit() call.
+        # resource.setrlimit() call. pdp3 runs in its own process group
+        # which is killed as a whole on timeout, so no orphan downloads or
+        # programs survive.
         shell_cmd = f"ulimit -s unlimited; exec {' '.join(pdp3_args)}"
         full_command_line = f'bash -c "{shell_cmd}"'
 
@@ -1295,7 +1307,7 @@ class PridePpparProcessor:
         logger.info(f"process_ppp_ar: full command line: {full_command_line}")
 
         try:
-            result = subprocess.run(
+            result = run_in_process_group(
                 ["bash", "-c", shell_cmd],
                 cwd=work_dir,
                 timeout=2400,
