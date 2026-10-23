@@ -88,6 +88,21 @@ timestamps are UTC) died at 13:53 UTC with `completed_hours: 0`:**
 - Station state: `c3634fd`, `main`/`origin/main`, no failed units, disk
   30 %, `throttled=0x0`.
 
+## 2026-10-23: autosurvey repair progress (tasks 1, 2, 6) - survey as its own service
+
+Committed on `main` (hashes in `git log`): verified daemon-reload in
+`post_update.sh` + web start-up self-heal + watchdog warning (task 1); File
+service survey-only policy in the survey, watchdog and UI (task 2); pdp3/convbin in
+their own process group with a killed-as-a-whole timeout; and the survey as its own
+service `geomaxima_survey.service` with a request protocol, reconcile/resume,
+`recovery_pending` retries and atomic shared state (task 6). Design, semantics and
+known limitations: `docs/survey_service.md`. An independent read-only review of the
+split found four real defects (user-stopped survey resumed, healthy survey failed on a
+slow receiver, blocking start-up wait, stale `running` shown as alive); all fixed
+before the commit. *Not yet verified on a station:* the unit deployment, the
+runner start/resume, the restart behaviour during an OTA. Next: task 8
+(`antenna_info` quotes), then OTA to Topolchane and a smoke survey.
+
 ## 2026-10-22: autosurvey repair progress (tasks 3, 4, 5, 7) + offline replay on real data
 
 Committed on `main` (each with tests that fail on the previous code):

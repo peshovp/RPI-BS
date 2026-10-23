@@ -140,11 +140,12 @@ class GNSSMonitor:
 
     def _survey_active(self) -> Optional[bool]:
         """
-        Whether a survey is currently running or paused. Reads the
-        survey state JSON file persisted by the survey controller.
-        Returns True if running/paused, False if idle/completed/failed
-        or file missing, None if the file exists but cannot be read
-        or parsed (unknown state).
+        Whether a survey is currently running. Reads the survey state
+        JSON file persisted by the survey controller. Returns True if
+        running, False if paused/idle/completed/failed or file missing,
+        None if the file exists but cannot be read or parsed (unknown
+        state). A paused survey means the user stopped it and is no
+        longer considered active.
         """
         state_file = Path(self.config.get('survey_state_file', _DEFAULT_SURVEY_STATE_FILE))
 
@@ -158,7 +159,7 @@ class GNSSMonitor:
                 logger.warning(f"_survey_active: no usable 'survey_state' in {state_file}")
                 return None
             survey_state = state.get('survey_state')
-            if survey_state in ('running', 'paused'):
+            if survey_state == 'running':
                 return True
             return False
         except (OSError, ValueError) as e:
@@ -195,10 +196,12 @@ class GNSSMonitor:
         it's older than the warning/critical thresholds.
 
         SURVEY INTERACTION: The File service is survey-only - it runs
-        only while an Autosurvey is running or paused. No survey and
-        service off is normal. A survey running with the service down
-        is critical. The service running without a survey is a warning.
-        Raw data freshness is only checked while a survey is active.
+        only while an Autosurvey is running. No survey and service off
+        is normal. A survey running with the service down is critical.
+        The service running without a survey is a warning. Raw data
+        freshness is only checked while a survey is active. A paused
+        survey means the user stopped it and is no longer considered
+        active.
 
         Best-effort and non-fatal - any failure here is logged as a
         warning on the results dict, never raised, since a monitoring

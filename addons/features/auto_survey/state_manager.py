@@ -84,6 +84,10 @@ class StateManager:
                 state['file_service_owned'] = False
             if 'file_service_started_at' not in state:
                 state['file_service_started_at'] = None
+            if 'last_resumed_at' not in state:
+                state['last_resumed_at'] = None
+            if 'resume_count' not in state:
+                state['resume_count'] = 0
             if 'ppp_tier' not in state:
                 state['ppp_tier'] = 'rapid'
             if 'broadcast_height_type' not in state:
@@ -138,6 +142,9 @@ class StateManager:
             # Timestamp (naive UTC ISO string) when the survey took ownership
             # of the File service (str2str_file.service). None when not owned.
             'file_service_started_at': None,
+            # Set when a survey is resumed after an interruption (crash, reboot, service restart).
+            'last_resumed_at': None,
+            'resume_count': 0,
             # Which CDDIS precise-product tier this PPP-static survey is
             # using ("ultra-rapid" | "rapid" | "final") - persisted so the
             # Settings UI can display it and recovery (recover_survey())
@@ -210,24 +217,63 @@ class StateManager:
     
     def save_state(self) -> bool:
         """
-        Save current state to disk
+        Save current state to disk atomically.
+        
+        Writes to a temporary file in the same directory, fsyncs it, then
+        atomically replaces the target file. This prevents a concurrent
+        reader from seeing a half-written file.
         
         Returns:
             True if saved successfully
         """
+        tmp_path = self.state_file.with_name(f"{self.state_file.name}.tmp")
         try:
             # Convert numpy types before saving
             state_converted = self._convert_numpy(self._state)
             
-            with open(self.state_file, 'w') as f:
+            with open(tmp_path, 'w') as f:
                 json.dump(state_converted, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             
             # Set explicit permissions: owner read/write only (0o600)
-            os.chmod(self.state_file, 0o600)
+            os.chmod(tmp_path, 0o600)
+            
+            # Atomic replace
+            os.replace(tmp_path, self.state_file)
             
             return True
         except Exception as e:
+            # Clean up temp file on failure
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
             logger.error(f"Failed to save state: {e}")
+            return False
+
+    def reload(self) -> bool:
+        """
+        Re-read the state file from disk.
+        
+        Used by the web application, which only reads the state the runner
+        service writes. If the file does not exist, returns False and keeps
+        the current in-memory state.
+        
+        Returns:
+            True if reloaded successfully
+        """
+        if not self.state_file.exists():
+            return False
+        try:
+            # Verify the file parses as JSON before loading state
+            with open(self.state_file, 'r') as f:
+                json.load(f)
+            new_state = self._load_state()
+            self._state = new_state
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to reload state: {e}")
             return False
 
     def mark_applied(self, position: Optional[Dict[str, Any]] = None):
@@ -263,6 +309,20 @@ class StateManager:
             self._state['file_service_started_at'] = datetime.utcnow().isoformat()
         else:
             self._state['file_service_started_at'] = None
+        return self.save_state()
+
+    def record_resume(self) -> bool:
+        """
+        Record that the survey was resumed after an interruption.
+
+        Called by the survey controller when it resumes a survey that was
+        interrupted (crash, reboot, service restart).
+        """
+        self._state['last_resumed_at'] = datetime.utcnow().isoformat()
+        count = self._state.get('resume_count')
+        if not isinstance(count, int):
+            count = 0
+        self._state['resume_count'] = count + 1
         return self.save_state()
 
     def get_file_service_owned(self) -> bool:
@@ -633,9 +693,10 @@ class StateManager:
         Check if survey can be recovered after restart
         
         Returns:
-            True if survey was running/paused and can be resumed
+            True if the survey was running and can be resumed; a paused survey
+            was stopped by the user and is never resumed automatically
         """
-        if self.survey_state in [SurveyState.RUNNING, SurveyState.PAUSED]:
+        if self.survey_state == SurveyState.RUNNING:
             if self._state['start_time']:
                 start = datetime.fromisoformat(self._state['start_time'])
                 now = datetime.utcnow()

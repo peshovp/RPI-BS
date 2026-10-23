@@ -1,0 +1,25 @@
+[Unit]
+Description=GeoMaxima Autosurvey runner
+Documentation=https://github.com/peshovp/GeoMaxima-BS
+After=network-online.target str2str_tcp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root: starts/stops str2str_file, writes settings.conf, restarts services
+User=root
+SyslogIdentifier=geomaxima_survey
+WorkingDirectory={script_path}
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:{home}/.PRIDE_PPPAR_BIN"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart={python_path} -m addons.features.auto_survey.survey_runner
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=60
+# KillMode=control-group ensures pdp3/convbin and all children die with the service
+KillMode=control-group
+# On stop the runner leaves persisted survey state untouched, so a restart,
+# reboot or crash resumes the survey ("resumed after interruption")
+
+[Install]
+WantedBy=multi-user.target

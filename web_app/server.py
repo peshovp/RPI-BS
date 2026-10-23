@@ -581,15 +581,50 @@ def settings_page():
 _survey_controller = None
 
 def get_survey_controller():
-    """Lazily instantiate the singleton SurveyController"""
+    """
+    Lazily instantiate the web application's SurveyController.
+
+    The survey itself runs in its own service (geomaxima_survey.service, see
+    addons/features/auto_survey/survey_runner.py), which owns the survey
+    thread, the recovery after an interruption and every state change. This
+    controller is READ-ONLY here: its get_status() reloads the persisted
+    state from disk, and it serves the geoid helpers. Never call
+    start/stop/reset/recover on it - use _survey_request() instead.
+    """
     global _survey_controller
     if _survey_controller is None:
         _survey_controller = SurveyController()
-        try:
-            _survey_controller.recover_survey()
-        except Exception as e:
-            print(f"Auto Survey-In recovery failed: {e}")
     return _survey_controller
+
+def _fresh_survey_state():
+    """The web controller's StateManager, re-read from disk (the runner writes it)."""
+    state = get_survey_controller().state
+    state.reload()
+    return state
+
+SURVEY_SERVICE_UNIT = "geomaxima_survey.service"
+
+def _survey_request(action, params=None, timeout=30, request_dir=None):
+    """
+    Ask the survey runner service to start / stop / reset the survey and wait
+    for its answer. Returns the result dict {'ok', 'message', ...}, or None
+    if the service did not answer in time (the request is then withdrawn so
+    it cannot run later). Raises RuntimeError if the service cannot be started.
+    `request_dir` overrides the default request directory (tests).
+    """
+    from addons.features.auto_survey import survey_requests
+    kw = {"request_dir": request_dir} if request_dir else {}
+    request_id = survey_requests.submit_request(action, params, **kw)
+    start = subprocess.run(["systemctl", "start", SURVEY_SERVICE_UNIT],
+                           capture_output=True, text=True, timeout=60)
+    if start.returncode != 0:
+        survey_requests.cancel_request(request_id, **kw)
+        raise RuntimeError(f"Survey service {SURVEY_SERVICE_UNIT} could not be started: "
+                           f"{start.stderr.strip() or 'systemctl start failed'}")
+    result = survey_requests.wait_for_result(request_id, timeout, **kw)
+    if result is None:
+        survey_requests.cancel_request(request_id, **kw)
+    return result
 
 @app.route('/api/auto_survey/start', methods=['POST'])
 @login_required
@@ -620,13 +655,14 @@ def auto_survey_start():
         ppp_ar_enabled = data.get('ppp_ar_enabled', False)
         if not isinstance(ppp_ar_enabled, bool):
             return jsonify({"error": "ppp_ar_enabled must be a boolean"}), 400
-        controller = get_survey_controller()
-        started = controller.start_survey(target_hours=target_hours, ppp_tier=ppp_tier,
-                                           ppp_ar_enabled=ppp_ar_enabled)
-        if started:
+        result = _survey_request("start", {"target_hours": target_hours, "ppp_tier": ppp_tier,
+                                           "ppp_ar_enabled": ppp_ar_enabled})
+        if result is None:
+            return jsonify({"error": f"The survey service ({SURVEY_SERVICE_UNIT}) did not answer in time"}), 504
+        if result.get("ok"):
             return jsonify({"status": "started"})
-        else:
-            return jsonify({"error": "Survey could not be started (already running?)"}), 409
+        message = result.get("message") or "Survey could not be started"
+        return jsonify({"error": f"Survey could not be started: {message}"}), (409 if "already running" in message else 400)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -638,8 +674,11 @@ def auto_survey_stop():
         print("Auto Survey-In STOP requested via REST endpoint")
         if SurveyController is None:
             return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
-        controller = get_survey_controller()
-        controller.stop_survey()
+        result = _survey_request("stop")
+        if result is None:
+            return jsonify({"error": f"The survey service ({SURVEY_SERVICE_UNIT}) did not answer in time"}), 504
+        if not result.get("ok"):
+            return jsonify({"error": result.get("message") or "Survey could not be stopped"}), 500
         return jsonify({"status": "stopped"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -651,8 +690,11 @@ def auto_survey_reset():
     try:
         if SurveyController is None:
             return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
-        controller = get_survey_controller()
-        controller.reset_survey()
+        result = _survey_request("reset")
+        if result is None:
+            return jsonify({"error": f"The survey service ({SURVEY_SERVICE_UNIT}) did not answer in time"}), 504
+        if not result.get("ok"):
+            return jsonify({"error": result.get("message") or "Survey could not be reset"}), 500
         return jsonify({"status": "reset"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1430,8 +1472,11 @@ def getServicesStatus(emit_pingback=True):
         file_service = next((s for s in services_status if s["name"] == "file"), None)
         if file_service is not None:
             try:
-                owned_by_survey = get_survey_controller().state.get_file_service_owned() if SurveyController is not None else False
-                survey_running = get_survey_controller().state.get_status().get("survey_state") in ("running", "paused") if SurveyController is not None else False
+                # The runner service writes the state: re-read it from disk.
+                survey_state = _fresh_survey_state() if SurveyController is not None else None
+                owned_by_survey = survey_state.get_file_service_owned() if survey_state is not None else False
+                survey_running = (survey_state.get_status().get("survey_state") == "running"
+                                  if survey_state is not None else False)
             except Exception:
                 owned_by_survey = False
                 survey_running = False
@@ -1782,6 +1827,44 @@ def _self_heal_unit_reload():
     except Exception as e:
         print(f"Self-heal: unit reload check failed (continuing anyway): {e}")
 
+def _self_heal_survey_service(state_file="/var/lib/rtkbase/survey_state.json"):
+    """
+        GeoMaxima - 2026-10-23: start-up self-heal for the survey runner
+        service. If the persisted survey state says a survey is running but
+        the service is not active, start it so the runner can resume. A
+        paused survey was stopped by the user and must not be resumed.
+        Idempotent; silent when nothing is wrong.
+    """
+    try:
+        state_path = Path(state_file)
+        if not state_path.exists():
+            return
+        with open(state_path, "r") as f:
+            data = json.load(f)
+        survey_state = data.get("survey_state") if isinstance(data, dict) else None
+        if survey_state != "running":
+            return
+        active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", SURVEY_SERVICE_UNIT],
+            capture_output=True, text=True, timeout=30,
+        )
+        if active.returncode == 0:
+            return
+        start = subprocess.run(
+            ["systemctl", "start", SURVEY_SERVICE_UNIT],
+            capture_output=True, text=True, timeout=60,
+        )
+        if start.returncode == 0:
+            print(f"Self-heal: started {SURVEY_SERVICE_UNIT} (survey state is {survey_state})")
+            log_event("startup", "self_heal_survey_service", {"survey_state": survey_state})
+        else:
+            print(f"Self-heal: could not start {SURVEY_SERVICE_UNIT}: {start.stderr.strip()}")
+            log_event("startup", "self_heal_survey_service_failed", {
+                "survey_state": survey_state, "error": start.stderr.strip(),
+            })
+    except Exception as e:
+        print(f"Self-heal: survey service check failed (continuing anyway): {e}")
+
 if __name__ == "__main__":
     args=arg_parse()
     try:
@@ -1789,6 +1872,7 @@ if __name__ == "__main__":
         # updated by any older OTA launcher, not just the current one.
         _self_heal_audit_log_and_journald()
         _self_heal_unit_reload()
+        _self_heal_survey_service()
         #check if a new password is defined in settings.conf
         update_password(rtkbaseconfig)
         #check if authentification is required

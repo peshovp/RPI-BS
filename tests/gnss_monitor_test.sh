@@ -53,6 +53,7 @@ run_py() {
   case "$survey_mode" in
     running) echo '{"survey_state": "running"}' > "$survey_file" ;;
     idle) echo '{"survey_state": "idle"}' > "$survey_file" ;;
+    paused) echo '{"survey_state": "paused"}' > "$survey_file" ;;
     missing) rm -f "$survey_file" ;;
     garbage) echo 'not json' > "$survey_file" ;;
   esac
@@ -195,6 +196,24 @@ echo "$OUT"
 echo "$OUT" | grep -q "^STATUS warning" && ok "Case L: status warning (logging without survey)" || bad "Case L: expected warning status"
 echo "$OUT" | grep -q "^INCIDENT file_logging_without_survey warning" && ok "Case L: file_logging_without_survey warning incident raised" || bad "Case L: missing warning incident"
 echo "$OUT" | grep -q "^INCIDENT raw_data_stale" && bad "Case L: raw_data_stale should not be raised when survey is idle" || ok "Case L: no raw_data_stale incident"
+
+echo "== Case M: survey paused, File service active, fresh raw file -> warning (paused is not active) =="
+D="$W/case_m"; mkdir -p "$D"
+touch "$D/2026-10-06_00-00-00_GNSS-1.ubx"
+echo "active" > "$W/str2str_file_state_m"
+OUT=$(run_py "$D" "$W/str2str_file_state_m" "paused")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS warning" && ok "Case M: status warning (paused survey, service active)" || bad "Case M: expected warning status"
+echo "$OUT" | grep -q "^INCIDENT file_logging_without_survey warning" && ok "Case M: file_logging_without_survey warning incident raised" || bad "Case M: missing warning incident"
+
+echo "== Case M2: survey paused, File service inactive -> ok =="
+D="$W/case_m2"; mkdir -p "$D"
+touch "$D/2026-10-06_00-00-00_GNSS-1.ubx"
+echo "inactive" > "$W/str2str_file_state_m2"
+OUT=$(run_py "$D" "$W/str2str_file_state_m2" "paused")
+echo "$OUT"
+echo "$OUT" | grep -q "^STATUS ok" && ok "Case M2: status ok (paused survey, service inactive)" || bad "Case M2: expected ok status"
+echo "$OUT" | grep -q "^INCIDENT" && bad "Case M2: unexpected incident raised" || ok "Case M2: no incident raised"
 
 echo "== Case G: existing watchdog_config.json without the new keys still works (defaults merge in) =="
 CFG_OUT=$("$PYTHON" - "$REPO" "$W" << 'PYEOF'

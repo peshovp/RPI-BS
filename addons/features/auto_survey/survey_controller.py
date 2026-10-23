@@ -269,6 +269,19 @@ class SurveyController:
         # read by the slot retry loop to decide whether a rerun can help.
         self._last_ppp_ar_failure_info = None
 
+        # True only in the survey runner service (geomaxima_survey.service,
+        # see survey_runner.py), the single owner of the survey thread and of
+        # every state change. The web application also builds a controller,
+        # but only to READ the state (reloaded from disk on every
+        # get_status()) and for the geoid helpers; it never auto-applies a
+        # position, never resumes and never starts a survey itself.
+        self.is_runner = False
+        # Runner only: a survey is persisted as 'running' but could not be
+        # resumed yet (e.g. the receiver stream is not up after a reboot).
+        # The runner retries recover_survey() while this is True instead of
+        # failing a healthy survey.
+        self.recovery_pending = False
+
         # Hard timeout: fail survey if no successful coordinate update happens for X minutes.
         # Configurable via env var AUTOSURVEY_UPDATE_TIMEOUT_MINUTES.
         try:
@@ -698,8 +711,16 @@ class SurveyController:
             True if stopped successfully
         """
         if not self._running:
+            if self.recovery_pending:
+                # The survey was waiting to be resumed (receiver not ready):
+                # the operator's stop cancels that resume.
+                self.recovery_pending = False
+                self.state.pause_survey()
+                logger.info("Survey stopped while its resume was still pending")
+                log_event("auto_survey", "stop", {"reason": "manual_while_resume_pending"})
+                return True
             return False
-        
+
         logger.info("Stopping survey...")
         self._running = False
         
@@ -3052,15 +3073,21 @@ class SurveyController:
         Returns:
             Dict with survey state, progress, current position, etc.
         """
+        # The runner service owns and writes the state; the web application's
+        # controller must see its latest version from disk on every call.
+        if not self.is_runner:
+            self.state.reload()
         status = self.state.get_status()
 
         # Auto-apply coordinates if survey is completed but not yet applied.
         # pos['lat']/lon are the BGS2005-transformed broadcast coordinate,
         # and pos['height'] is ALWAYS ellipsoidal (GRS80) - see
         # _perform_update()'s Step 8 - not raw ITRF2020 either way, no
-        # re-transformation needed here.
+        # re-transformation needed here. Only the runner applies (the web
+        # application would otherwise race the runner on the same state).
         try:
-            if status.get('survey_state') == SurveyState.COMPLETED.value and not status.get('applied'):
+            if (self.is_runner and status.get('survey_state') == SurveyState.COMPLETED.value
+                    and not status.get('applied')):
                 pos = status.get('final_position') or status.get('current_position')
                 if pos:
                     logger.info("Auto-applying completed survey coordinates to RTKBase (previously unapplied)")
@@ -3078,7 +3105,10 @@ class SurveyController:
         except Exception as auto_apply_err:
             logger.error(f"Auto-apply check failed: {auto_apply_err}")
 
-        status['is_running'] = self._running
+        # In the runner the survey thread is authoritative; in the web
+        # application (no thread of its own) the persisted state is.
+        status['is_running'] = (self._running if self.is_runner
+                                else status.get('survey_state') == SurveyState.RUNNING.value)
 
         # Part 6a: current antenna calibration status, for the Autosurvey
         # page's uncalibrated-antenna note - resolved fresh on every
@@ -3163,6 +3193,14 @@ class SurveyController:
             True if recovery successful
         """
         if not self.state.can_recover():
+            # A survey still marked 'running' that can no longer be recovered
+            # (older than its target duration plus the recovery grace) must
+            # not look alive forever: fail it with an explicit reason. A
+            # 'paused' survey was stopped by the user and is left alone.
+            self.recovery_pending = False
+            if self.is_runner and self.state.survey_state == SurveyState.RUNNING:
+                self._fail("Survey was still marked running but is older than its target "
+                           "duration plus the recovery grace period; it cannot be resumed")
             logger.info("No recoverable survey found")
             return False
 
@@ -3184,6 +3222,12 @@ class SurveyController:
         )
         if not is_receiver_ready:
             logger.warning("Cannot recover survey: GNSS receiver not ready (service inactive or invalid format)")
+            if self.is_runner:
+                # Transient (boot / OTA / restart ordering): keep the survey
+                # 'running' and let the runner retry; failing here would
+                # abandon a healthy multi-hour survey.
+                self.recovery_pending = True
+                return False
             self._fail("GNSS receiver not ready (service inactive or invalid format). Configure the receiver in Main Service settings before starting Auto Survey-In.")
             return False
 
@@ -3210,11 +3254,22 @@ class SurveyController:
         if self.state.survey_state == SurveyState.PAUSED:
             self.state.resume_survey()
         
+        # SURVEY-ONLY File service policy: the survey owns str2str_file for its
+        # whole duration, so a resumed survey (after a crash, reboot or
+        # service restart) must make sure it is running again.
+        if not self._ensure_file_logging():
+            logger.warning("Recovered survey: File service could not be started; "
+                           "the file-logging health check will keep retrying")
+
         # Restart survey thread
         self._running = True
         self._thread = threading.Thread(target=self._survey_loop, daemon=True)
         self._thread.start()
-        
-        logger.info("Survey recovered successfully")
-        log_event("auto_survey", "recovered", {})
+
+        self.recovery_pending = False
+        self.state.record_resume()
+        resume_count = self.state.get_status().get('resume_count')
+        logger.info(f"Survey resumed after interruption (resume #{resume_count})")
+        log_event("auto_survey", "recovered", {"resumed_after_interruption": True,
+                                                "resume_count": resume_count})
         return True

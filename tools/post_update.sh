@@ -185,6 +185,34 @@ else
   echo "⚠ tools/unit_reload.sh not found - skipping verified daemon-reload" >&2
 fi
 
+# Survey runner service: ensure it's enabled once, and restart it after
+# every update so it loads the new code. The runner resumes an
+# interrupted survey by itself when it starts, so restarting is safe.
+_survey_unit="geomaxima_survey.service"
+_unit_dir="${GEOMAXIMA_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+if [[ ! -f "${_unit_dir}/${_survey_unit}" ]]; then
+  echo "⚠ ${_survey_unit} is not deployed - skipping survey service setup" >&2
+elif ! systemctl is-enabled --quiet "${_survey_unit}"; then
+  echo "post_update.sh: enabling ${_survey_unit} for the first time"
+  if systemctl enable --now "${_survey_unit}"; then
+    _post_update_audit_log "survey_service_enabled" "{}"
+  else
+    echo "⚠ post_update.sh: failed to enable ${_survey_unit}" >&2
+    _post_update_audit_log "survey_service_enable_failed" "{}"
+  fi
+elif systemctl is-active --quiet "${_survey_unit}"; then
+  # The runner then loads the new code and resumes an interrupted survey by itself
+  echo "post_update.sh: restarting ${_survey_unit} to load new code"
+  if systemctl restart "${_survey_unit}"; then
+    _post_update_audit_log "survey_service_restarted" "{}"
+  else
+    echo "⚠ post_update.sh: failed to restart ${_survey_unit}" >&2
+    _post_update_audit_log "survey_service_restart_failed" "{}"
+  fi
+else
+  echo "post_update.sh: ${_survey_unit} is enabled but not running - leaving it as it was"
+fi
+
 # Service-state snapshot/restore - same logic as perform_update.sh's
 # own copy (duplicated here deliberately: this script's whole reason
 # to exist is to be independent of perform_update.sh's own version at
