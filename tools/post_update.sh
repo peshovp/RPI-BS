@@ -133,6 +133,58 @@ else
   echo "⚠ tools/install.sh not found/executable - skipping audit-log-access/journald-retention" >&2
 fi
 
+# Verified systemd daemon-reload: after an OTA redeploys unit files,
+# NeedDaemonReload=yes means systemd still runs the OLD definition of a
+# unit. copy_unit.sh reloads, but a reload that did not take effect (or a
+# unit changed after it) must never go unnoticed. We detect, reload,
+# verify, and restart any active unit that changed (except the web app,
+# which the OTA restarts last, and str2str_file, which is survey-only).
+if [[ -r "${DEV_REPO_PATH}/tools/unit_reload.sh" ]]; then
+  source "${DEV_REPO_PATH}/tools/unit_reload.sh"
+  _reload_units=$(geomaxima_units_needing_reload)
+  if [[ -z "${_reload_units}" ]]; then
+    echo "post_update.sh: no unit needs a daemon-reload"
+  else
+    # Build JSON array of unit names for audit
+    _reload_json="["
+    _first=1
+    while IFS= read -r _unit; do
+      [[ -z "${_unit}" ]] && continue
+      if [[ "${_first}" -eq 1 ]]; then _first=0; else _reload_json+=","; fi
+      _reload_json+="\"${_unit}\""
+    done <<< "${_reload_units}"
+    _reload_json+="]"
+    echo "post_update.sh: units needing daemon-reload: ${_reload_units}"
+    if geomaxima_daemon_reload_and_verify; then
+      # Restart active units that changed (except web app and str2str_file)
+      _restarted_json="["
+      _first=1
+      while IFS= read -r _unit; do
+        [[ -z "${_unit}" ]] && continue
+        if [[ "${_unit}" == "rtkbase_web.service" || "${_unit}" == "str2str_file.service" ]]; then
+          continue
+        fi
+        if systemctl is-active --quiet "${_unit}"; then
+          echo "post_update.sh: restarting ${_unit} (unit definition changed)"
+          if systemctl restart "${_unit}"; then
+            if [[ "${_first}" -eq 1 ]]; then _first=0; else _restarted_json+=","; fi
+            _restarted_json+="\"${_unit}\""
+          else
+            echo "⚠ post_update.sh: restart of ${_unit} failed" >&2
+          fi
+        fi
+      done <<< "${_reload_units}"
+      _restarted_json+="]"
+      _post_update_audit_log "unit_reload_applied" "{\"units\": ${_reload_json}, \"restarted\": ${_restarted_json}}"
+    else
+      echo "⚠ post_update.sh: daemon-reload verification failed" >&2
+      _post_update_audit_log "unit_reload_failed" "{\"units\": ${_reload_json}}"
+    fi
+  fi
+else
+  echo "⚠ tools/unit_reload.sh not found - skipping verified daemon-reload" >&2
+fi
+
 # Service-state snapshot/restore - same logic as perform_update.sh's
 # own copy (duplicated here deliberately: this script's whole reason
 # to exist is to be independent of perform_update.sh's own version at
