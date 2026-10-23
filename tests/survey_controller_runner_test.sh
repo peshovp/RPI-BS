@@ -373,6 +373,43 @@ finally:
     ctrl_mod.subprocess.run = orig_run
     ctrl_mod.log_event = orig_log
 
+# Case L: no false "crashed" verdict right after the survey started the File service
+try:
+    from datetime import datetime, timedelta
+    orig_run_l = ctrl_mod.subprocess.run
+    ctrl_mod.subprocess.run = lambda *a, **k: FakeCompleted(0)
+    try:
+        c = make({'survey_state': 'running', 'file_service_started_at': datetime.utcnow().isoformat()}, True)
+        c.rtkbase.get_data_file = lambda: None
+        alive, detail = c._is_file_logging_alive()
+        if alive is True and 'starting' in detail:
+            ok("L1: just started and no raw file yet -> alive (starting), no false crash")
+        else:
+            bad(f"L1: alive={alive} detail={detail!r}")
+        c = make({'survey_state': 'running',
+                  'file_service_started_at': (datetime.utcnow() - timedelta(minutes=10)).isoformat()}, True)
+        c.rtkbase.get_data_file = lambda: None
+        alive, detail = c._is_file_logging_alive()
+        if alive is False and 'no raw log file' in detail:
+            ok("L2: started 10 minutes ago and still no raw file -> not alive")
+        else:
+            bad(f"L2: alive={alive} detail={detail!r}")
+    finally:
+        ctrl_mod.subprocess.run = orig_run_l
+except Exception as e:
+    bad(f"L: exception: {e}")
+
+# Case K: the survey's audit events must reach the real audit logger when the controller
+# runs outside the web process (the runner service has only the repository root on sys.path)
+try:
+    mod_name = getattr(ctrl_mod.log_event, '__module__', '')
+    if mod_name.endswith('audit_logger'):
+        ok("K: the controller's log_event is the real audit logger (not the silent fallback)")
+    else:
+        bad(f"K: the controller's log_event comes from {mod_name!r} - audit events would be dropped")
+except Exception as e:
+    bad(f"K: exception: {e}")
+
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 sys.exit(FAIL)
 PYEOF

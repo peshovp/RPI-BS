@@ -53,9 +53,16 @@ from .config_manager import ConfigManager
 from .state_manager import StateManager, SurveyState
 
 try:
-    from audit_logger import log_event
+    from audit_logger import log_event  # web process: web_app/ is on sys.path
 except ImportError:
-    log_event = lambda *a, **k: None
+    try:
+        # survey runner service (python -m ...): the repository root is the
+        # working directory, web_app/ is importable as a namespace package.
+        # Without this fallback every audit event of the survey (start, stop,
+        # reset, failed, recovered) would be silently dropped in the runner.
+        from web_app.audit_logger import log_event
+    except ImportError:
+        log_event = lambda *a, **k: None
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +411,11 @@ class SurveyController:
     # stopped sending data entirely (cable unplugged, receiver power loss,
     # serial port wedged), which `systemctl is-active` alone cannot detect.
     FILE_LOGGING_STALE_SECONDS = 180
+    # Right after the survey starts the File service, str2str needs a moment
+    # to create the raw log; within this grace a missing raw file is "starting",
+    # not a crash (observed live: a false "crashed during survey" record on
+    # the very first health check).
+    FILE_LOGGING_STARTUP_GRACE_SECONDS = 90
 
     # After this many consecutive restart attempts (success OR failure - a
     # receiver that keeps dropping and reconnecting is a real problem even
@@ -418,6 +430,18 @@ class SurveyController:
     # still comfortably avoids a restart storm while staying short enough
     # that a human re-plugging a cable sees it recovered quickly.
     FILE_LOGGING_BACKOFF_CAP_SECONDS = 600
+
+    def _file_service_just_started(self) -> bool:
+        """True while the survey took ownership of the File service less than
+        FILE_LOGGING_STARTUP_GRACE_SECONDS ago (state: file_service_started_at)."""
+        try:
+            started_at = self.state.get_status().get('file_service_started_at')
+            if not started_at:
+                return False
+            age = (datetime.utcnow() - datetime.fromisoformat(started_at)).total_seconds()
+            return 0 <= age < self.FILE_LOGGING_STARTUP_GRACE_SECONDS
+        except Exception:
+            return False
 
     def _is_file_logging_alive(self) -> Tuple[bool, str]:
         """
@@ -440,6 +464,8 @@ class SurveyController:
         try:
             raw_file = self.rtkbase.get_data_file()
             if raw_file is None or not raw_file.exists():
+                if self._file_service_just_started():
+                    return True, "starting (raw log not created yet)"
                 return False, "no raw log file found"
             age = time.time() - raw_file.stat().st_mtime
             if age > self.FILE_LOGGING_STALE_SECONDS:
