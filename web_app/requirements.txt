@@ -47,3 +47,6 @@ luma.core
 Pillow
 RPi.GPIO
 spidev
+# Hatanaka (CRX -> RINEX) decompression for EPN/IGS daily files (chain validation, Part 11a).
+# Wheels exist for aarch64, x86_64, i686; armv7l builds from source and needs a C compiler.
+hatanaka==2.8.1
