@@ -88,3 +88,19 @@ grep -E 'survey_service_|recovered|self_heal' /var/lib/rtkbase/audit.log | tail
   hourly warning instead); it still applies to the non-PPP-AR (rnx2rtkp) path.
 - Not done: the Settings UI does not display the new indicators yet (they are in
   `/api/auto_survey/status`).
+
+## No interim slots; the final result waits for the products (2026-10-24)
+
+Owner's decision after the live finding that the precise products of a day appear ~13-19 h
+after the day ends (see `docs/autosurvey_status.md`, 2026-10-24):
+- In PPP-AR mode there are NO interim PPP-AR slots any more (`_compute_ppp_ar_slots()` returns `[]`).
+- `product_availability.py` lists the products server (`igs.gnsswhu.cn`, anonymous FTP, one
+  directory listing per year) and checks that the RAP or FIN orbit and ERP exist for EVERY UTC
+  day of the frozen window. Errors mean "unknown" (fail-open).
+- `_finalize_survey` loop: while the products are missing it only polls every 10 min
+  (`final_last_reason` = "waiting for precise products to be published: 2026 DOY 296: ERP, ...",
+  `final_next_retry_at`, heartbeat); as soon as they exist it runs pdp3, applies the position
+  through the normal path (BGS2005, ECEF invariant, `settings.conf`, service restart) and
+  completes the survey. A real pdp3 attempt is still made at least every 6 h regardless of the
+  listing (safety net against a wrong file-name assumption).
+- Expected latency of a survey result: ~13-19 h after the end of the last UTC day of the window.
