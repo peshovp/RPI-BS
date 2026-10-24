@@ -125,3 +125,52 @@ proper 24 h PPP-AR survey replaces it.
 
 Consequence: the account frame option "ITRF2020 at the date of observation" (`ITRF2020@date`)
 exists; the observation epoch is taken from the run.
+
+## What is needed from АГКК (to close the BGS2005 question)
+
+Context: our chain (ITRF2020 -> ETRF2000 -> epoch 2005.0, proxy velocity of SOFI) places a fresh
+PPP-AR position of Topolchane about 14 cm horizontally and 11 cm vertically away from the
+broadcast position that was measured in 2025 in BGS2005 through an АГКК-certified CORS network.
+The EPN monitor also reports that the RTCM 1006 coordinates of SOFI00BGR differ from the official
+ETRS89 position by 0.135 m, which points at the BGS2005 realisation itself.
+
+Requested from АГКК (most important first):
+1. Official BGS2005 coordinates (geographic or ECEF, ellipsoidal height, with the stated frame and
+   epoch) of the permanent station SOFI00BGR (and, if available, of the CORS stations nearest to
+   Topolchane, e.g. in the Stara Zagora / Sliven direction) - to measure the offset between
+   BGS2005 and ETRF2000/EPN directly.
+2. The velocities / epoch-reduction model to epoch 2005.0 that АГКК uses (РД-02-20-12 чл.20 and
+   Приложение 6): station velocities or the velocity grid for the Topolchane area - to replace the
+   SOFI proxy velocity.
+3. The official ETRF2000 -> BGS2005 transformation: parameters or the BGSTrans grid with its
+   documentation and stated accuracy - to compare with our direct Helmert + reduction chain.
+4. A written statement of the frame and epoch of the coordinates delivered by the АГКК CORS
+   service (RTCM stream and VRS) and of the date of the last network coordinate update - so that
+   a CORS account of the national network can be configured with a defined frame.
+5. For certification (чл.49, чл.54-56): the conformity-assessment procedure and the requirements
+   for the antenna calibration file (the K700 is uncalibrated).
+
+## Chain validation on the EPN station SOFI00BGR (2026-10-24, DOY 293)
+
+Method: the daily 30 s RINEX of SOFI00BGR (EPNCB archive, `SOFI00BGR_S_20262930000_01D_30S_MO.crx.gz`,
+Hatanaka decompressed with the `hatanaka` package) processed on Topolchane with the production
+PRIDE wrapper (pdp3, WUM RAP products, G12 R12 E15 C26): 78815 observations, WL 98.2 % / NL 97.2 %,
+37 minutes on the Raspberry Pi. Compared with the official EPN ETRF2000 position of SOFI
+(X 4319372.445 / Y 1868687.549 / Z 4292063.693 m at 2020.0, velocity 0.5 / 0.4 / -2.4 mm/yr).
+
+| Step | Difference to EPN official | |
+|---|---|---|
+| PPP-AR + ITRF2020 -> ETRF2000 Helmert, at the observation epoch 2026.80 | E -0.9, N +1.7, U +4.2 mm | the pipeline itself is correct at the mm level |
+| + reduction to 2005.0 with the velocity in `sofi_velocity_etrf2000.json` | E -1.9, N **-56.4**, U -13.5 mm | the velocity differs |
+
+The velocity file gives SOFI N +0.48 / E +0.21 / U -0.36 mm/yr (ITRF2020 cumulative solution
+C2415 converted with EUREF TN1 Table 4, formula checked). The EPN station page gives, for the
+latest segment (valid 2023-02-07 to 2025-09-27), N -2.19 / E +0.17 / U -1.17 mm/yr. The 2.7 mm/yr
+difference over 21.8 years is 5.8 cm north: exactly the north part (-5.4 cm) of the
+14 cm discrepancy between our chain and the 2025 BGS2005 position of Topolchane. The east
+part (-13 cm) and the height (+11 cm, of which about 2 cm velocity) are not explained by velocity;
+the EPN monitor reports that the RTCM 1006 coordinates of SOFI differ from the official ETRS89
+position by 0.135 m, which suggests an offset of the BGS2005 realisation of that size.
+
+Open: which SOFI velocity is right for the 2005-2026 reduction (long-term vs the last segment)
+and the real BGS2005 offset: both need the АГКК data requested above.
