@@ -9,6 +9,7 @@ import configparser
 import logging
 import math
 import os
+import stat
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -524,6 +525,15 @@ class RTKBaseConfig:
                 f.writelines(lines)
                 f.flush()
                 os.fsync(f.fileno())
+            # Keep the mode and owner of the file being replaced; the temp
+            # file would otherwise get 0644 and the writer's (often root's)
+            # ownership.
+            orig_stat = os.stat(self.settings_file)
+            os.chmod(tmp_path, stat.S_IMODE(orig_stat.st_mode))
+            try:
+                os.chown(tmp_path, orig_stat.st_uid, orig_stat.st_gid)
+            except OSError as chown_err:
+                logger.warning(f"  Could not preserve owner of settings.conf: {chown_err}")
             os.replace(tmp_path, self.settings_file)
             logger.info(f"  ✓ File written and flushed to disk")
             
