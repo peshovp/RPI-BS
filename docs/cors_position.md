@@ -1,6 +1,6 @@
 # CORS position (quick start position + cross-check)
 
-Status: DESIGN, agreed with Pesho on 2026-10-24. Nothing is implemented yet.
+Status: design agreed with Pesho on 2026-10-24. Steps 1-2 (account store, API, Settings UI) are implemented and deployed on Topolchane (commits 3b180f3, 9ee7b93). Steps 3-7 are open.
 Triggered by a vendor screen (XGEO "Set Up Base Station": coordinate source GPS / CORS / Manual).
 
 ## Decisions (Pesho, 2026-10-24)
