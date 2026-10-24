@@ -124,8 +124,8 @@ class RTKBaseConfig:
         computed AT THE ARP - never to adjust the RTCM 1005/1006
         broadcast position itself, which IS the ARP by definition (see
         survey_controller.py's _apply_geodetic_position() Step 6/8
-        comment, and ppp_processor.py's/pride_pppar_processor.py's own
-        "always process at the ARP, zero delta" convention).
+        comment, and pride_pppar_processor.py's own "always process at the
+        ARP, zero delta" convention).
 
         All three default to 0.0 (marker and ARP coincide - no offset
         configured/measured yet) via settings.conf.default, so a station

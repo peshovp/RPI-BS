@@ -76,18 +76,7 @@ class SurveyRunner:
                 if not (1 <= target_hours <= 168):
                     return {"ok": False, "message": "target_hours must be between 1 and 168", "data": None}
 
-                ppp_tier = params.get("ppp_tier", "rapid")
-                if ppp_tier not in ("ultra-rapid", "rapid", "final"):
-                    return {"ok": False, "message": "ppp_tier must be one of: ultra-rapid, rapid, final", "data": None}
-
-                ppp_ar_enabled = params.get("ppp_ar_enabled", False)
-                if not isinstance(ppp_ar_enabled, bool):
-                    return {"ok": False, "message": "ppp_ar_enabled must be a boolean", "data": None}
-
-                started = self.controller.start_survey(
-                    target_hours=target_hours,
-                    ppp_tier=ppp_tier,
-                    ppp_ar_enabled=ppp_ar_enabled)
+                started = self.controller.start_survey(target_hours=target_hours)
                 if started:
                     return {"ok": True, "message": "started", "data": None}
                 return {"ok": False, "message": "survey could not be started (already running?)", "data": None}

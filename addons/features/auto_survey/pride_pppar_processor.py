@@ -2,24 +2,20 @@
 PRIDE-PPPAR Ambiguity-Resolution PPP Processor
 ================================================
 
-Optional, alternate FINAL-tier PPP backend using PRIDE-PPPAR's `pdp3`
-(Wuhan University, IGS Pilot Project PPP-AR) instead of RTKLIB's rnx2rtkp
-(see ppp_processor.py). Unlike rnx2rtkp -p 8 (float-ambiguity only, per
-Pesho's explicit "no PPP-AR without a simple RTKLIB-native option" decision
-- see ppp_processor.py's module docstring), PRIDE-PPPAR performs real
-ambiguity resolution (integer fixing), at the cost of a heavier, separately
-installed toolchain and a materially different output file format.
+The only PPP backend: PRIDE-PPPAR's `pdp3` (Wuhan University, IGS Pilot
+Project PPP-AR), which performs real ambiguity resolution (integer
+fixing).
 
-WIRED INTO survey_controller.py as an opt-in, END-OF-SURVEY-ONLY final AR
-step (see SurveyController._run_ppp_ar()) - NOT run on every interim
-update, per Pesho's explicit RAM-budget instruction for this station.
+WIRED INTO survey_controller.py as the final step of a survey (see
+SurveyController._run_ppp_ar()); it runs once the survey window is over and
+the precise products are published.
 
 INSTALLATION ASSUMPTION (station-side, not managed by this module or
 install.sh): PRIDE-PPPAR is installed at ~/.PRIDE_PPPAR_BIN with that
 directory added to PATH via .bashrc, and its `pdp3` orchestration binary
 is therefore discoverable via shutil.which() in an interactive/login shell
-- this module relies on that assumption via find_pdp3() below, mirroring
-spp_processor.py's find_rtklib_tool() PATH-first discovery pattern.
+- this module relies on that assumption via find_pdp3() below
+(PATH-first discovery).
 
 CONFIRMED LIVE CLI (BaseStation): `pdp3 -m S <obs-file>` - static mode,
 single positional argument (the obs file's own basename, resolved relative
@@ -30,7 +26,7 @@ override is needed for the base use case: pdp3's own default config at
 download of SP3/CLK/OSB/ERP from bdspride.com on every run) and default
 Ambiguity fixing = LAMBDA+AI validation - so process_ppp_ar() below does
 NOT accept or forward sp3_file/clk_file to pdp3 at all (confirmed: pdp3
-does not take them as arguments, unlike rnx2rtkp), and does not require a
+does not take them as arguments), and does not require a
 config_template_path either, though one may still be passed through for
 an advanced override if ever needed.
 
@@ -42,7 +38,7 @@ call would not reliably reach pdp3's own linked Fortran runtime the same
 way a shell-level `ulimit -s unlimited` does, and was not what was tested/
 confirmed working. Do not "simplify" this to a plain argv subprocess call.
 
-OUTPUT FORMAT - FUNDAMENTALLY DIFFERENT FROM ppp_processor.py's .pos FILE:
+OUTPUT FORMAT:
 PRIDE-PPPAR writes its result to a `pos_<mjd><doy>_<mark>`-style file (e.g.
 pos_2020001_abmf). CONFIRMED LIVE (BaseStation, manual pdp3 repro): the
 real location is work_dir/<year>/<doy>/pos_* (a 4-digit year, then a
@@ -61,13 +57,12 @@ separated columns:
 
     Name Mjd X Y Z Sx Sy Sz Rxy Rxz Ryz Sig0 Nobs
 
-X/Y/Z are ECEF coordinates in METERS - NOT geodetic lat/lon/height like
-rnx2rtkp's .pos output. survey_controller.py's downstream pipeline
+X/Y/Z are ECEF coordinates in METERS - NOT geodetic lat/lon/height.
+survey_controller.py's downstream pipeline
 (geoid_corrector.py / bgs2005_transformer.py) expects geodetic lat/lon/
 height, so parse_ppp_ar_result() below performs an explicit ECEF->geodetic
 conversion before returning - this is a REQUIRED conversion step, not
-optional/cosmetic, unlike ppp_processor.py's rnx2rtkp path which already
-receives geodetic output natively.
+optional/cosmetic.
 
 AR FIX RATE (NOT a binary fixed/float flag): pdp3 --help documents no
 explicit "AR fixed" flag, and the pos_* file's data line carries none
@@ -126,15 +121,10 @@ _END_OF_HEADER_MARKER = "END OF HEADER"
 _POS_FILE_GLOB = "pos_*"
 
 # WGS84 ellipsoid parameters - identical constants to the ones already
-# used for the opposite (geodetic->ECEF) conversion in gnss_parser.py's
-# GNSSEpoch.to_ecef(), kept consistent with that existing in-repo
-# precedent rather than introducing a different source/library for the
-# same ellipsoid. pyproj IS already a project dependency (web_app/
-# requirements.txt, used by bgs2005_transformer.py for its own geodetic<->
-# geocentric transforms) - but a plain closed-form WGS84 conversion here,
-# matching gnss_parser.py's existing style, avoids adding a pyproj
-# dependency to addons/requirements.txt (this feature's own, currently
-# pyproj-free, requirements file) for a single conversion this small.
+# used for the ECEF->geodetic conversion below. A plain closed-form WGS84
+# conversion avoids adding a pyproj dependency to addons/requirements.txt
+# (this feature's own, currently pyproj-free, requirements file) for a
+# single conversion this small.
 _WGS84_A = 6378137.0  # semi-major axis, meters
 _WGS84_F = 1.0 / 298.257223563  # flattening
 _WGS84_E2 = 2 * _WGS84_F - _WGS84_F * _WGS84_F  # first eccentricity squared
@@ -147,16 +137,14 @@ class PridePpparProcessorError(Exception):
 class Pdp3NotFoundError(PridePpparProcessorError):
     """
     pdp3 was not found on PATH. Raised instead of a generic
-    FileNotFoundError, matching ppp_processor.py's AntexNotFoundError
-    precedent of surfacing setup problems with an actionable message
-    rather than a bare exception.
+    FileNotFoundError, to surface the setup problem with an actionable
+    message rather than a bare exception.
     """
 
 
 def find_pdp3() -> Optional[Path]:
     """
-    Locate the pdp3 binary via PATH first, matching spp_processor.py's
-    find_rtklib_tool() PATH-first discovery convention, then falling back
+    Locate the pdp3 binary via PATH first, then falling back
     to the well-known fixed install location (~/.PRIDE_PPPAR_BIN/pdp3)
     directly if PATH lookup fails.
 
@@ -837,11 +825,8 @@ def parse_amb_file_header(amb_file: Path) -> Optional[Dict]:
 # ("real-time service" - same naming convention PRIDE-PPPAR's own
 # scripts use, confirmed by reading pdp3.sh's fetch_orbit/fetch_clock
 # functions directly, not inferred). This is a SEPARATE tier concept
-# from ppp_tier (ultra-rapid/rapid/final, ppp_downloader.py's CDDIS
-# products for the rnx2rtkp path) - PRIDE-PPPAR decides this itself per
-# run based on product availability, with no equivalent of
-# ppp_downloader's "no fallback, no silent start" guarantee, so it is
-# worth recording per-attempt rather than assumed from any setting.
+# from any setting - PRIDE-PPPAR decides the tier itself per run based on
+# product availability, so it is worth recording per-attempt.
 _PRODUCT_TIER_RE = re.compile(r'WUM0MGX(RAP|RTS)_')
 
 
@@ -1162,15 +1147,8 @@ class PridePpparProcessor:
     """
     Process RINEX for PPP-AR positioning using PRIDE-PPPAR's pdp3.
 
-    Constructor shape mirrors PPPProcessor (ppp_processor.py) - accepts
-    rtkbase_root for consistency with that class's own convention, though
-    (unlike PPPProcessor's ANTEX path) this module has no rtkbase_root-
-    relative asset of its own; kept for a consistent construction pattern
-    alongside survey_controller.py's self.spp = PPPProcessor(...).
-
     Wired into survey_controller.py via SurveyController._run_ppp_ar() -
-    an opt-in (ppp_ar_enabled, default False), end-of-survey-only step,
-    never run per interim update (RAM budget).
+    the final step of a survey.
     """
 
     def __init__(self, pdp3_path: Optional[str] = None,
@@ -1178,10 +1156,9 @@ class PridePpparProcessor:
         """
         Args:
             pdp3_path: Path to the pdp3 binary (auto-detected via PATH if
-                None, matching PPPProcessor's rnx2rtkp_path convention).
-            rtkbase_root: RTKBase installation root - accepted for
-                constructor-shape consistency with PPPProcessor, not
-                currently used for any path resolution in this class.
+                None).
+            rtkbase_root: RTKBase installation root - accepted but
+                not currently used for any path resolution in this class.
         """
         if pdp3_path is None:
             pdp3 = find_pdp3()
@@ -1218,8 +1195,8 @@ class PridePpparProcessor:
         work_dir here). pdp3 is fully self-contained: it downloads its own
         SP3/CLK/OSB/ERP products from bdspride.com on every run (its
         default config has "Product directory = Default" = auto-download)
-        - it does NOT accept sp3_file/clk_file as arguments the way
-        rnx2rtkp does, so none are passed here (see module docstring).
+        - it does NOT accept sp3_file/clk_file as arguments, so none are
+        passed here (see module docstring).
 
         Args:
             obs_file: RINEX observation file. Copied into work_dir first
@@ -1237,9 +1214,8 @@ class PridePpparProcessor:
                 needs to still exist afterward to locate/read the pos_*
                 result file.
             custom_antex_path: Part 6b - path to GeoMaxima's own vendored
-                custom ANTEX (e.g. PPPProcessor.custom_antex_path(),
-                the SAME file ppp_processor.py's own merge uses for the
-                rnx2rtkp path). Passed to pdp3.sh via the
+                custom ANTEX (AntexSupport.custom_antex_path()).
+                Passed to pdp3.sh via the
                 GEOMAXIMA_CUSTOM_ANTEX environment variable (NOT a CLI
                 flag - pdp3 has none for this), which pdp3.sh's own
                 locally-patched antenna-check step reads to append a
@@ -1469,8 +1445,7 @@ class PridePpparProcessor:
 
         # If multiple pos_* files exist (e.g. a stale file from a prior
         # run reusing the same work_dir), take the most recently modified
-        # one - mirrors ppp_processor.py's own nav-file auto-detection
-        # tie-break convention (max by mtime).
+        # one (max by mtime).
         pos_file = max(pos_files, key=lambda p: p.stat().st_mtime)
 
         if len(pos_files) > 1:
@@ -1481,8 +1456,7 @@ class PridePpparProcessor:
         # Stash stdout on the instance for parse_ppp_ar_result()'s fix-
         # rate parsing to reuse without re-running pdp3 - simplest option
         # given process_ppp_ar() and parse_ppp_ar_result() are two
-        # separate public methods (matching PPPProcessor.process_ppp()/
-        # parse_position_file() being separate calls too), rather than
+        # separate public methods, rather than
         # changing parse_ppp_ar_result()'s signature to require stdout be
         # passed in by the caller.
         self._last_stdout = result.stdout

@@ -124,7 +124,6 @@ ctrl = FakeController()
 ctrl.state = FakeState()
 ctrl._ensure_file_logging = mod.SurveyController._ensure_file_logging.__get__(ctrl)
 ctrl._stop_file_logging = mod.SurveyController._stop_file_logging.__get__(ctrl)
-ctrl._file_logging_enabled_by_user = mod.SurveyController._file_logging_enabled_by_user.__get__(ctrl)
 
 import logging
 logging.getLogger().addHandler(logging.NullHandler())
@@ -206,7 +205,6 @@ ctrl = FakeController()
 ctrl.state = FakeState()
 ctrl._ensure_file_logging = mod.SurveyController._ensure_file_logging.__get__(ctrl)
 ctrl._stop_file_logging = mod.SurveyController._stop_file_logging.__get__(ctrl)
-ctrl._file_logging_enabled_by_user = mod.SurveyController._file_logging_enabled_by_user.__get__(ctrl)
 
 import logging
 logging.getLogger().addHandler(logging.NullHandler())

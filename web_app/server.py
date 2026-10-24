@@ -50,7 +50,6 @@ from RTKLIB import RTKLIB
 from ServiceController import ServiceController
 from RTKBaseConfigManager import RTKBaseConfigManager
 from wireguard_settings import get_wireguard_settings, write_wireguard_config
-from ppp_earthdata_settings import get_earthdata_settings, write_earthdata_settings
 from audit_logger import log_event, read_recent
 import network_infos
 
@@ -649,14 +648,7 @@ def auto_survey_start():
                 return jsonify({"error": "target_hours must be between 1 and 168"}), 400
         except (ValueError, TypeError):
             return jsonify({"error": "target_hours must be a valid integer"}), 400
-        ppp_tier = data.get('ppp_tier', 'rapid')
-        if ppp_tier not in ('ultra-rapid', 'rapid', 'final'):
-            return jsonify({"error": "ppp_tier must be one of: ultra-rapid, rapid, final"}), 400
-        ppp_ar_enabled = data.get('ppp_ar_enabled', False)
-        if not isinstance(ppp_ar_enabled, bool):
-            return jsonify({"error": "ppp_ar_enabled must be a boolean"}), 400
-        result = _survey_request("start", {"target_hours": target_hours, "ppp_tier": ppp_tier,
-                                           "ppp_ar_enabled": ppp_ar_enabled})
+        result = _survey_request("start", {"target_hours": target_hours})
         if result is None:
             return jsonify({"error": f"The survey service ({SURVEY_SERVICE_UNIT}) did not answer in time"}), 504
         if result.get("ok"):
@@ -721,50 +713,6 @@ def auto_survey_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/auto_survey/ppp_credentials', methods=['GET'])
-@login_required
-def auto_survey_ppp_credentials_get():
-    """
-    Return whether NASA Earthdata Login credentials are configured for
-    PPP-static precise-product downloads. Never returns the actual
-    username/password - only a boolean, matching the WireGuard settings
-    page's convention of never re-populating secret fields.
-    """
-    try:
-        settings = get_earthdata_settings()
-        values = {}
-        for item in settings[1:]:
-            values.update(item)
-        return jsonify({
-            'success': True,
-            'username': values.get('username', ''),
-            'has_password': bool(values.get('password'))
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/auto_survey/ppp_credentials', methods=['POST'])
-@login_required
-def auto_survey_ppp_credentials_set():
-    """
-    Save NASA Earthdata Login credentials for PPP-static downloads.
-    A blank password preserves the existing stored value (see
-    ppp_earthdata_settings.write_earthdata_settings() docstring).
-    """
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        fields = {
-            'username': (data.get('username') or '').strip(),
-            'password': data.get('password') or '',
-        }
-        if write_earthdata_settings(fields):
-            log_event("auto_survey", "ppp_credentials_updated", {})
-            return jsonify({'success': True})
-        else:
-            log_event("auto_survey", "ppp_credentials_update_failed", {})
-            return jsonify({'success': False, 'error': 'Failed to write credentials'}), 500
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auto_survey/geoid', methods=['GET'])
 @login_required

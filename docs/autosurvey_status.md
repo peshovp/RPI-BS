@@ -88,6 +88,20 @@ timestamps are UTC) died at 13:53 UTC with `completed_hours: 0`:**
 - Station state: `c3634fd`, `main`/`origin/main`, no failed units, disk
   30 %, `throttled=0x0`.
 
+## 2026-10-24: Autosurvey cleanup - PRIDE-PPPAR is the only pipeline
+
+Removed (all dead since the PPP-AR-only switch): `ppp_processor.py` (rnx2rtkp/CDDIS),
+`ppp_downloader.py`, `spp_processor.py`, `position_estimator.py`, `gnss_parser.py`,
+`config_manager.py`, `web_app/ppp_earthdata_settings.py` (Earthdata credential routes),
+the interim-slot machinery in `survey_controller.py`/`state_manager.py`
+(`_perform_update`, `_perform_interim_update`, `_run_ppp_ar_interim`, slot schedule,
+`ppp_tier`, `ppp_ar_enabled`, `update_schedule`), `RINEXConverter.convert_to_rinex`, and
+the Settings UI controls for the tier, the PPP-AR switch and the Earthdata card. The
+start request now carries only `target_hours`. The ANTEX logic still needed by pdp3 moved
+to `antex_support.py`. Old state files keep working (unknown keys are ignored).
+Comments and docstrings were updated; `addons/features/auto_survey/README.md` was
+rewritten. Restore point before the cleanup: git tag `pre-pppar-cleanup` (= `5ebdc88`).
+
 ## 2026-10-24: live validation on Topolchane (test station, full control) - findings
 
 OTA to `e48e389`, then to `5ce3573`, `edd962e`, `32a08be` (each: position unchanged,

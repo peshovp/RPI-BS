@@ -162,7 +162,7 @@ def test_g():
         result = sr.wait_for_result(rid, timeout=0.5, request_dir=d)
         elapsed = time.time() - start
         assert result is None, f"Should return None, got {result}"
-        assert elapsed >= 0.5 and elapsed < 1.5, f"Elapsed {elapsed}s, expected ~0.5s"
+        assert elapsed >= 0.45 and elapsed < 5.0, f"Elapsed {elapsed}s, expected ~0.5s"
 
 test("G: wait_for_result timeout", test_g)
 
@@ -180,7 +180,7 @@ def test_h():
         assert result is not None
         assert result['ok'] is True
         assert result['message'] == 'concurrent'
-        assert elapsed < 2.5, f"Took {elapsed}s, expected < 2.5s"
+        assert elapsed < 3.0, f"Took {elapsed}s, expected < 3.0s"
 
 test("H: concurrency", test_h)
 

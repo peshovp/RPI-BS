@@ -97,17 +97,11 @@ class StateManager:
                 state['final_last_reason'] = None
             if 'last_heartbeat_at' not in state:
                 state['last_heartbeat_at'] = None
-            if 'ppp_tier' not in state:
-                state['ppp_tier'] = 'rapid'
             if 'broadcast_height_type' not in state:
                 # CORRECTED: was 'orthometric' - see survey_controller.py's
                 # _apply_geodetic_position() Step 6/8 comment for why RTCM
                 # broadcast height must always be ellipsoidal.
                 state['broadcast_height_type'] = 'ellipsoidal'
-            if 'ppp_ar_enabled' not in state:
-                state['ppp_ar_enabled'] = False
-            if 'ppp_ar_completed_slots' not in state:
-                state['ppp_ar_completed_slots'] = []
             if 'last_ppp_ar_attempt' not in state:
                 state['last_ppp_ar_attempt'] = None
             if 'ppp_ar_attempts' not in state:
@@ -159,12 +153,6 @@ class StateManager:
             'final_next_retry_at': None,
             'final_last_reason': None,
             'last_heartbeat_at': None,
-            # Which CDDIS precise-product tier this PPP-static survey is
-            # using ("ultra-rapid" | "rapid" | "final") - persisted so the
-            # Settings UI can display it and recovery (recover_survey())
-            # continues fetching the same tier rather than defaulting back
-            # to "rapid" mid-survey.
-            'ppp_tier': 'rapid',
             # Height type actually broadcast via RTCM - ALWAYS 'ellipsoidal'
             # (CORRECTED: this field previously defaulted to 'orthometric'
             # on an unsupported "official АГКК requirement" claim that no
@@ -179,24 +167,6 @@ class StateManager:
             # value (current_position/applied_position's own
             # 'broadcast_height_type' field is the actual audit trail).
             'broadcast_height_type': 'ellipsoidal',
-            # Opt-in PRIDE-PPPAR final ambiguity-resolution step
-            # (SurveyController._run_ppp_ar()) - default False, matching
-            # Pesho's explicit "opt-in, not default-on" instruction. Only
-            # ever run once, at survey finalization, never per interim
-            # update (RAM budget on this station).
-            'ppp_ar_enabled': False,
-            # Fixed-slot tracking for the PPP-AR-only interim schedule
-            # (SurveyController._run_ppp_ar_interim(), only used when
-            # ppp_ar_enabled=True): list of slot_hours values (0, 4, 8,
-            # ...) that have already been ATTEMPTED - a slot is added
-            # here whether it succeeded or was skipped (pdp3 unavailable/
-            # failed/low fix rate), so a failed slot is never retried
-            # before the next fixed slot, per Pesho's explicit "skip and
-            # wait for next slot, no immediate retry" instruction. This is
-            # deliberately NOT last_update_time-based (that field tracks
-            # the rnx2rtkp path's floating last_success+interval schedule
-            # instead - see _survey_loop()).
-            'ppp_ar_completed_slots': [],
             # Part 5: per-attempt quality evidence (product_tier,
             # processed-window coverage, AMB resolvable/fixing counts,
             # frequency combination) - see record_ppp_ar_attempt().
@@ -500,47 +470,13 @@ class StateManager:
         self._state['ppp_ar_attempts'] = history
         return self.save_state()
 
-    def get_ppp_ar_completed_slots(self) -> list:
-        """
-        Fixed PPP-AR interim slot_hours values already ATTEMPTED this
-        survey session (see _default_state()'s comment - includes both
-        successful and skipped/failed slots, since a slot is never
-        retried before the next one). Returns a plain list (JSON-safe
-        floats), not a reference to internal state.
-        """
-        return list(self._state.get('ppp_ar_completed_slots', []))
 
-    def mark_ppp_ar_slot_attempted(self, slot_hours: float) -> bool:
-        """
-        Record that the fixed PPP-AR interim slot at slot_hours has been
-        attempted this survey session (success or failure/skip alike) -
-        called by SurveyController._survey_loop() regardless of
-        _run_ppp_ar_interim()'s return value, so a failed/skipped slot is
-        never retried before the next fixed slot.
-
-        :param slot_hours: the fixed schedule slot (0, 4, 8, ...) just attempted
-        :return: True if persisted successfully
-        """
-        slots = self._state.get('ppp_ar_completed_slots', [])
-        if slot_hours not in slots:
-            slots = slots + [slot_hours]
-            self._state['ppp_ar_completed_slots'] = slots
-            return self.save_state()
-        return True
-
-    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid',
-                      ppp_ar_enabled: bool = False) -> bool:
+    def start_survey(self, target_hours: int = 24) -> bool:
         """
         Start new survey session
 
         Args:
             target_hours: Survey duration in hours (default: 24)
-            ppp_tier: CDDIS precise-product tier to use for PPP-static
-                processing ("ultra-rapid" | "rapid" | "final")
-            ppp_ar_enabled: Opt-in PRIDE-PPPAR final ambiguity-resolution
-                step (default False) - run once at survey finalization
-                only, never per interim update. See
-                SurveyController._run_ppp_ar().
 
         Returns:
             True if started successfully
@@ -576,7 +512,6 @@ class StateManager:
             'consecutive_failures': 0,
             'last_failure_reason': None,
             'last_failure_time': None,
-            'ppp_tier': ppp_tier,
             # ALWAYS 'ellipsoidal' - CORRECTED, see _default_state()'s
             # comment on this same field for the full reasoning (RTCM
             # 1005/1006 requires ellipsoidal height; broadcasting a
@@ -585,20 +520,13 @@ class StateManager:
             # current_position/applied_position's own
             # 'broadcast_height_type' field is the real record.
             'broadcast_height_type': 'ellipsoidal',
-            'ppp_ar_enabled': bool(ppp_ar_enabled),
-            # Reset fixed-slot tracking for a fresh run - see
-            # _default_state()'s comment for why this is separate from
-            # last_update_time.
-            'ppp_ar_completed_slots': [],
             # Part 5 attempt history is per-survey - a fresh survey starts
-            # with no attempts of its own yet, same reasoning as
-            # ppp_ar_completed_slots above.
+            # with no attempts of its own yet.
             'last_ppp_ar_attempt': None,
             'ppp_ar_attempts': [],
         })
 
-        logger.info(f"Started {target_hours}-hour survey (PPP tier: {ppp_tier}, "
-                    f"PPP-AR: {'enabled' if ppp_ar_enabled else 'disabled'})")
+        logger.info(f"Started {target_hours}-hour survey")
         return self.save_state()
     
     def update_progress(self, 

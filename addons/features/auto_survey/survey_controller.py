@@ -8,20 +8,16 @@ Orchestrates:
 - RTKBase configuration auto-discovery
 - GNSS data logging (enables str2str_file if needed)
 - RINEX conversion from raw logs
-- PPP-static positioning (rnx2rtkp -p 8) using CDDIS precise orbit/clock
-  products, with outlier rejection
+- PRIDE-PPPAR (pdp3) ambiguity-resolved PPP-static positioning
 - Geoid correction
 - ITRF2020 -> BGS2005 transformation (Инструкция № РД-02-20-25, Чл.22,
   ал.1 - see bgs2005_transformer.py) before RTCM broadcast
 - RTKBase configuration updates
 - State persistence
 
-PHASE 2D: full replacement of SPPProcessor with PPPProcessor - no SPP
-fallback. A failed precise-product fetch or PPP processing run surfaces as
-a failed update (via StateManager.record_update_failure()), exactly like
-any other failure mode already handled here; it does not silently degrade
-to SPP. This matches Pesho's explicit "no fallback, no silent start"
-decision, already established for ppp_downloader.py's own error handling.
+PRIDE-PPPAR is the only positioning backend - no SPP or rnx2rtkp fallback.
+A failed product wait or PPP run surfaces as a recorded failure and is
+retried by the final loop; it never silently degrades.
 """
 
 import logging
@@ -39,18 +35,15 @@ import requests
 from .rtkbase_config import RTKBaseConfig
 from .runtime_paths import GM_RUNTIME_DIR
 from .rinex_converter import RINEXConverter
-from .ppp_processor import PPPProcessor, antenna_type_in_antex, classify_band_calibration
-from .ppp_downloader import PPPDownloader, PPPDownloaderError
+from .antex_support import AntexSupport, antenna_type_in_antex, classify_band_calibration
 from .pride_pppar_processor import (
     PridePpparProcessor, Pdp3NotFoundError, check_processed_window_coverage,
     PPP_AR_SAMPLE_INTERVAL_S,
 )
-from .ppp_ar_failure import describe_failure, should_retry, STAGE_PDP3_FAILED, STAGE_FIX_RATE_BELOW_THRESHOLD, STAGE_APPLY_FAILED
+from .ppp_ar_failure import describe_failure, STAGE_PDP3_FAILED, STAGE_FIX_RATE_BELOW_THRESHOLD, STAGE_APPLY_FAILED
 from .product_availability import check_products_available
 from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef, arp_to_marker, verify_arp_to_marker_offset
-from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
-from .config_manager import ConfigManager
 from .state_manager import StateManager, SurveyState
 
 try:
@@ -158,8 +151,7 @@ class SurveyController:
     - Auto-discovers RTKBase configuration
     - Enables file logging automatically
     - Converts raw logs to RINEX
-    - Processes with PPP-static positioning (rnx2rtkp -p 8, CDDIS precise
-      orbit/clock products)
+    - Processes with PRIDE-PPPAR (pdp3) PPP-AR static positioning
     - Transforms ITRF2020 -> BGS2005 before broadcast (Инструкция №
       РД-02-20-25, Чл.22, ал.1)
     - Updates RTKBase config hourly
@@ -228,27 +220,9 @@ class SurveyController:
         
         # Initialize components
         self.rinex = RINEXConverter()
-        self.spp = PPPProcessor(rtkbase_root=self.rtkbase.rtkbase_root)
-        self.estimator = PositionEstimator(outlier_threshold=3.5, min_epochs=50)
+        self.antex = AntexSupport(rtkbase_root=self.rtkbase.rtkbase_root)
         self.geoid = GeoidCorrector()
-        self.config = ConfigManager(settings_file)
         self.state = StateManager(state_file)
-
-        # Precise-product downloader (CDDIS SP3/CLK, Phase 2b) - one
-        # instance reused across the whole survey so the authenticated
-        # session (Earthdata Login cookies) persists across interim
-        # updates instead of re-authenticating every 15 minutes/hour.
-        #
-        # NOTE: geomaxima_ppp/ (ANTEX + this products/ cache) still lives
-        # under rtkbase_root - ppp_processor.py's DEFAULT_ANTEX_RELATIVE_PATH
-        # and the OTA updater's ANTEX download both hardcode that location
-        # too, so moving only the products/ subdirectory here would split
-        # one logical directory across two locations. Left as-is; a full
-        # geomaxima_ppp/ move needs those call sites changed together
-        # (tracked separately, not part of this fix).
-        self.ppp_products_dir = self.rtkbase.rtkbase_root / "geomaxima_ppp" / "products"
-        self.ppp_products_dir.mkdir(parents=True, exist_ok=True)
-        self.ppp_downloader = PPPDownloader(products_dir=self.ppp_products_dir)
 
         # Geoid config (upload directory + persisted config). GeoMaxima:
         # moved OUT of the git checkout to GM_RUNTIME_DIR (/var/lib/rtkbase
@@ -264,18 +238,13 @@ class SurveyController:
         
         # Survey parameters
         self.target_hours = 24
-        self.ppp_tier = 'rapid'
-        self.ppp_ar_enabled = False
         # Last "PPP-AR ATTEMPT ..." summary line logged by
-        # _log_ppp_ar_attempt() (interim or finalize) - used by
+        # _log_ppp_ar_attempt() - used by
         # _finalize_survey()'s "No final position computed" error path to
         # surface the actual last PPP-AR failure reason instead of a
         # generic, context-free message. None until the first PPP-AR
         # attempt of this instance's lifetime.
         self._last_ppp_ar_attempt_summary = None
-        # Classified failure of the last PPP-AR attempt (ppp_ar_failure),
-        # read by the slot retry loop to decide whether a rerun can help.
-        self._last_ppp_ar_failure_info = None
 
         # True only in the survey runner service (geomaxima_survey.service,
         # see survey_runner.py), the single owner of the survey thread and of
@@ -290,25 +259,6 @@ class SurveyController:
         # failing a healthy survey.
         self.recovery_pending = False
 
-        # Hard timeout: fail survey if no successful coordinate update happens for X minutes.
-        # Configurable via env var AUTOSURVEY_UPDATE_TIMEOUT_MINUTES.
-        try:
-            self.update_timeout_minutes = int(os.getenv('AUTOSURVEY_UPDATE_TIMEOUT_MINUTES', '60'))
-        except Exception:
-            self.update_timeout_minutes = 60
-        if self.update_timeout_minutes < 1:
-            self.update_timeout_minutes = 60
-        
-        # Progressive update schedule:
-        # - First 6 hours: every 15 minutes (0.25 hours)
-        # - 6-24 hours: every 1 hour
-        # - At 24 hours: final update
-        self.update_schedule = {
-            'initial_interval': 0.25,  # 15 minutes for first 6 hours
-            'initial_period': 6,       # Use 15-min interval for 6 hours
-            'later_interval': 1        # 1 hour after 6 hours
-        }
-        
         # Working directory for temp files. GeoMaxima: moved OUT of the git
         # checkout to GM_RUNTIME_DIR - same reasoning/migration as geoid_dir
         # above.
@@ -322,7 +272,6 @@ class SurveyController:
         
         logger.info(f"Survey controller initialized (auto_mode={auto_mode})")
         logger.info(f"Work dir: {self.work_dir}")
-        logger.info(f"Hard update timeout: {self.update_timeout_minutes} minutes")
     
     def _ensure_file_logging(self) -> bool:
         """
@@ -375,37 +324,6 @@ class SurveyController:
             logger.error(f"Failed to enable file logging: {e}")
             return False
 
-    def _file_logging_enabled_by_user(self) -> bool:
-        """
-        True if str2str_file.service is currently ENABLED (systemctl
-        is-enabled) - the persistent signal that the user turned it on via
-        the UI (ServiceController.start() -> EnableUnitFiles), as opposed
-        to merely being active because this survey (or a prior one) ran
-        `systemctl start` on it without enabling the unit. See
-        _ensure_file_logging()'s docstring for why this distinction is the
-        one-owner rule's actual basis, not is-active alone.
-
-        Fails safe toward "enabled" (True) on any inability to check -
-        mirroring ServiceMonitor._check_service()'s own "exception path
-        defaults 'enabled' to True" choice (0b2dfe5): wrongly treating a
-        user-managed service as ours to stop is a worse failure mode than
-        wrongly leaving a service running that this survey could have
-        stopped.
-        """
-        try:
-            result = subprocess.run(
-                ['systemctl', 'is-enabled', 'str2str_file.service'],
-                capture_output=True,
-                text=True
-            )
-            status = result.stdout.strip()
-            if not status:
-                return True
-            return status not in ('disabled', 'masked')
-        except Exception as e:
-            logger.warning(f"_file_logging_enabled_by_user: is-enabled check failed, "
-                           f"defaulting to enabled/user-managed: {e}")
-            return True
 
     # Raw log must have grown within this many seconds to count as "alive" -
     # str2str_file.service can stay systemd-active while the receiver has
@@ -476,6 +394,65 @@ class SurveyController:
             return False, f"raw log liveness check failed: {e}"
 
         return True, ""
+
+    def _survey_loop(self):
+        """
+        Main survey loop - runs in the survey runner's background thread.
+
+        Data collection runs until the target duration is reached; then
+        _finalize_survey() takes over: it computes the final PRIDE-PPPAR
+        position automatically once the precise products of the observation
+        days are published (see product_availability.py). There are no
+        interim positions: the products of an observation day appear ~13-19 h
+        after the day ends, so an interim run on the day's own data cannot
+        complete. The loop also keeps the File service healthy and the
+        liveness heartbeat fresh.
+        """
+        # IMPORTANT: Use persisted state start_time so recovery/restarts don't reset elapsed time.
+        status = self.state.get_status()
+        start_time_raw = status.get('start_time')
+        if start_time_raw:
+            start_time = datetime.fromisoformat(start_time_raw)
+        else:
+            # Should not happen for RUNNING surveys, but keep loop resilient.
+            start_time = datetime.utcnow()
+            logger.warning("Survey state missing start_time; using current time")
+
+        logger.info(f"Survey loop started, target: {self.target_hours} hours")
+        last_file_logging_check = datetime.min
+
+        try:
+            while self._running:
+                # Stop doing work if state is not RUNNING/FINALIZING (e.g., paused/reset from UI)
+                if self.state.survey_state not in (SurveyState.RUNNING, SurveyState.FINALIZING):
+                    time.sleep(2)
+                    continue
+
+                now = datetime.utcnow()
+                elapsed_hours = (now - start_time).total_seconds() / 3600
+
+                # str2str_file.service crash check (only acts while this survey
+                # owns the service - see _check_file_logging_health()).
+                if (now - last_file_logging_check).total_seconds() >= self.FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS:
+                    self._check_file_logging_health()
+                    last_file_logging_check = now
+
+                # Liveness heartbeat for the status page / operator (written at
+                # most once per HEARTBEAT_INTERVAL_SECONDS).
+                self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
+
+                # Check if survey completed (persisted start_time makes this reliable after restart)
+                if elapsed_hours >= self.target_hours:
+                    logger.info(f"Target duration reached ({self.target_hours}h), performing final update...")
+                    self._finalize_survey()
+                    break
+
+                time.sleep(10)
+
+        except Exception as e:
+            logger.error(f"Survey loop error: {e}", exc_info=True)
+            self._fail(str(e))
+            self._running = False
 
     def _check_file_logging_health(self) -> None:
         """
@@ -637,74 +614,22 @@ class SurveyController:
             logger.error(f"Failed to stop file logging: {e}")
             return False
     
-    def start_survey(self, target_hours: int = 24, ppp_tier: str = 'rapid',
-                      ppp_ar_enabled: bool = False) -> bool:
+    def start_survey(self, target_hours: int = 24) -> bool:
         """
         Start new survey session
 
         Args:
-            target_hours: Survey duration in hours (default: 24)
-            ppp_tier: CDDIS precise-product tier for PPP-static processing
-                ("ultra-rapid" | "rapid" | "final"). "rapid" is the default:
-                usually available within the survey's own timeframe (up to
-                ~41h latency) without the accuracy tradeoffs of
-                ultra-rapid's predicted-orbit half.
-            ppp_ar_enabled: Opt-in PRIDE-PPPAR final ambiguity-resolution
-                step (default False - not default-on). If True, runs
-                pdp3 ONCE at survey finalization only (never per interim
-                update, to stay within this station's RAM budget) via
-                _run_ppp_ar(); its result replaces the rnx2rtkp broadcast
-                position only if its wide-lane/narrow-lane fix rates clear
-                PPP_AR_MIN_WL_FIX_RATE_PERCENT/PPP_AR_MIN_NL_FIX_RATE_PERCENT,
-                otherwise the existing rnx2rtkp result is used unchanged
-                (never a hard failure).
+            target_hours: Survey duration in hours (default: 24). When it is
+                over, data collection stops and the final PRIDE-PPPAR position
+                is computed automatically once the precise products are
+                published (see _finalize_survey()).
 
         Returns:
             True if started successfully
         """
-        if ppp_tier not in ('ultra-rapid', 'rapid', 'final'):
-            logger.error(f"Invalid ppp_tier: {ppp_tier!r}")
-            return False
-
-        if not isinstance(ppp_ar_enabled, bool):
-            logger.error(f"Invalid ppp_ar_enabled (must be bool): {ppp_ar_enabled!r}")
-            return False
-
         if self._running:
             logger.warning("Survey already running")
             return False
-
-        # GeoMaxima: one-time cleanup of stray top-level clutter in the
-        # PRIDE-PPPAR work directory ROOT, predating the per-slot isolation
-        # fix (commit d12e8c6) - that fix only isolates and prunes
-        # slot_*/ subdirectories created FROM NOW ON; it does nothing
-        # about leftover files that were already sitting directly in
-        # work_dir/pride_pppar/ from before that fix existed. Confirmed
-        # live on BaseStation: stray .obs files from multiple different
-        # calendar days and multiple brdm*.p broadcast nav files, some
-        # root-owned and some not, sitting directly in that root
-        # directory. Run automatically at every survey start (not a
-        # manual step to remember) so this can never silently recur.
-        if ppp_ar_enabled:
-            self._cleanup_ppp_ar_root_stray_files()
-
-        # Retention follow-up (condition 2 of the approved proposal):
-        # one-time cleanup of LEGACY loose .obs/.nav files directly in
-        # work_dir/rinex/ (the root, not inside a slot_*/ subdirectory) -
-        # left over from before this fix gave rnx2rtkp's own interim-
-        # update path its own isolated+pruned slot dirs (that fix only
-        # covers conversions FROM NOW ON, same limitation
-        # _cleanup_ppp_ar_root_stray_files() above already has for the
-        # PPP-AR side). Unlike that cleanup, this one is AGE-GATED (only
-        # files older than LEGACY_RINEX_FILE_AGE_DAYS) rather than
-        # unconditional, since these are derived data (reproducible from
-        # the raw archives in data/, never the only copy of anything) but
-        # a loose file younger than that could still legitimately belong
-        # to a survey running RIGHT NOW on a station that hasn't yet
-        # fully migrated every in-flight file to a slot dir. Runs
-        # unconditionally (not gated on ppp_ar_enabled) since BOTH the
-        # rnx2rtkp and PRIDE-PPPAR paths write into work_dir/rinex/.
-        self._cleanup_legacy_rinex_root_files()
 
         # Ensure file logging is enabled
         if self.auto_mode:
@@ -714,10 +639,7 @@ class SurveyController:
 
         # Initialize state
         self.target_hours = target_hours
-        self.ppp_tier = ppp_tier
-        self.ppp_ar_enabled = ppp_ar_enabled
-        if not self.state.start_survey(target_hours, ppp_tier=ppp_tier,
-                                        ppp_ar_enabled=ppp_ar_enabled):
+        if not self.state.start_survey(target_hours):
             logger.error("Failed to initialize survey state")
             return False
         
@@ -845,353 +767,13 @@ class SurveyController:
         self._services_restarted = len(restarted) > 0
         return result
     
-    def _compute_ppp_ar_slots(self) -> list:
-        """
-        Fixed PPP-AR interim slot schedule: 0h, 4h, 8h, ... up to but
-        EXCLUDING target_hours (the final slot is always handled
-        separately by _finalize_survey(), never by this interim
-        schedule) - per Pesho's explicit "0h, 4h, 8h... to target_hours =
-        final, excluding the final slot" instruction.
-
-        ORDERING GUARANTEE (enforced by _survey_loop()'s caller logic, not
-        here): a slot is only ever run/applied if no LATER slot is
-        simultaneously due - e.g. after a restart/downtime lets both the
-        4h and 8h slots become due in the same tick, only the 8h slot
-        actually runs; the 4h slot is marked attempted and skipped
-        outright, never run out of order. This is because a later slot
-        always has more accumulated data and is therefore always at least
-        as accurate, so an older due slot must never be allowed to
-        overwrite a newer one's position - neither in the same tick nor
-        on a later one.
-
-        Returns:
-            Sorted list of slot_hours floats.
-        """
-        # NO INTERIM SLOTS (owner's decision, 2026-10-24): the precise products
-        # (orbit/ERP) of an observation day are published ~13-19 h after the
-        # day ends, so an interim PPP-AR run on the day's own data cannot
-        # complete (confirmed live: pdp3 aborts in sp3orb, read_igserp). Only the
-        # FINAL result is computed, automatically, once the products exist
-        # (see _finalize_survey()/product_availability.py). The slot machinery
-        # below stays but receives an empty schedule.
-        return []
-
-    def _survey_loop(self):
-        """
-        Main survey loop - runs in background thread
-
-        Two entirely separate update schedules, chosen once per loop by
-        self.ppp_ar_enabled (checked once here, not per-tick, since it
-        cannot change while a survey is running - see start_survey()):
-
-        - self.ppp_ar_enabled == False (default): the original rnx2rtkp/
-          CDDIS progressive schedule - 15min (0-6h) -> 1h (6-24h) ->
-          final. Unchanged from before this method was split.
-        - self.ppp_ar_enabled == True: PRIDE-PPPAR-ONLY fixed-slot
-          schedule - 0h, 4h, 8h, ... (PPP_AR_SLOT_INTERVAL_HOURS) up to
-          target_hours, handled by _run_ppp_ar_interim(). rnx2rtkp/CDDIS
-          is never invoked in this mode (see _finalize_survey()). A
-          failed/skipped slot is simply marked attempted and NOT retried
-          before the next fixed slot - no 60s-retry reschedule the way
-          the rnx2rtkp path does. ORDERING GUARANTEE: if multiple
-          unattempted slots are due at once (e.g. after a restart/
-          downtime), only the LATEST (highest) one is actually run and
-          broadcast - any earlier due-but-unattempted slots are marked
-          attempted and skipped without ever running, since a later slot
-          always has more accumulated data and must never be overwritten
-          by an older one's result (see _compute_ppp_ar_slots()'s
-          docstring).
-        """
-        # IMPORTANT: Use persisted state start_time so recovery/restarts don't reset elapsed time.
-        status = self.state.get_status()
-        start_time_raw = status.get('start_time')
-        if start_time_raw:
-            start_time = datetime.fromisoformat(start_time_raw)
-        else:
-            # Should not happen for RUNNING surveys, but keep loop resilient.
-            start_time = datetime.utcnow()
-            logger.warning("Survey state missing start_time; using current time")
-
-        if self.ppp_ar_enabled:
-            ppp_ar_slots = self._compute_ppp_ar_slots()
-            logger.info(f"Survey loop started, target: {self.target_hours} hours")
-            logger.info(f"PPP-AR enabled: fixed-slot schedule every "
-                        f"{self.PPP_AR_SLOT_INTERVAL_HOURS}h ({ppp_ar_slots}), "
-                        f"final slot handled separately at {self.target_hours}h. "
-                        f"rnx2rtkp/CDDIS is NOT used in this mode.")
-        else:
-            # Schedule next update using persisted last_update_time (so restarts don't delay updates).
-            last_update_raw = status.get('last_update_time')
-            if last_update_raw:
-                try:
-                    last_update_time = datetime.fromisoformat(last_update_raw)
-                except Exception:
-                    last_update_time = None
-            else:
-                last_update_time = None
-
-            elapsed_hours_now = (datetime.utcnow() - start_time).total_seconds() / 3600
-            initial_interval = self.update_schedule['initial_interval']
-            later_interval = self.update_schedule['later_interval']
-            interval = initial_interval if elapsed_hours_now < self.update_schedule['initial_period'] else later_interval
-            next_update = (last_update_time + timedelta(hours=interval)) if last_update_time else (start_time + timedelta(hours=interval))
-
-            logger.info(f"Survey loop started, target: {self.target_hours} hours")
-            logger.info("Progressive updates: 15min (0-6h) → 1h (6-24h) → final (24h)")
-            logger.info(f"Using RINEX conversion workflow (RTKBase raw logs → RINEX → PPP-static, tier={self.ppp_tier})")
-
-        last_file_logging_check = datetime.min
-        last_overdue_warning = datetime.min
-
-        try:
-            while self._running:
-                # Stop doing work if state is not RUNNING (e.g., paused/reset from UI)
-                if self.state.survey_state not in (SurveyState.RUNNING, SurveyState.FINALIZING):
-                    time.sleep(2)
-                    continue
-
-                now = datetime.utcnow()
-                elapsed_hours = (now - start_time).total_seconds() / 3600
-
-                # str2str_file.service crash check (only acts if this survey
-                # owns the service - see _check_file_logging_health()'s
-                # docstring). Gated to once per
-                # FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS, not every 10s
-                # tick, to avoid polling systemctl needlessly.
-                if (now - last_file_logging_check).total_seconds() >= self.FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS:
-                    self._check_file_logging_health()
-                    last_file_logging_check = now
-
-                # Liveness heartbeat for the status page / operator (written at most
-                # once per HEARTBEAT_INTERVAL_SECONDS).
-                self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
-
-                # Hard timeout: fail if no successful update for too long.
-                # PPP-AR mode uses PPP_AR_UPDATE_TIMEOUT_MINUTES instead of
-                # update_timeout_minutes - the latter is calibrated for the
-                # rnx2rtkp path's much shorter interval-with-retry
-                # schedule and would spuriously trip roughly an hour after
-                # every successful 4h PPP-AR slot (see
-                # PPP_AR_UPDATE_TIMEOUT_MINUTES's own comment).
-                try:
-                    st = self.state.get_status()
-                    last_success_raw = st.get('last_success_update_time')
-                    if last_success_raw:
-                        last_success = datetime.fromisoformat(last_success_raw)
-                    else:
-                        last_success = start_time
-                    minutes_since_success = (now - last_success).total_seconds() / 60.0
-                    effective_timeout_minutes = (
-                        self.PPP_AR_UPDATE_TIMEOUT_MINUTES if self.ppp_ar_enabled
-                        else self.update_timeout_minutes
-                    )
-                    if minutes_since_success >= float(effective_timeout_minutes):
-                        reason = st.get('last_failure_reason') or 'No successful coordinate update'
-                        msg = (
-                            f"No successful coordinate update for {minutes_since_success:.0f} minutes "
-                            f"(timeout={effective_timeout_minutes}): {reason}"
-                        )
-                        if self.ppp_ar_enabled:
-                            # PPP-AR mode: the final result is what counts and it
-                            # is retried until it succeeds; a run of failed or
-                            # skipped interim slots (e.g. an uncalibrated antenna
-                            # below the fix-rate gate) must not kill a survey
-                            # that is still collecting good data. Warn hourly.
-                            if (now - last_overdue_warning).total_seconds() >= 3600:
-                                logger.warning(f"{msg} - not fatal in PPP-AR mode (the final "
-                                               f"result is retried until it succeeds)")
-                                last_overdue_warning = now
-                        else:
-                            logger.error(msg)
-                            self._fail(msg)
-                            self._running = False
-                            break
-                except Exception as timeout_err:
-                    logger.warning(f"Timeout check failed: {timeout_err}")
-
-                # Check if survey completed (use persisted start_time so completion is reliable after restart)
-                if elapsed_hours >= self.target_hours:
-                    logger.info(f"Target duration reached ({self.target_hours}h), performing final update...")
-                    self._finalize_survey()
-                    break
-
-                if self.ppp_ar_enabled:
-                    # Fixed-slot PPP-AR schedule: find all not-yet-attempted
-                    # slots whose time has come. If a restart/downtime lets
-                    # multiple slots become due at once (e.g. both the 4h
-                    # and 8h slots), only the LATEST (highest) one is
-                    # actually run and broadcast - a later slot always has
-                    # more accumulated data and is therefore always more
-                    # accurate, so an older due slot must never run and
-                    # overwrite a newer one, whether in this same tick or
-                    # on a later one. Earlier due-but-unattempted slots are
-                    # marked attempted WITHOUT ever calling
-                    # _run_ppp_ar_interim() for them - they are skipped
-                    # outright, not deferred.
-                    attempted_slots = set(self.state.get_ppp_ar_completed_slots())
-                    due_unattempted = [
-                        s for s in ppp_ar_slots
-                        if s not in attempted_slots and elapsed_hours >= s
-                    ]
-                    # Full slot-decision trace on every tick, even when
-                    # nothing is due yet - debug level so a complete
-                    # PPP-AR scheduling history is reconstructable from
-                    # logs alone if ever needed, without flooding info-
-                    # level logs on every 10s poll tick.
-                    logger.debug(
-                        f"_survey_loop PPP-AR slot check: elapsed={elapsed_hours:.3f}h, "
-                        f"all_slots={ppp_ar_slots}, attempted={sorted(attempted_slots)}, "
-                        f"due_unattempted={due_unattempted}, "
-                        f"selected={due_unattempted[-1] if due_unattempted else None}, "
-                        f"stale_skipped={due_unattempted[:-1] if len(due_unattempted) > 1 else []}"
-                    )
-                    if due_unattempted:
-                        latest_due = due_unattempted[-1]
-                        # Skip any earlier due-but-unattempted slots WITHOUT
-                        # running them - a later slot is always more
-                        # accurate (more accumulated data), so an older
-                        # slot must never be applied after a newer one is
-                        # already due. This prevents the catch-up scenario
-                        # where a stale 4h-slot result would overwrite an
-                        # already-applied, more accurate 8h-slot result on
-                        # a later tick.
-                        for stale_slot in due_unattempted[:-1]:
-                            logger.warning(
-                                f"Skipping stale PPP-AR slot={stale_slot}h without "
-                                f"running it - a later slot ({latest_due}h) is also "
-                                f"due now and is always more accurate; never overwrite "
-                                f"newer positioning data with older"
-                            )
-                            self.state.mark_ppp_ar_slot_attempted(stale_slot)
-                        # Bounded retry-soon-on-failure for THIS slot only
-                        # (see PPP_AR_SLOT_RETRY_MAX_ATTEMPTS's comment) -
-                        # a transient failure (e.g. a network blip during
-                        # product download) gets a few short-spaced
-                        # attempts before this slot is given up on and
-                        # marked attempted, rather than only ever trying
-                        # once per 4h slot. Does not affect which slot is
-                        # selected (still always latest_due) or the
-                        # "mark attempted regardless of eventual outcome"
-                        # rule - only the SAME slot is retried, never a
-                        # different/older one.
-                        slot_ok = False
-                        for attempt_num in range(1, self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS + 1):
-                            self._last_ppp_ar_failure_info = None
-                            slot_ok = self._run_ppp_ar_interim(elapsed_hours, latest_due)
-                            if slot_ok:
-                                logger.info(
-                                    f"PPP-AR slot={latest_due}h: succeeded on attempt "
-                                    f"{attempt_num}/{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS}"
-                                )
-                                break
-                            failure_info = self._last_ppp_ar_failure_info
-                            if failure_info is not None and not should_retry(failure_info, attempt_num):
-                                logger.warning(
-                                    f"PPP-AR slot={latest_due}h attempt {attempt_num} failed "
-                                    f"[{failure_info['error_class']}: {failure_info['reason']}] - "
-                                    f"not retrying: rerunning with the same input cannot help "
-                                    f"(max {failure_info['max_attempts']} attempt(s) for this class); "
-                                    f"will wait for the next fixed slot"
-                                )
-                                break
-                            if attempt_num < self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS:
-                                logger.warning(
-                                    f"PPP-AR slot={latest_due}h attempt {attempt_num}/"
-                                    f"{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS} failed - "
-                                    f"retrying in {self.PPP_AR_SLOT_RETRY_DELAY_SECONDS}s "
-                                    f"(still within this same slot, not waiting for the "
-                                    f"next fixed slot)"
-                                )
-                                time.sleep(self.PPP_AR_SLOT_RETRY_DELAY_SECONDS)
-                            else:
-                                logger.warning(
-                                    f"PPP-AR slot={latest_due}h: all "
-                                    f"{self.PPP_AR_SLOT_RETRY_MAX_ATTEMPTS} attempts failed - "
-                                    f"giving up on this slot, will wait for the next fixed slot"
-                                )
-                        # Marked attempted regardless of success/failure,
-                        # only after all retries above are exhausted (or
-                        # one succeeded) - see _run_ppp_ar_interim()'s
-                        # docstring.
-                        self.state.mark_ppp_ar_slot_attempted(latest_due)
-                else:
-                    # Check if update due
-                    if now >= next_update:
-                        # Determine current interval based on elapsed time
-                        if elapsed_hours < self.update_schedule['initial_period']:
-                            interval = self.update_schedule['initial_interval']
-                            logger.info(f"Interim update at {elapsed_hours:.2f}h (15-min schedule)")
-                        else:
-                            interval = self.update_schedule['later_interval']
-                            logger.info(f"Interim update at {elapsed_hours:.2f}h (1-hour schedule)")
-
-                        ok = self._perform_interim_update(elapsed_hours)
-
-                        if ok:
-                            next_update = now + timedelta(hours=interval)
-                            logger.info(f"Next update scheduled in {interval*60:.0f} minutes")
-                        else:
-                            # Retry soon instead of waiting the whole interval.
-                            # This makes the schedule 'real' as long as data becomes available.
-                            next_update = now + timedelta(seconds=60)
-                            logger.warning("Update failed; retry scheduled in 60 seconds")
-
-                # Sleep briefly before next check
-                time.sleep(10)  # Check every 10 seconds for faster completion
-
-        except Exception as e:
-            logger.error(f"Survey loop error: {e}", exc_info=True)
-            self._fail(str(e))
-            self._running = False
-    
-    def _perform_interim_update(self, elapsed_hours: float):
-        """
-        Perform interim position update (temporary coordinates)
-        
-        Updates RTKBase config with current best estimate.
-        Marks as temporary in state.
-        
-        Args:
-            elapsed_hours: Hours elapsed since survey start
-        """
-        logger.info(f"=== Interim Update ({elapsed_hours:.2f}h) ===")
-        return self._perform_update(is_final=False)
-    
-    # PPP-static's convergence behavior differs fundamentally from SPP's:
-    # a live 8-hour real test (Phase 2c) showed horizontal std shrinking
-    # from ~5.2m to ~0.098m over the session - i.e. early interim updates
-    # in a short-elapsed survey are EXPECTED to show large, unstable
-    # values, not a malfunction. still_converging (computed below, Step 7)
-    # is driven by estimate.horizontal_std_meters against this threshold,
-    # NOT by elapsed time - an earlier version of this code used a fixed
-    # elapsed-hours cutoff, but that number had no real source and was
-    # removed.
-    #
-    # PPP_CONVERGENCE_STD_METERS: UNVERIFIED PLACEHOLDER, not derived from
-    # the Phase 2c 8-hour test (that test's intermediate std values over
-    # time were not logged/available - only the start (~5.2m) and end
-    # (~0.098m) points are known) and not derived from any cited PPP
-    # convergence literature. The one related, real, in-repo precedent is
-    # gnss_parser.py's GNSSDataParser.max_std_3d default (0.05m = 5cm,
-    # gnss_parser.py line ~90) - but that threshold governs per-EPOCH
-    # quality filtering in a different, currently-unused code path (that
-    # class is not wired into SurveyController - SPPProcessor/PPPProcessor
-    # bypass it entirely), not a whole-ESTIMATE "PPP has converged"
-    # judgment, so it is not a genuine match, only the closest existing
-    # number in this codebase. 0.10m (10cm) is used here as a rough
-    # "meaningfully better than SPP's meter-level noise floor, not yet at
-    # final PPP-static cm-level accuracy" cutoff - THIS HAS NOT BEEN
-    # VALIDATED AGAINST REAL CONVERGENCE DATA. Revisit once real
-    # interim-update std progression is logged from an actual multi-hour
-    # live survey.
-    PPP_CONVERGENCE_STD_METERS = 0.10
 
     # UNVERIFIED PLACEHOLDER, not derived from any live PRIDE-PPPAR
     # fixed-vs-degraded comparison on this station (no station access
     # during development - see pride_pppar_processor.py's module
     # docstring for the same caveat on its own AR-related parsing). 90%
     # is a round, conservative-sounding threshold for "AR fix rate good
-    # enough to trust this run's position over rnx2rtkp's", chosen only
+    # enough to trust this run's position", chosen only
     # because it is clearly above a marginal/mostly-float run and clearly
     # below a clean, fully-fixed one - NOT calibrated against real
     # wl_fix_rate/nl_fix_rate distributions from actual BaseStation PPP-AR
@@ -1210,12 +792,6 @@ class SurveyController:
     PPP_AR_MIN_WL_FIX_RATE_PERCENT = 90.0
     PPP_AR_MIN_NL_FIX_RATE_PERCENT = 90.0
 
-    # Fixed PPP-AR interim slot interval (hours) - 0h, 4h, 8h, ... up to
-    # (but excluding) target_hours, per Pesho's explicit "fixed absolute
-    # slots, not floating last_success+interval" instruction. The final
-    # slot (target_hours) is handled separately by _finalize_survey(),
-    # never by this interim schedule.
-    PPP_AR_SLOT_INTERVAL_HOURS = 4.0
 
     # How often _survey_loop() re-checks str2str_file.service's health (one
     # `systemctl is-active` call) while this survey owns it - the loop
@@ -1224,54 +800,6 @@ class SurveyController:
     # is just as recoverable checked once a minute.
     FILE_LOGGING_HEALTH_CHECK_INTERVAL_SECONDS = 60
 
-    # Hard-timeout threshold (minutes) used INSTEAD OF
-    # update_timeout_minutes when self.ppp_ar_enabled - the normal
-    # update_timeout_minutes (default 60min) is calibrated for the
-    # rnx2rtkp path's ~15min/1h interval-with-60s-retry-on-failure
-    # schedule, and would spuriously hard-fail a PPP-AR survey roughly an
-    # hour after every successful 4h slot, since last_success_update_time
-    # legitimately does not change between fixed slots. Set well above
-    # PPP_AR_SLOT_INTERVAL_HOURS so only multiple consecutive missed/
-    # skipped slots (not the normal multi-hour gap between successful
-    # ones) trip it. UNCALIBRATED - a round "2 slot intervals + margin"
-    # choice, not derived from any live PPP-AR failure-rate data.
-    PPP_AR_UPDATE_TIMEOUT_MINUTES = int(PPP_AR_SLOT_INTERVAL_HOURS * 2 * 60) + 60
-
-    # Bounded, short-window retry-on-failure for the CURRENT due slot -
-    # confirmed live on BaseStation: a single transient network/DNS blip
-    # during one slot's product download (pdp3 exits 0 but produces no
-    # pos_* file - see pride_pppar_processor.py's process_ppp_ar()) meant
-    # that slot was marked "attempted" and not retried until the NEXT
-    # fixed 4h slot; two such transient failures in a row (4h then 8h)
-    # consumed nearly the entire PPP_AR_UPDATE_TIMEOUT_MINUTES (540min/9h)
-    # budget before a 3rd slot even had a chance to run, aborting an
-    # otherwise-recoverable 14h survey over what was, in the end, just a
-    # transient mirror/DNS issue - not a real station or data problem.
-    #
-    # Fix: when the CURRENT (latest-due) slot's attempt fails, retry it up
-    # to PPP_AR_SLOT_RETRY_MAX_ATTEMPTS times with
-    # PPP_AR_SLOT_RETRY_DELAY_SECONDS between attempts, all still within
-    # the SAME slot (never marked "attempted" until every retry is
-    # exhausted or one succeeds) - this does NOT change the "only the
-    # latest due slot ever runs, older due-but-unattempted slots are
-    # skipped without running" invariant (see _survey_loop()'s comment):
-    # retries only ever apply to the slot that was already selected to
-    # run, they never cause an older slot to run or re-run. Deliberately
-    # small/bounded rather than an open-ended retry loop, so a persistent
-    # (non-transient) failure still gives up promptly and lets the survey
-    # continue waiting for the next slot rather than blocking the survey
-    # loop for an extended period.
-    #
-    # Part 8: raised from 3 to 5 attempts (still 2 minutes apart = at
-    # most ~8 extra minutes per slot, trivial against the 540min/9h
-    # PPP_AR_UPDATE_TIMEOUT_MINUTES budget) - a mirror/DNS blip lasting
-    # longer than the original 3-attempt/6-minute window (the exact
-    # failure class that motivated this retry loop in the first place)
-    # would still exhaust it and fall through to "give up on this slot"
-    # unnecessarily; 5 attempts gives a slow-to-recover transient more
-    # room without meaningfully eating into the per-slot timeout budget.
-    PPP_AR_SLOT_RETRY_MAX_ATTEMPTS = 5
-    PPP_AR_SLOT_RETRY_DELAY_SECONDS = 120
 
     # Marker file name dropped into a slot_* directory to protect it from
     # _cleanup_old_ppp_ar_slot_dirs()'s count-based pruning, regardless of
@@ -1283,10 +811,7 @@ class SurveyController:
         """
         Part 6a: resolve this station's antenna_info (settings.conf)
         against the ANTEX file currently in use (igs20.atx by default,
-        or Part 6b's custom one), shared by both PPP backends
-        (_perform_update()'s rnx2rtkp path and _run_ppp_ar()'s
-        PRIDE-PPPAR path) so they can never disagree on calibration
-        status for the same physical antenna.
+        or Part 6b's custom one).
 
         antenna_calibrated is DERIVED, never a separate manually-set
         config key (per explicit instruction) - "ADVNULLANTENNA", empty,
@@ -1325,7 +850,7 @@ class SurveyController:
         # alone, so a station using a custom-calibrated antenna is
         # correctly recognized here, not just inside process_ppp()'s own
         # separate resolve_antex() call.
-        antex_path = self.spp.resolve_working_antex()
+        antex_path = self.antex.resolve_working_antex()
         calibrated = antenna_type_in_antex(antex_path, antenna_type)
         if not calibrated and antenna_type and antenna_type != 'ADVNULLANTENNA':
             logger.warning(
@@ -1354,46 +879,32 @@ class SurveyController:
                                   ppp_ar_dir: Optional[Path] = None) -> bool:
         """
         Shared geoid-correction / ITRF2020->BGS2005 transform / RTCM
-        broadcast / state-update pipeline - extracted from _perform_update()'s
-        former Steps 6-9 so BOTH the rnx2rtkp path (_perform_update()) and
-        the PRIDE-PPPAR-only path (_run_ppp_ar_interim()/_finalize_survey()
-        when self.ppp_ar_enabled) can reach an actual RTCM broadcast, not
-        just an in-memory lat/lon/height.
-
-        Before this extraction, PRIDE-PPPAR's result only ever overwrote an
-        rnx2rtkp result's lat/lon/height AFTER _perform_update() had already
-        run the full geoid/BGS2005/broadcast pipeline once - workable only
-        because rnx2rtkp always ran first. A PRIDE-PPPAR-ONLY mode (no
-        rnx2rtkp at all) has no such pipeline run to overwrite, so this
-        method exists to give it one of its own.
+        broadcast / state-update pipeline for the PRIDE-PPPAR final result
+        (called from _finalize_survey()).
 
         Args:
             lat, lon, height: raw geodetic position (ITRF2020/WGS84-family
-                datum) BEFORE geoid/BGS2005 processing - rnx2rtkp's
-                estimate.lat/lon/height, or PRIDE-PPPAR's
+                datum) BEFORE geoid/BGS2005 processing - PRIDE-PPPAR's
                 parse_ppp_ar_result()['lat'/'lon'/'height'].
             obs_file: RINEX observation file this position was derived
                 from - needed for extract_observation_epoch() (BGS2005
                 transform's t_obs).
             is_final: whether this is the survey's final update.
-            ppp_backend: 'rnx2rtkp' | 'pride-pppar' - recorded verbatim in
+            ppp_backend: 'pride-pppar' - recorded verbatim in
                 the position audit trail dict.
             position_std: dict with std_lat/std_lon/std_height/
-                std_h_meters - caller-supplied since rnx2rtkp's multi-epoch
-                estimator and PRIDE-PPPAR's single-point Sx/Sy/Sz have no
-                common shape; each caller builds what it actually has.
+                std_h_meters - caller-supplied (PRIDE-PPPAR gives a
+                single-point Sx/Sy/Sz, not N/E/U sigmas).
             num_epochs: epoch count for state's num_epochs field (0/1 for
                 PRIDE-PPPAR's single-point result).
             quality_metrics: dict merged into state's quality_metrics -
                 caller-supplied for the same reason as position_std.
             extra_position_fields: additional keys merged into the
                 position dict before it's persisted (e.g. PRIDE-PPPAR's
-                ar_wl_fix_rate/ar_nl_fix_rate) - None for the plain
-                rnx2rtkp path.
+                ar_wl_fix_rate/ar_nl_fix_rate), or None.
             ppp_ar_dir: the pdp3 work directory (cst_*/amb_*/pos_* - Part
                 5's evidence files) this PPP-AR result came from, if any
-                (None for the rnx2rtkp path, which has no separate pdp3
-                work dir). On success, BOTH this directory and obs_file's
+                (None if unknown). On success, BOTH this directory and obs_file's
                 own parent (the rinex slot dir) are marked protected (see
                 PROTECTED_SLOT_MARKER) so _cleanup_old_ppp_ar_slot_dirs()
                 never prunes the slot(s) that produced the currently-
@@ -1543,20 +1054,13 @@ class SurveyController:
                 self.state.record_update_failure(error_msg)
                 return False
 
-            if is_final:
-                logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
-            else:
-                logger.info("⏱ INTERIM UPDATE - Applying temporary coordinates (BGS2005)...")
+            logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
 
             if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height):
-                if is_final:
-                    logger.info(f"✓ RTCM broadcast: final configuration applied successfully "
-                                f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f})")
-                else:
-                    logger.info(f"✓ RTCM broadcast: temporary configuration updated "
-                                f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f})")
+                logger.info(f"✓ RTCM broadcast: final configuration applied successfully "
+                            f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f})")
 
-                # Restart services on every update so new coords take effect immediately
+                # Restart services so the new coordinates take effect immediately
                 try:
                     _announce_planned_disconnect(self.rtkbase, "auto_survey")
                     restart_result = self.restart_rtkbase_services()
@@ -1574,10 +1078,8 @@ class SurveyController:
                 return False
 
             # Step 9: Update state
-            # Explicit float() casts: values coming from rnx2rtkp's
-            # numpy-based estimator would otherwise leak numpy.float64 into
-            # the JSON-serialized state - kept here since this method now
-            # owns that serialization boundary for both backends.
+            # Explicit float() casts: keep numpy.float64 out of the
+            # JSON-serialized state - this method owns that boundary.
             #
             # position['height'] holds the height ACTUALLY BROADCAST this
             # update (broadcast_height, Step 8 above - ALWAYS ellipsoidal,
@@ -1621,8 +1123,7 @@ class SurveyController:
                 'coordinate_provisional': bgs2005.get('coordinate_provisional', False),
                 'coordinate_provisional_reason': bgs2005.get('coordinate_provisional_reason'),
                 # Which PPP backend produced the broadcast lat/lon/height
-                # above - see _perform_update()/_run_ppp_ar_interim()/
-                # _finalize_survey() callers.
+                # above (always 'pride-pppar'; kept for the audit trail).
                 'ppp_backend': ppp_backend,
             }
 
@@ -1681,11 +1182,7 @@ class SurveyController:
                 logger.warning(f"_apply_geodetic_position: failed to protect slot dir(s) "
                                f"for this accepted result: {e}")
 
-            if is_final:
-                logger.info(f"✓ FINAL UPDATE complete ({ppp_backend}) - Epochs: {num_epochs}")
-            else:
-                logger.info(f"✓ Interim update complete ({ppp_backend}) - Epochs: {num_epochs}"
-                            + (" (still converging)" if quality_metrics.get('still_converging') else ""))
+            logger.info(f"✓ FINAL UPDATE complete ({ppp_backend}) - Epochs: {num_epochs}")
 
             return True
 
@@ -1697,210 +1194,6 @@ class SurveyController:
                 pass
             return False
 
-    def _perform_update(self, is_final: bool = False) -> bool:
-        """
-        Perform position update using RINEX + PPP-static workflow:
-        1. Find latest raw GNSS log file
-        2. Convert to RINEX (obs + nav)
-        3. Fetch CDDIS precise orbit/clock products, process with
-           rnx2rtkp -p 8 (PPP-static)
-        4. Parse position solutions
-        5. Estimate mean position with outlier rejection
-        6-9. Geoid correction, ITRF2020->BGS2005 transform, RTCM broadcast,
-           state update - delegated to _apply_geodetic_position() (shared
-           with the PRIDE-PPPAR-only path - see that method's docstring).
-        """
-        try:
-            # Step 1: Find latest raw data file
-            raw_file = self.rtkbase.get_data_file()
-
-            if not raw_file or not raw_file.exists():
-                logger.warning("No raw data file found - waiting for data...")
-                self.state.record_update_failure("No raw data file found")
-                return False
-
-            logger.info(f"Processing raw file: {raw_file.name} ({raw_file.stat().st_size / 1024:.1f} KB)")
-
-            # Step 2: Convert to RINEX
-            #
-            # RETENTION (rule 1 of the Part 4b/5-era retention proposal):
-            # isolated per-attempt directory, same reasoning/pattern as
-            # _run_ppp_ar()'s own rinex_dir/pride_pppar_dir - this path
-            # (rnx2rtkp, run on every progressive interim update, 15min
-            # intervals for the first 6h of a survey) used to share ONE
-            # directory across every call for the entire survey, with no
-            # pruning at all: convert_raw_to_rinex_obs() picks the newest
-            # *.obs file in whatever directory it's given BY MTIME, so old
-            # obs/nav files just accumulated silently forever (the one
-            # unpruned accumulation point left after ca1dfc3 gave the
-            # PPP-AR path its own isolated+pruned directories).
-            update_label = "final" if is_final else "interim"
-            run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
-            rinex_root = self.work_dir / "rinex"
-            rinex_dir = rinex_root / f"slot_{update_label}_{run_id}"
-            # Part 6a: populate ANT # / TYPE and REC # / TYPE / VERS in
-            # the RINEX header for completeness/audit trail, even though
-            # rnx2rtkp itself reads ant1-anttype from its own -k conf
-            # (see ppp_processor.py's _generate_ppp_conf()), not this
-            # header - no zero_antenna_delta here, since that same -k
-            # conf's ant1-antdel{e,n,u}=0 already guarantees the ARP-only
-            # processing convention for this path independently of
-            # whatever this header's own delta says.
-            antenna = self._resolve_antenna_calibration()
-            receiver_info = self.rtkbase.get_receiver_info()
-            receiver_hr = f"/{receiver_info.get('model', '')}/{receiver_info.get('firmware', '')}"
-            rinex_result = self.rinex.convert_raw_to_rinex_obs(
-                raw_file, rinex_dir,
-                antenna_type=antenna['antenna_type'] if antenna['antenna_calibrated'] else None,
-                receiver_info=receiver_hr,
-            )
-            self._cleanup_old_ppp_ar_slot_dirs(rinex_root, keep_dir=rinex_dir)
-
-            if not rinex_result:
-                logger.error("RINEX conversion failed")
-                self.state.record_update_failure("RINEX conversion failed")
-                return False
-
-            obs_file, nav_file = rinex_result
-            logger.info(f"✓ RINEX files created: {obs_file.name}, {nav_file.name if nav_file else 'N/A'}")
-
-            # Step 3: Fetch CDDIS precise products for the configured tier,
-            # then process with rnx2rtkp -p 8 (PPP-static). No SPP fallback
-            # on any failure here - per Pesho's explicit "no fallback, no
-            # silent start" decision (already established for
-            # ppp_downloader.py's own error handling), a failed fetch or a
-            # failed PPP run surfaces as a failed update like any other
-            # failure mode in this method, not a silent degrade to SPP.
-            survey_status = self.state.get_status()
-            survey_start_raw = survey_status.get('start_time')
-            survey_start_time = datetime.fromisoformat(survey_start_raw) if survey_start_raw else datetime.utcnow()
-
-            try:
-                products = self.ppp_downloader.fetch_products(self.ppp_tier, survey_start_time)
-            except PPPDownloaderError as e:
-                logger.error(f"Precise product fetch failed ({self.ppp_tier}): {e}")
-                self.state.record_update_failure(f"Precise product fetch failed ({self.ppp_tier}): {e}")
-                return False
-
-            sp3_file = products.get('sp3')
-            clk_file = products.get('clk')  # None for ultra-rapid - process_ppp() handles this
-            logger.info(f"✓ Precise products ready: sp3={sp3_file.name if sp3_file else 'N/A'}, "
-                        f"clk={clk_file.name if clk_file else '(none - ultra-rapid, SP3-embedded clocks)'}")
-
-            # Part 6a: reuses the SAME antenna calibration resolved at
-            # Step 2 above (for convbin's -ha header population) - never
-            # re-resolved per sub-step, so both halves of this update
-            # (RINEX header, rnx2rtkp -k conf) can never disagree on
-            # whether this station's antenna is calibrated.
-            pos_file = self.spp.process_ppp(
-                obs_file, sp3_file, nav_file=nav_file, clk_file=clk_file,
-                antenna_type=antenna['antenna_type'] if antenna['antenna_calibrated'] else None,
-            )
-
-            if not pos_file:
-                logger.error("PPP-static processing failed")
-                self.state.record_update_failure("PPP-static processing failed (rnx2rtkp -p 8)")
-                return False
-
-            logger.info(f"✓ PPP-static position file: {pos_file.name}")
-
-            # Step 4: Parse positions - parse_position_file() is unchanged
-            # from SPPProcessor (RTKLIB's -f 2 output format is
-            # mode-independent, confirmed Phase 2c) and reused as-is here.
-            positions = self.spp.parse_position_file(pos_file)
-
-            if not positions:
-                logger.warning("No positions in PPP-static output")
-                self.state.record_update_failure("No positions in PPP-static output")
-                return False
-
-            # Accept common RTKLIB quality flags.
-            # 1=FIX, 2=FLOAT, 4=DGPS, 5=SINGLE, 6=PPP (confirmed live,
-            # Phase 2c: rnx2rtkp -p 8 reports Q=6 for PPP solutions)
-            quality_positions = [p for p in positions if p.get('Q') in (1, 2, 4, 5, 6)]
-
-            if not quality_positions:
-                logger.warning(f"No PPP-static solutions found (total positions: {len(positions)})")
-                self.state.record_update_failure("No usable solutions in PPP-static output (quality filter)")
-                return False
-
-            logger.info(f"Found {len(quality_positions)} PPP-static solutions")
-
-            # Step 5: Estimate mean position
-            estimate = self.estimator.estimate_position(quality_positions)
-
-            if not estimate:
-                logger.error("Failed to estimate position")
-                self.state.record_update_failure("Failed to estimate position (insufficient/unstable data)")
-                return False
-
-            logger.info(f"Position estimate (ITRF2020): {estimate.lat:.8f}°, {estimate.lon:.8f}°, {estimate.height:.3f}m")
-            logger.info(f"Std: H={estimate.horizontal_std_meters*1000:.1f}mm, V={estimate.std_height*1000:.1f}mm")
-
-            # PPP-static convergence is slow relative to SPP (see
-            # PPP_CONVERGENCE_STD_METERS above) - interim updates whose
-            # horizontal std is still above that (unverified placeholder)
-            # threshold are flagged so the UI can show "still converging"
-            # instead of implying the shown accuracy is final. Driven by
-            # the actual estimate quality (estimate.horizontal_std_meters,
-            # already computed in Step 5 above), not elapsed time.
-            # bool(...) cast: estimate.horizontal_std_meters is
-            # numpy.float64 (position_estimator.py's np.sqrt()-derived
-            # property), so the ">" comparison produces numpy.bool_, not a
-            # native bool - confirmed live on BaseStation as the cause of
-            # "Object of type bool is not JSON serializable" at save_state()
-            # time. Explicit cast here, consistent with the float() casts
-            # applied to the other numpy-derived quality_metrics fields
-            # below.
-            still_converging = bool((not is_final) and (estimate.horizontal_std_meters > self.PPP_CONVERGENCE_STD_METERS))
-
-            # Grep-able std-vs-time data point, logged on every update
-            # (interim and final) - PPP_CONVERGENCE_STD_METERS is an
-            # unverified placeholder (see its definition above); this line
-            # exists specifically to accumulate real elapsed/std pairs
-            # from live surveys so that placeholder can be replaced with a
-            # calibrated value once enough real progressions are recorded.
-            elapsed_hours_for_log = (datetime.utcnow() - survey_start_time).total_seconds() / 3600
-            logger.info(
-                f"PPP convergence: elapsed={elapsed_hours_for_log:.2f}h "
-                f"std={estimate.horizontal_std_meters:.3f}m "
-                f"still_converging={still_converging}"
-            )
-
-            # Steps 6-9 (geoid correction, ITRF2020->BGS2005 transform,
-            # RTCM broadcast, state update) - delegated to the shared
-            # helper (see its docstring for why this is now shared with
-            # the PRIDE-PPPAR-only path).
-            return self._apply_geodetic_position(
-                lat=estimate.lat,
-                lon=estimate.lon,
-                height=estimate.height,
-                obs_file=obs_file,
-                is_final=is_final,
-                ppp_backend='rnx2rtkp',
-                position_std={
-                    'std_lat': float(estimate.std_lat),
-                    'std_lon': float(estimate.std_lon),
-                    'std_height': float(estimate.std_height),
-                    'std_h_meters': float(estimate.horizontal_std_meters),
-                },
-                num_epochs=estimate.num_epochs,
-                quality_metrics={
-                    'mean_sats': float(estimate.mean_sats) if hasattr(estimate, 'mean_sats') else 0,
-                    'rejected_epochs': int(estimate.rejected_epochs) if hasattr(estimate, 'rejected_epochs') else 0,
-                    'is_final': is_final,
-                    'ppp_tier': self.ppp_tier,
-                    'still_converging': still_converging,
-                },
-            )
-
-        except Exception as e:
-            logger.error(f"Update failed: {e}", exc_info=True)
-            try:
-                self.state.record_update_failure(f"Unhandled exception: {e}")
-            except Exception:
-                pass
-            return False
     
     # How many PROTECTED slot dirs (see PROTECTED_SLOT_MARKER) to allow to
     # accumulate before the OLDEST protected ones are pruned too - a
@@ -1963,9 +1256,7 @@ class SurveyController:
 
     def _cleanup_old_ppp_ar_slot_dirs(self, ppp_ar_root: Path, keep_dir: Path) -> None:
         """
-        Prune old per-slot work directories under ppp_ar_root (PRIDE-PPPAR
-        AND, since the retention-policy follow-up, the rnx2rtkp path's own
-        per-update rinex_dir - see _perform_update()'s Step 2).
+        Prune old per-slot work directories under ppp_ar_root (PRIDE-PPPAR).
 
         PROTECTED dirs (containing PROTECTED_SLOT_MARKER - written by
         _apply_geodetic_position() for the slot(s) that produced the
@@ -2038,80 +1329,6 @@ class SurveyController:
         except Exception as e:
             logger.warning(f"_cleanup_old_ppp_ar_slot_dirs: pruning failed (non-fatal): {e}")
 
-    def _cleanup_ppp_ar_root_stray_files(self) -> None:
-        """
-        Remove stray top-level clutter sitting directly in
-        work_dir/pride_pppar/ (the ROOT, not a slot_* subdirectory) -
-        one-time cleanup for anything left over from BEFORE the per-slot
-        isolation fix (_run_ppp_ar()/_cleanup_old_ppp_ar_slot_dirs())
-        existed. Confirmed live on BaseStation: stray .obs files from
-        multiple different calendar days and multiple brdm*.p broadcast
-        nav files, some root-owned and some not, sitting directly in that
-        root directory - accumulated back when every attempt shared that
-        one directory directly, before slot_*/ subdirectories existed at
-        all.
-
-        Called once at the START of every PPP-AR-enabled survey
-        (start_survey()) rather than left as a manual step to remember -
-        removes:
-          - any FILE sitting directly in the root (.obs, brdm*.p/.n,
-            or anything else that isn't a directory)
-          - any DIRECTORY in the root that is NOT named "slot_*" (an
-            unrecognized/pre-fix subdirectory layout, if any)
-        Existing slot_*/ subdirectories are left alone - those are
-        already covered by _cleanup_old_ppp_ar_slot_dirs()'s own
-        keep-most-recent-N pruning (called per-attempt, not here), so a
-        new survey starting must not itself force-delete recent slot_*
-        directories that might belong to a just-finished previous survey
-        and could still be useful for postmortem debugging.
-
-        Best-effort and NON-FATAL: any failure (permissions, directory
-        doesn't exist yet, individual file/dir removal failing) is logged
-        as a warning and otherwise ignored - cleanup failing must never
-        block a survey from starting.
-        """
-        ppp_ar_root = self.work_dir / "pride_pppar"
-        try:
-            if not ppp_ar_root.is_dir():
-                logger.info(f"_cleanup_ppp_ar_root_stray_files: {ppp_ar_root} does not exist yet - nothing to clean.")
-                return
-
-            removed = []
-            failed = []
-            for entry in ppp_ar_root.iterdir():
-                if entry.is_dir() and entry.name.startswith("slot_"):
-                    # Already-isolated slot directory - leave it alone,
-                    # covered by _cleanup_old_ppp_ar_slot_dirs() instead.
-                    continue
-                try:
-                    if entry.is_dir():
-                        shutil.rmtree(entry)
-                    else:
-                        entry.unlink()
-                    removed.append(entry.name)
-                except Exception as e:
-                    failed.append((entry.name, str(e)))
-
-            if removed:
-                logger.warning(
-                    f"_cleanup_ppp_ar_root_stray_files: removed {len(removed)} stray "
-                    f"pre-existing item(s) from {ppp_ar_root} (leftover from before "
-                    f"per-slot isolation existed): {sorted(removed)}"
-                )
-            else:
-                logger.info(f"_cleanup_ppp_ar_root_stray_files: {ppp_ar_root} has no stray top-level clutter - nothing to clean.")
-
-            if failed:
-                logger.warning(
-                    f"_cleanup_ppp_ar_root_stray_files: failed to remove "
-                    f"{len(failed)} item(s) from {ppp_ar_root} (non-fatal, "
-                    f"survey will start anyway): {failed}"
-                )
-        except Exception as e:
-            logger.warning(
-                f"_cleanup_ppp_ar_root_stray_files: cleanup of {ppp_ar_root} failed "
-                f"(non-fatal, survey will start anyway): {e}"
-            )
 
     # Loose (non-slot_*) files directly in work_dir/rinex/ older than this
     # many days are removed by _cleanup_legacy_rinex_root_files() - see
@@ -2122,93 +1339,6 @@ class SurveyController:
     # before they could meaningfully contribute to a disk-space problem.
     LEGACY_RINEX_FILE_AGE_DAYS = 7
 
-    def _cleanup_legacy_rinex_root_files(self) -> None:
-        """
-        Remove LEGACY loose .obs/.nav files sitting directly in
-        work_dir/rinex/ (the root, not inside a slot_*/ subdirectory) -
-        confirmed live on BaseStation: 1.1GB accumulated there from
-        before _perform_update()'s own per-update rinex_dir isolation
-        fix existed (that fix - see this method's caller - only isolates
-        conversions FROM NOW ON, same limitation
-        _cleanup_ppp_ar_root_stray_files() already has for the PPP-AR
-        side's equivalent pre-existing clutter).
-
-        UNLIKE _cleanup_ppp_ar_root_stray_files() (unconditional), this
-        is AGE-GATED: only files older than LEGACY_RINEX_FILE_AGE_DAYS
-        are removed, and only FILES directly in the root (never a
-        slot_*/ subdirectory, which is already covered by
-        _cleanup_old_ppp_ar_slot_dirs()'s own protected-aware pruning,
-        and never a non-slot_* subdirectory either, since nothing in
-        this codebase creates one - only loose files were ever observed
-        live). These files are derived data: fully reproducible by
-        re-converting the matching raw log still sitting in data/ (or
-        its archived .zip - see get_data_files_since()), so deleting an
-        old one loses nothing a fresh conversion couldn't regenerate.
-
-        Called once at the START of every survey (both backends - see
-        start_survey()), not left as a manual step. Logs the count and
-        total bytes freed at INFO; anything younger than the age cutoff
-        is left untouched and not even mentioned in the log, since a
-        young loose file could legitimately belong to a survey that
-        just started before this fix's isolation took effect for it.
-
-        Best-effort and NON-FATAL: any failure (permissions, directory
-        doesn't exist yet, individual file removal failing) is logged as
-        a warning and otherwise ignored - cleanup failing must never
-        block a survey from starting.
-        """
-        rinex_root = self.work_dir / "rinex"
-        try:
-            if not rinex_root.is_dir():
-                logger.info(f"_cleanup_legacy_rinex_root_files: {rinex_root} does not exist yet - nothing to clean.")
-                return
-
-            cutoff = time.time() - (self.LEGACY_RINEX_FILE_AGE_DAYS * 86400)
-            removed = []
-            failed = []
-            bytes_freed = 0
-
-            for entry in rinex_root.iterdir():
-                if entry.is_dir():
-                    # slot_*/ (covered by _cleanup_old_ppp_ar_slot_dirs())
-                    # or any other subdirectory - this method only ever
-                    # removes LOOSE FILES directly in the root.
-                    continue
-                try:
-                    mtime = entry.stat().st_mtime
-                except OSError as e:
-                    failed.append((entry.name, str(e)))
-                    continue
-                if mtime >= cutoff:
-                    continue  # too young - leave it, might be in active use
-                try:
-                    size = entry.stat().st_size
-                    entry.unlink()
-                    removed.append(entry.name)
-                    bytes_freed += size
-                except Exception as e:
-                    failed.append((entry.name, str(e)))
-
-            if removed:
-                logger.info(
-                    f"_cleanup_legacy_rinex_root_files: removed {len(removed)} legacy loose "
-                    f"file(s) older than {self.LEGACY_RINEX_FILE_AGE_DAYS} days from {rinex_root} "
-                    f"({bytes_freed / 1024 / 1024:.1f}MB freed)"
-                )
-            else:
-                logger.info(f"_cleanup_legacy_rinex_root_files: {rinex_root} has no legacy loose "
-                           f"files older than {self.LEGACY_RINEX_FILE_AGE_DAYS} days - nothing to clean.")
-
-            if failed:
-                logger.warning(
-                    f"_cleanup_legacy_rinex_root_files: failed to remove {len(failed)} "
-                    f"file(s) from {rinex_root} (non-fatal, survey will start anyway): {failed}"
-                )
-        except Exception as e:
-            logger.warning(
-                f"_cleanup_legacy_rinex_root_files: cleanup of {rinex_root} failed "
-                f"(non-fatal, survey will start anyway): {e}"
-            )
 
     def _run_ppp_ar(self, slot_label: str = "unknown",
                     window_end: Optional[datetime] = None) -> Optional[Dict]:
@@ -2219,23 +1349,15 @@ class SurveyController:
         slots) means "up to now".
 
         Run PRIDE-PPPAR (pdp3) for ambiguity-resolved PPP-static
-        positioning - the shared worker behind BOTH:
-        - the PRIDE-PPPAR-only interim path (_run_ppp_ar_interim(),
-          fixed-slot schedule, when self.ppp_ar_enabled), and
-        - the finalize-time step (_finalize_survey(), when
-          self.ppp_ar_enabled - either as a pure PRIDE-PPPAR final result,
-          or - in the older, no-longer-default overwrite mode - layered on
-          top of an already-run rnx2rtkp result).
+        positioning - the worker behind the final result
+        (_finalize_survey()).
 
         Independently re-locates/re-converts EVERY raw GNSS log segment
-        covering [survey start, now] to RINEX (rather than threading
-        obs_file state through _perform_update()) - self.rtkbase.
+        covering [survey start, now] to RINEX - self.rtkbase.
         get_data_files_since() and self.rinex.convert_raw_files_to_rinex_obs()
         are idempotent lookups/conversions against the same window each
         time, so redoing them here on every call is cheap and keeps this
-        method fully self-contained (also needed since, with
-        ppp_ar_enabled=True, _perform_update() never runs at all - see
-        _finalize_survey()/_run_ppp_ar_interim()).
+        method fully self-contained.
 
         RAW-LOG ROTATION (fix for a confirmed-live bug): str2str rotates
         its raw log file every file_rotate_time (typically '24' = UTC
@@ -2400,7 +1522,7 @@ class SurveyController:
 
         pos_file = pride.process_ppp_ar(
             obs_file, work_dir=ppp_ar_dir,
-            custom_antex_path=self.spp.resolve_augmented_custom_antex(),
+            custom_antex_path=self.antex.resolve_augmented_custom_antex(),
         )
         # The combination is chosen inside process_ppp_ar() before pdp3 runs,
         # so it is known even when pdp3 itself fails.
@@ -2477,7 +1599,7 @@ class SurveyController:
         if result['frequency_selection'] and result['frequency_selection'].get('frq'):
             try:
                 band_calibration = classify_band_calibration(
-                    self.spp.resolve_augmented_custom_antex(),
+                    self.antex.resolve_augmented_custom_antex(),
                     result['frequency_selection']['frq'],
                 )
                 result['band_calibration'] = band_calibration
@@ -2495,7 +1617,7 @@ class SurveyController:
         Whether a PRIDE-PPPAR result's wide-lane/narrow-lane fix rates
         both clear their respective PPP_AR_MIN_WL_FIX_RATE_PERCENT /
         PPP_AR_MIN_NL_FIX_RATE_PERCENT thresholds - shared check used by
-        both _run_ppp_ar_interim() and _finalize_survey().
+        _finalize_survey().
 
         wl_fix_rate/nl_fix_rate come from _parse_fix_rate_line()'s
         combined multi-GNSS aggregate stdout line, now confirmed
@@ -2597,27 +1719,23 @@ class SurveyController:
 
     def _ppp_ar_failure_info(self, stage: Optional[str] = None) -> Dict:
         """
-        Classified failure (error_class / max_attempts / reason, see
+        Classified failure (error_class / reason, see
         ppp_ar_failure.describe_failure()) for the PPP-AR run that just
         failed. `stage` overrides the stage recorded by _run_ppp_ar() (used
         for failures after a successful pdp3 run: fix-rate gate, apply).
-        Remembers the result on self._last_ppp_ar_failure_info for the slot
-        retry loop.
         """
         ctx = getattr(self, '_last_ppp_ar_run_context', None) or {}
         if stage is None:
             stage = ctx.get('stage')
         kind = ctx.get('failure_kind') if stage == STAGE_PDP3_FAILED else None
-        info = describe_failure(stage, kind)
-        self._last_ppp_ar_failure_info = info
-        return info
+        return describe_failure(stage, kind)
 
     def _log_ppp_ar_attempt(self, slot_label: str, result: str, reason: str,
                              ppp_ar_result: Optional[Dict] = None,
                              failure_info: Optional[Dict] = None) -> None:
         """
         Log one single-line, grep-able PPP-AR attempt summary, fired from
-        EVERY return path of both _run_ppp_ar_interim() and the
+        EVERY return path of the
         finalize-time PPP-AR block in _finalize_survey() - success, skip,
         or failure alike. Exact shape (per this session's explicit
         instruction):
@@ -2798,121 +1916,6 @@ class SurveyController:
     # only its percent-form for the warning log message above).
     PPP_AR_PROCESSED_WINDOW_WARN_PERCENT = 50.0
 
-    def _run_ppp_ar_interim(self, elapsed_hours: float, slot_hours: float) -> bool:
-        """
-        Run one PRIDE-PPPAR-only interim update, for the fixed-slot
-        schedule (_survey_loop(), when self.ppp_ar_enabled) - the
-        PRIDE-PPPAR analogue of _perform_interim_update()/_perform_update(),
-        but using _run_ppp_ar() instead of rnx2rtkp/CDDIS, and applied only
-        if the fix rate clears PPP_AR_MIN_WL_FIX_RATE_PERCENT/
-        PPP_AR_MIN_NL_FIX_RATE_PERCENT.
-
-        Never raises. This method itself does not retry - _survey_loop()
-        (the caller) wraps this call in a small, bounded retry loop
-        (PPP_AR_SLOT_RETRY_MAX_ATTEMPTS, short-spaced) so a transient
-        failure (e.g. a product-download network blip) gets a few more
-        tries within the SAME slot before being given up on, rather than
-        every failure automatically waiting a full PPP_AR_SLOT_INTERVAL_HOURS
-        for the next fixed slot (fixed after a real 14h survey was aborted
-        by the survey-wide watchdog over what was, in the end, just two
-        consecutive transient network failures - see
-        PPP_AR_SLOT_RETRY_MAX_ATTEMPTS's own comment for the full story).
-        _survey_loop() marks slot_hours as attempted only once its retry
-        loop is exhausted (or a retry succeeds), so a failed/skipped run
-        is still never retried past that point until the next fixed slot.
-
-        Args:
-            elapsed_hours: hours elapsed since survey start (for logging).
-            slot_hours: the fixed schedule slot (0, 4, 8, ...) this run
-                corresponds to (for logging).
-
-        Returns:
-            True if a PRIDE-PPPAR position was successfully computed AND
-            applied (broadcast) for this slot, False if skipped for any
-            reason (pdp3 unavailable, run failure, parse failure, fix
-            rate below threshold, or broadcast/state-update failure) -
-            False is the expected, non-alarming outcome for "wait for the
-            next slot", not a survey-level failure.
-        """
-        slot_label = f"{slot_hours}h"
-        logger.info(f"=== PPP-AR Interim Update (slot={slot_hours}h, elapsed={elapsed_hours:.2f}h) ===")
-
-        ppp_ar_result = self._run_ppp_ar(slot_label=slot_label)
-        if ppp_ar_result is None:
-            logger.warning(f"PPP-AR interim slot={slot_hours}h: no result - "
-                            f"this attempt failed (caller may retry within this same slot)")
-            info = self._ppp_ar_failure_info()
-            self._log_ppp_ar_attempt(slot_label, "FAILED", f"{info['reason']} [{info['error_class']}]",
-                                     failure_info=info)
-            return False
-
-        if not self._ppp_ar_fix_rate_ok(ppp_ar_result):
-            logger.info(
-                f"PPP-AR interim slot={slot_hours}h: fix rate below threshold "
-                f"(WL={ppp_ar_result.get('wl_fix_rate')}%, need >= "
-                f"{self.PPP_AR_MIN_WL_FIX_RATE_PERCENT}%; "
-                f"NL={ppp_ar_result.get('nl_fix_rate')}%, need >= "
-                f"{self.PPP_AR_MIN_NL_FIX_RATE_PERCENT}%) - skipping this slot"
-            )
-            info = self._ppp_ar_failure_info(STAGE_FIX_RATE_BELOW_THRESHOLD)
-            self._log_ppp_ar_attempt(
-                slot_label, "SKIPPED",
-                f"{info['reason']} (WL={ppp_ar_result.get('wl_fix_rate')}%, "
-                f"NL={ppp_ar_result.get('nl_fix_rate')}%) [{info['error_class']}]",
-                ppp_ar_result, failure_info=info)
-            return False
-
-        logger.info(
-            f"✓ PPP-AR interim slot={slot_hours}h: fix rate cleared threshold "
-            f"(WL={ppp_ar_result['wl_fix_rate']}%, NL={ppp_ar_result['nl_fix_rate']}%) - "
-            f"applying position"
-        )
-
-        applied = self._apply_geodetic_position(
-            lat=ppp_ar_result['lat'],
-            lon=ppp_ar_result['lon'],
-            height=ppp_ar_result['height'],
-            obs_file=ppp_ar_result['obs_file'],
-            is_final=False,
-            ppp_backend='pride-pppar',
-            position_std={
-                # PRIDE-PPPAR's pos_* file reports ECEF-frame Sx/Sy/Sz
-                # (see pride_pppar_processor.py), not local-frame N/E/U
-                # std the way rnx2rtkp's estimator does - no direct
-                # equivalent of std_lat/std_lon/std_height/std_h_meters
-                # is computed here (would require an ECEF->local frame
-                # rotation not otherwise needed by this pipeline). Left
-                # as 0.0 placeholders rather than fabricating a
-                # conversion; sig0 (in quality_metrics below) is the real
-                # per-run quality signal for this backend.
-                'std_lat': 0.0,
-                'std_lon': 0.0,
-                'std_height': 0.0,
-                'std_h_meters': 0.0,
-            },
-            num_epochs=int(ppp_ar_result.get('nobs', 0)),
-            quality_metrics={
-                'is_final': False,
-                'ppp_tier': self.ppp_tier,
-                'still_converging': False,  # PRIDE-PPPAR is a single-point AR solution, not an accumulating estimator - no analogous "still converging" state
-                'ppp_ar_sig0': ppp_ar_result.get('sig0'),
-                'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
-                'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
-            },
-            extra_position_fields=self._ppp_ar_extra_position_fields(ppp_ar_result),
-            ppp_ar_dir=ppp_ar_result.get('ppp_ar_dir'),
-        )
-
-        if not applied:
-            logger.warning(f"PPP-AR interim slot={slot_hours}h: broadcast/state update failed - "
-                            f"skipping this slot")
-            info = self._ppp_ar_failure_info(STAGE_APPLY_FAILED)
-            self._log_ppp_ar_attempt(slot_label, "FAILED", f"{info['reason']} [{info['error_class']}]",
-                                     ppp_ar_result, failure_info=info)
-            return False
-
-        self._log_ppp_ar_attempt(slot_label, "SUCCESS", "applied successfully", ppp_ar_result)
-        return True
 
     # Final-result retry (PPP-AR mode): the final coordinates are retried
     # until they succeed (CLAUDE.md: "infinite retry until success"), with
@@ -2999,7 +2002,7 @@ class SurveyController:
                 ppp_backend='pride-pppar',
                 position_std={
                     # No direct N/E/U std available from PRIDE-PPPAR's ECEF
-                    # sigmas - see _run_ppp_ar_interim()'s comment.
+                    # sigmas.
                     'std_lat': 0.0,
                     'std_lon': 0.0,
                     'std_height': 0.0,
@@ -3008,8 +2011,7 @@ class SurveyController:
                 num_epochs=int(ppp_ar_result.get('nobs', 0)),
                 quality_metrics={
                     'is_final': True,
-                    'ppp_tier': self.ppp_tier,
-                    'still_converging': False,
+                    'ppp_tier': ppp_ar_result.get('product_tier'),
                     'ppp_ar_sig0': ppp_ar_result.get('sig0'),
                     'ppp_ar_wl_fix_rate': ppp_ar_result.get('wl_fix_rate'),
                     'ppp_ar_nl_fix_rate': ppp_ar_result.get('nl_fix_rate'),
@@ -3039,24 +2041,12 @@ class SurveyController:
         5. Restart main service to apply new coordinates
         6. Stop file logging to prevent disk space issues
 
-        ARCHITECTURE: if self.ppp_ar_enabled, this is a PRIDE-PPPAR-ONLY
-        survey end to end - step 2's rnx2rtkp/CDDIS final update
-        (_perform_update(is_final=True)) is SKIPPED ENTIRELY, not merely
-        overwritten afterward (that was the OLD behavior, before this was
-        made a full architectural switch rather than an overlay). Only
-        _run_ppp_ar() runs, and only if its wide-lane/narrow-lane fix
-        rates clear PPP_AR_MIN_WL_FIX_RATE_PERCENT/
-        PPP_AR_MIN_NL_FIX_RATE_PERCENT is its result applied
-        via _apply_geodetic_position() (the same shared broadcast/state
-        pipeline _perform_update() uses). If PRIDE-PPPAR is unavailable,
-        fails, or its fix rate doesn't clear the threshold, this survey's
-        final update simply does not happen this run - there is no
-        rnx2rtkp result to fall back to any more when ppp_ar_enabled is
-        True (by design - see this session's explicit instruction). Any
-        previously-recorded current_position (e.g. from PRIDE-PPPAR
-        interim slots via _run_ppp_ar_interim()) is still used as the
-        completed-survey position via before_pos below, so a failed FINAL
-        run does not necessarily mean an empty result.
+        ARCHITECTURE: PRIDE-PPPAR-only. _run_ppp_ar() runs, and only if its
+        wide-lane/narrow-lane fix rates clear
+        PPP_AR_MIN_WL_FIX_RATE_PERCENT/PPP_AR_MIN_NL_FIX_RATE_PERCENT is its
+        result applied via _apply_geodetic_position(). If PRIDE-PPPAR fails
+        or the fix rate doesn't clear the threshold, the final update does
+        not happen this run; the caller retries (no fallback backend).
         """
         try:
             logger.info("=" * 60)
@@ -3067,70 +2057,64 @@ class SurveyController:
             before_status = self.state.get_status()
             before_pos = before_status.get('current_position')
 
-            if self.ppp_ar_enabled:
-                # PRIDE-PPPAR-ONLY final update - rnx2rtkp/CDDIS is never
-                # invoked when ppp_ar_enabled is True (see docstring).
-                logger.info("PPP-AR enabled: running PRIDE-PPPAR-only final update (rnx2rtkp/CDDIS skipped)")
-                # FROZEN final window: [survey start, start + target]. Derived from
-                # the persisted start time and target, so a retry hours later (or
-                # after a restart) processes exactly the same window.
-                start_raw = before_status.get('start_time')
-                window_end = (datetime.fromisoformat(start_raw) if start_raw else datetime.utcnow()) \
-                    + timedelta(hours=self.target_hours)
-                logger.info(f"Final window frozen at {window_end.isoformat()} (UTC)")
-                # The survey duration is over: data collection STOPS now (the
-                # File service is survey-only) and the survey enters the
-                # 'finalizing' state - it is not 'running' any more, but it is
-                # resumed automatically after a restart until its final result
-                # has been computed and applied.
-                self.state.begin_finalizing()
-                if self.auto_mode:
-                    self._stop_file_logging(reason="data_collection_complete")
-                attempt = 0
-                final_applied = False
-                window_start = (datetime.fromisoformat(start_raw) if start_raw
-                                else window_end - timedelta(hours=self.target_hours))
+            # PRIDE-PPPAR is the only pipeline.
+            # FROZEN final window: [survey start, start + target]. Derived from
+            # the persisted start time and target, so a retry hours later (or
+            # after a restart) processes exactly the same window.
+            start_raw = before_status.get('start_time')
+            window_end = (datetime.fromisoformat(start_raw) if start_raw else datetime.utcnow()) \
+                + timedelta(hours=self.target_hours)
+            logger.info(f"Final window frozen at {window_end.isoformat()} (UTC)")
+            # The survey duration is over: data collection STOPS now (the
+            # File service is survey-only) and the survey enters the
+            # 'finalizing' state - it is not 'running' any more, but it is
+            # resumed automatically after a restart until its final result
+            # has been computed and applied.
+            self.state.begin_finalizing()
+            if self.auto_mode:
+                self._stop_file_logging(reason="data_collection_complete")
+            attempt = 0
+            final_applied = False
+            window_start = (datetime.fromisoformat(start_raw) if start_raw
+                            else window_end - timedelta(hours=self.target_hours))
+            last_real_attempt = time.monotonic()
+            # INFINITE RETRY until the final position is accepted (policy);
+            # leaves the loop early only when the survey is stopped/paused/
+            # reset or the service is shutting down (state stays 'running'
+            # so a restart resumes the retry). A real pdp3 attempt is made only
+            # when the precise products of every UTC day of the window are
+            # published (cheap server listing) - or, as a safety net, at least
+            # every FINAL_BLIND_ATTEMPT_SECONDS.
+            while self._running and self.state.survey_state in (SurveyState.RUNNING, SurveyState.FINALIZING):
+                self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
+                products = self._final_products_status(window_start, window_end)
+                blind_due = (time.monotonic() - last_real_attempt) >= self.FINAL_BLIND_ATTEMPT_SECONDS
+                if products.get('available') is False and not blind_due:
+                    missing = ", ".join(products.get('missing') or []) or "unknown"
+                    reason = f"waiting for precise products to be published: {missing}"
+                    poll = self.FINAL_PRODUCT_POLL_SECONDS
+                    next_check = (datetime.utcnow() + timedelta(seconds=poll)).isoformat()
+                    self.state.record_final_attempt(attempt, reason, next_check)
+                    logger.info(f"FINAL result waiting: {reason} (checking again in {poll // 60} min)")
+                    self._wait_while_running(poll)
+                    continue
+                attempt += 1
                 last_real_attempt = time.monotonic()
-                # INFINITE RETRY until the final position is accepted (policy);
-                # leaves the loop early only when the survey is stopped/paused/
-                # reset or the service is shutting down (state stays 'running'
-                # so a restart resumes the retry). A real pdp3 attempt is made only
-                # when the precise products of every UTC day of the window are
-                # published (cheap server listing) - or, as a safety net, at least
-                # every FINAL_BLIND_ATTEMPT_SECONDS.
-                while self._running and self.state.survey_state in (SurveyState.RUNNING, SurveyState.FINALIZING):
-                    self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
-                    products = self._final_products_status(window_start, window_end)
-                    blind_due = (time.monotonic() - last_real_attempt) >= self.FINAL_BLIND_ATTEMPT_SECONDS
-                    if products.get('available') is False and not blind_due:
-                        missing = ", ".join(products.get('missing') or []) or "unknown"
-                        reason = f"waiting for precise products to be published: {missing}"
-                        poll = self.FINAL_PRODUCT_POLL_SECONDS
-                        next_check = (datetime.utcnow() + timedelta(seconds=poll)).isoformat()
-                        self.state.record_final_attempt(attempt, reason, next_check)
-                        logger.info(f"FINAL result waiting: {reason} (checking again in {poll // 60} min)")
-                        self._wait_while_running(poll)
-                        continue
-                    attempt += 1
-                    last_real_attempt = time.monotonic()
-                    final_applied = self._attempt_final_ppp_ar(window_end)
-                    if final_applied:
-                        break
-                    delay = self._final_retry_delay_seconds(attempt)
-                    next_retry = (datetime.utcnow() + timedelta(seconds=delay)).isoformat()
-                    reason = self._last_ppp_ar_attempt_summary or "final attempt failed"
-                    self.state.record_final_attempt(attempt, reason, next_retry)
-                    logger.warning(f"FINAL attempt {attempt} failed - retrying in {delay // 60} min "
-                                   f"(infinite retry until success): {reason}")
-                    self._wait_while_running(delay)
-                if not final_applied:
-                    logger.info("Final retry loop left before success (survey stopped or service "
-                                "shutting down); the survey stays resumable")
-                    return
-                self.state.clear_final_attempts()
-            else:
-                # Standard rnx2rtkp/CDDIS final update - unchanged.
-                self._perform_update(is_final=True)
+                final_applied = self._attempt_final_ppp_ar(window_end)
+                if final_applied:
+                    break
+                delay = self._final_retry_delay_seconds(attempt)
+                next_retry = (datetime.utcnow() + timedelta(seconds=delay)).isoformat()
+                reason = self._last_ppp_ar_attempt_summary or "final attempt failed"
+                self.state.record_final_attempt(attempt, reason, next_retry)
+                logger.warning(f"FINAL attempt {attempt} failed - retrying in {delay // 60} min "
+                               f"(infinite retry until success): {reason}")
+                self._wait_while_running(delay)
+            if not final_applied:
+                logger.info("Final retry loop left before success (survey stopped or service "
+                            "shutting down); the survey stays resumable")
+                return
+            self.state.clear_final_attempts()
 
             # Get current state
             status = self.state.get_status()
@@ -3144,7 +2128,7 @@ class SurveyController:
                 logger.info("=" * 60)
                 logger.info("✓ SURVEY COMPLETED SUCCESSFULLY")
                 # pos['lat']/lon are the BGS2005-transformed broadcast
-                # coordinate (see _perform_update() Step 7/9), and
+                # coordinate (see _apply_geodetic_position()), and
                 # pos['height'] is ALWAYS ellipsoidal (GRS80) - see Step 8's
                 # comment for why RTCM broadcast height must never be
                 # geoid-corrected - never the raw ITRF2020 PPP estimate.
@@ -3204,11 +2188,10 @@ class SurveyController:
                 # this is exactly the diagnostic gap that made
                 # investigating a real failed PPP-AR test survey require
                 # raw journalctl digging instead of being obvious from
-                # the final error alone. Falls back to the old generic
-                # message when self.ppp_ar_enabled is False (rnx2rtkp
-                # path) or no PPP-AR attempt was ever logged this
-                # instance's lifetime.
-                if self.ppp_ar_enabled and self._last_ppp_ar_attempt_summary:
+                # the final error alone. Falls back to a generic message
+                # when no PPP-AR attempt was ever logged this instance's
+                # lifetime.
+                if self._last_ppp_ar_attempt_summary:
                     fail_reason = f"No final position computed - last {self._last_ppp_ar_attempt_summary}"
                 else:
                     fail_reason = "No final position computed"
@@ -3239,7 +2222,7 @@ class SurveyController:
         # Auto-apply coordinates if survey is completed but not yet applied.
         # pos['lat']/lon are the BGS2005-transformed broadcast coordinate,
         # and pos['height'] is ALWAYS ellipsoidal (GRS80) - see
-        # _perform_update()'s Step 8 - not raw ITRF2020 either way, no
+        # _apply_geodetic_position() - not raw ITRF2020 either way, no
         # re-transformation needed here. Only the runner applies (the web
         # application would otherwise race the runner on the same state).
         try:
@@ -3391,22 +2374,16 @@ class SurveyController:
 
         logger.info("Recovering previous survey session...")
 
-        # Ensure controller uses persisted target_hours/ppp_tier (so loop
-        # completion and precise-product fetching match what was actually
-        # started, not this instance's just-initialized defaults)
+        # Ensure controller uses the persisted target_hours (so loop
+        # completion matches what was actually started, not this instance's
+        # just-initialized default)
         try:
             status = self.state.get_status()
             target_hours = status.get('target_hours')
             if isinstance(target_hours, (int, float)) and target_hours > 0:
                 self.target_hours = int(target_hours)
-            ppp_tier = status.get('ppp_tier')
-            if ppp_tier in ('ultra-rapid', 'rapid', 'final'):
-                self.ppp_tier = ppp_tier
-            ppp_ar_enabled = status.get('ppp_ar_enabled')
-            if isinstance(ppp_ar_enabled, bool):
-                self.ppp_ar_enabled = ppp_ar_enabled
         except Exception as e:
-            logger.warning(f"Failed to read target_hours/ppp_tier/ppp_ar_enabled from state: {e}")
+            logger.warning(f"Failed to read target_hours from state: {e}")
         
         # Resume from saved state
         if self.state.survey_state == SurveyState.PAUSED:

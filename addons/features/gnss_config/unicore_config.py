@@ -353,9 +353,8 @@ class UnicoreConfigurator:
                                 height_offset: float = 0, height_type: str = "USER") -> bool:
         """
         Set the base station antenna model info the receiver embeds in its
-        own RTCM output (independent of this pipeline's own ANTEX handling
-        in ppp_processor.py, which already uses ant1-anttype=NONE for
-        PPP-static processing - see that file's module docstring).
+        own RTCM output (independent of the survey's own ANTEX handling in
+        antex_support.py).
 
         Cherry-picked from GNSSOEM/ELT_RTKBase's Install/UM980_RTCM3_OUT.txt
         ("CONFIG BASEANTENNAMODEL \"ELT0123\" \"\" 0 USER"). "ELT0123" is

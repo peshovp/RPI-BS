@@ -75,8 +75,8 @@ class FakeController:
             raise RuntimeError("recover failed")
         return self.recover_result
 
-    def start_survey(self, target_hours, ppp_tier, ppp_ar_enabled):
-        self.calls.append(('start', target_hours, ppp_tier, ppp_ar_enabled))
+    def start_survey(self, target_hours):
+        self.calls.append(('start', target_hours))
         return self.start_result
 
     def stop_survey(self):
@@ -156,7 +156,7 @@ with tempfile.TemporaryDirectory() as req_dir:
     check("D1: start ok", result6['ok'])
     check("D2: start message", result6['message'] == 'started')
     start_calls = [c for c in ctrl6.calls if isinstance(c, tuple) and c[0] == 'start']
-    check("D3: start params", len(start_calls) == 1 and start_calls[0] == ('start', 48, 'final', True))
+    check("D3: start params", len(start_calls) == 1 and start_calls[0] == ('start', 48))
 
     # E. invalid start params
     for params, desc in [
@@ -164,14 +164,18 @@ with tempfile.TemporaryDirectory() as req_dir:
         ({'target_hours': 169}, 'target_hours 169'),
         ({'target_hours': 'x'}, 'target_hours x'),
         ({'target_hours': True}, 'target_hours True'),
-        ({'target_hours': 24, 'ppp_tier': 'bogus'}, 'ppp_tier bogus'),
-        ({'target_hours': 24, 'ppp_ar_enabled': 'yes'}, 'ppp_ar_enabled yes'),
     ]:
         ctrl = FakeController()
         runner = make_runner(ctrl, req_dir)
         result = runner.handle_request({'id': '1', 'action': 'start', 'params': params})
         start_calls = [c for c in ctrl.calls if isinstance(c, tuple) and c[0] == 'start']
         check(f"E: {desc}", not result['ok'] and len(start_calls) == 0)
+
+    ctrl_extra = FakeController()
+    runner_extra = make_runner(ctrl_extra, req_dir)
+    result_extra = runner_extra.handle_request({'id': '1', 'action': 'start', 'params': {'target_hours': 24, 'ppp_tier': 'bogus', 'ppp_ar_enabled': 'yes'}})
+    start_calls_extra = [c for c in ctrl_extra.calls if isinstance(c, tuple) and c[0] == 'start']
+    check("E: extra keys ignored", result_extra['ok'] and len(start_calls_extra) == 1 and start_calls_extra[0] == ('start', 24))
 
     # F. start_result False
     ctrl7 = FakeController()
@@ -223,7 +227,7 @@ with tempfile.TemporaryDirectory() as req_dir:
         result13 = runner12.run_once()
         check("I1: run_once processes", result13 == True)
         start_calls = [c for c in ctrl12.calls if isinstance(c, tuple) and c[0] == 'start']
-        check("I2: controller got start", len(start_calls) == 1 and start_calls[0] == ('start', 24, 'rapid', False))
+        check("I2: controller got start", len(start_calls) == 1 and start_calls[0] == ('start', 24))
         wait_result = survey_requests.wait_for_result(rid, 1, request_dir=e2e_dir)
         check("I3: wait_for_result ok", wait_result is not None and wait_result['ok'])
         result14 = runner12.run_once()

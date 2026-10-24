@@ -96,7 +96,7 @@ def make_controller(tmp, raw_files, rinex_result, pdp3_behaviour):
     c.rinex = SimpleNamespace(
         convert_raw_files_to_rinex_obs=lambda *a, **kw: rinex_result
     )
-    c.spp = SimpleNamespace(
+    c.antex = SimpleNamespace(
         resolve_augmented_custom_antex=lambda: None
     )
     c._resolve_antenna_calibration = lambda: {'antenna_type': 'X', 'antenna_calibrated': False}

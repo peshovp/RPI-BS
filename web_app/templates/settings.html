@@ -687,7 +687,7 @@
       <label class="col-4 col-form-label col-form-label-lg">Auto Survey-In</label>
       <input id="auto-survey-switch" type="checkbox" data-toggle="toggle" data-onstyle="warning" data-offstyle="outline-secondary">
       <button class="btn btn-secondary" type="button" data-toggle="collapse" data-target="#auto_survey_options" aria-expanded="false" aria-controls="auto_survey_options">Options</button>
-      <a data-toggle="tooltip" id="auto_survey_tooltip" title="Automatically determines the precise base station coordinates over a long observation period (up to 24h), using PPP-static positioning (rnx2rtkp, or PRIDE-PPPAR when enabled) on the recorded raw GNSS data.">
+      <a data-toggle="tooltip" id="auto_survey_tooltip" title="Automatically determines the precise base station coordinates over a long observation period (up to 24h), using PRIDE-PPPAR (ambiguity-resolved PPP) on the recorded raw GNSS data. Data collection stops when the target duration is over; the final position is computed automatically once the precise products are published (13-19 h after the end of the last observation day).">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#6c757d" class="bi bi-info-circle" viewBox="0 0 16 16">
           <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
           <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
@@ -701,24 +701,6 @@
       <div class="col-sm-9">
         <input id="auto-survey-target-hours" type="number" class="form-control" min="1" max="168" value="24">
         <small class="form-text text-muted">Survey duration in hours (1-168). Applied on next Start.</small>
-      </div>
-    </div>
-    <div class="form-group row">
-      <label for="auto-survey-ppp-tier" class="col-sm-3 col-form-label">Precise Product Tier:</label>
-      <div class="col-sm-9">
-        <select id="auto-survey-ppp-tier" class="form-control">
-          <option value="rapid" selected>Rapid (recommended - usually available within ~41h)</option>
-          <option value="ultra-rapid">Ultra-rapid (available immediately, predicted-orbit accuracy)</option>
-          <option value="final">Final (best accuracy, up to ~18 day latency)</option>
-        </select>
-        <small class="form-text text-muted">CDDIS precise orbit/clock product tier used for PPP-static processing. Applied on next Start.</small>
-      </div>
-    </div>
-    <div class="form-group row">
-      <label for="auto-survey-ppp-ar-switch" class="col-sm-3 col-form-label">PRIDE-PPPAR Ambiguity Resolution (experimental):</label>
-      <div class="col-sm-9">
-        <input id="auto-survey-ppp-ar-switch" type="checkbox" data-toggle="toggle" data-size="sm" data-onstyle="warning" data-offstyle="outline-secondary">
-        <small class="form-text text-muted">Optional, opt-in mode that replaces the standard rnx2rtkp/CDDIS PPP-static pipeline entirely with PRIDE-PPPAR (pdp3) ambiguity-resolution processing. When enabled, rnx2rtkp and CDDIS precise products are not used at all - PRIDE-PPPAR runs on a fixed schedule (every 4 hours: 0h, 4h, 8h, ... plus a final run) throughout the survey. Each run's position is only broadcast if its wide-lane/narrow-lane fix rate clears the configured threshold; a low-confidence or failed run is skipped and the next fixed slot is tried instead. Requires PRIDE-PPPAR installed on this station. Applied on next Start.</small>
       </div>
     </div>
     <div class="form-group row">
@@ -747,38 +729,6 @@
             <div id="auto-survey-progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
           </div>
           <div id="auto-survey-details" class="text-muted mt-2 small"></div>
-          <div id="auto-survey-converging-notice" class="alert alert-info mt-2 mb-0 py-1 px-2 small" style="display:none;">
-            ⏳ Still converging - PPP-static needs several hours of observation to reach its final accuracy. Early interim values are expected to be large and unstable.
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="form-group row" style="margin-top: -0.5rem;">
-      <div class="col-sm-9 offset-sm-3">
-        <div class="card card-body p-3">
-          <button class="btn btn-sm btn-secondary" type="button" data-toggle="collapse" data-target="#ppp_earthdata_options" aria-expanded="false" aria-controls="ppp_earthdata_options">PPP-static / Earthdata Login</button>
-          <small class="form-text text-muted">NASA Earthdata Login credentials, used to download precise orbit/clock products (SP3/CLK) from CDDIS for PPP-static processing.</small>
-          <div id="ppp_earthdata_options" class="collapse mt-2">
-            <div class="form-group row">
-              <label for="ppp-earthdata-username" class="col-sm-3 col-form-label">Username:</label>
-              <div class="col-sm-9">
-                <input id="ppp-earthdata-username" type="text" class="form-control" placeholder="Earthdata username" autocomplete="off">
-              </div>
-            </div>
-            <div class="form-group row">
-              <label for="ppp-earthdata-password" class="col-sm-3 col-form-label">Password:</label>
-              <div class="col-sm-9">
-                <input id="ppp-earthdata-password" type="password" class="form-control" placeholder="Leave blank to keep current password" autocomplete="new-password">
-                <small class="form-text text-muted" id="ppp-earthdata-passwordHelp">Never shown here once saved - leave blank to keep the existing password unchanged.</small>
-              </div>
-            </div>
-            <div class="form-group row">
-              <div class="col-sm-9 offset-sm-3">
-                <button id="ppp-earthdata-save-btn" class="btn btn-sm btn-primary" type="button">Save Credentials</button>
-                <span id="ppp-earthdata-save-status" class="small ml-2"></span>
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>

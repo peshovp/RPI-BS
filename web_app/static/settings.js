@@ -838,24 +838,6 @@ $(document).ready(function () {
     var autoSurveyTargetHours = 24;
     var autoSurveyLatestPositionStd = null;
 
-    // Visual-only UX cue: when PRIDE-PPPAR is enabled, rnx2rtkp/CDDIS is
-    // never used at all (see commit b013c3a) - so the "Precise Product
-    // Tier" select and the Earthdata Login credentials fields are simply
-    // ignored by the backend in that mode. Grey them out to make that
-    // obvious, without changing what's actually submitted in the
-    // start-survey POST body (ppp_tier is still sent regardless, matching
-    // existing backend behavior unchanged by this cue).
-    function updatePppArDependentFieldsState() {
-        var pppArEnabled = $("#auto-survey-ppp-ar-switch").prop("checked");
-        $("#auto-survey-ppp-tier").prop("disabled", pppArEnabled);
-        $("#ppp-earthdata-username").prop("disabled", pppArEnabled);
-        $("#ppp-earthdata-password").prop("disabled", pppArEnabled);
-    }
-
-    $("#auto-survey-ppp-ar-switch").on("change", updatePppArDependentFieldsState);
-    // Reflect whichever state ppp_ar_enabled loads as, not just live toggle clicks.
-    updatePppArDependentFieldsState();
-
     function parseUtcTimestamp(timestampStr) {
         // Backend timestamps (datetime.utcnow().isoformat()) have no timezone
         // suffix, so the browser would otherwise parse them as local time.
@@ -951,13 +933,6 @@ $(document).ready(function () {
 
                 if (status.target_hours && document.activeElement !== document.getElementById("auto-survey-target-hours")) {
                     $("#auto-survey-target-hours").val(status.target_hours);
-                }
-                if (status.ppp_tier && document.activeElement !== document.getElementById("auto-survey-ppp-tier")) {
-                    $("#auto-survey-ppp-tier").val(status.ppp_tier);
-                }
-                if (typeof status.ppp_ar_enabled === "boolean") {
-                    $("#auto-survey-ppp-ar-switch").bootstrapToggle(status.ppp_ar_enabled ? "on" : "off", true);
-                    updatePppArDependentFieldsState();
                 }
 
                 if (state === "running") {
@@ -1062,16 +1037,6 @@ $(document).ready(function () {
                     autoSurveyDetailsElt.textContent = "";
                 }
 
-                // PPP-static convergence notice: still_converging is set by
-                // survey_controller.py's _perform_update() based on the
-                // interim estimate's horizontal std vs
-                // PPP_CONVERGENCE_STD_METERS (an unverified placeholder
-                // threshold, not elapsed time) - large/unstable interim
-                // std values before convergence are expected, not a fault.
-                var stillConverging = state === "running"
-                    && status.quality_metrics
-                    && status.quality_metrics.still_converging === true;
-                $("#auto-survey-converging-notice").toggle(!!stillConverging);
             })
             .catch(function(err) {
                 autoSurveyStatusTextElt.textContent = "Status: Error polling status";
@@ -1087,9 +1052,7 @@ $(document).ready(function () {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    target_hours: parseInt($("#auto-survey-target-hours").val()),
-                    ppp_tier: $("#auto-survey-ppp-tier").val(),
-                    ppp_ar_enabled: $("#auto-survey-ppp-ar-switch").prop("checked")
+                    target_hours: parseInt($("#auto-survey-target-hours").val())
                 })
             })
                 .then(function(response) {
@@ -1213,66 +1176,6 @@ $(document).ready(function () {
             })
             .catch(() => alert("Reset request failed"));
     });
-
-    // ######## PPP-static / Earthdata Login credentials ########
-    var pppEarthdataUsernameElt = document.getElementById("ppp-earthdata-username");
-    var pppEarthdataPasswordElt = document.getElementById("ppp-earthdata-password");
-    var pppEarthdataSaveBtn = document.getElementById("ppp-earthdata-save-btn");
-    var pppEarthdataSaveStatusElt = document.getElementById("ppp-earthdata-save-status");
-
-    function loadPppEarthdataStatus() {
-        fetch('/api/auto_survey/ppp_credentials')
-            .then(r => r.json())
-            .then(data => {
-                if (data.success) {
-                    // Username is not secret - safe to pre-populate.
-                    // Password is NEVER pre-populated, same convention as
-                    // WireGuard's private_key/preshared_key fields - only
-                    // the placeholder text hints whether one is stored.
-                    pppEarthdataUsernameElt.value = data.username || "";
-                    pppEarthdataPasswordElt.placeholder = data.has_password
-                        ? "Leave blank to keep current password"
-                        : "No password set";
-                }
-            })
-            .catch(function(err) {
-                console.log("Failed to load Earthdata credential status: " + err);
-            });
-    }
-
-    if (pppEarthdataSaveBtn) {
-        pppEarthdataSaveBtn.addEventListener("click", function() {
-            pppEarthdataSaveStatusElt.textContent = "Saving...";
-            pppEarthdataSaveStatusElt.className = "small ml-2 text-muted";
-            fetch('/api/auto_survey/ppp_credentials', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    username: pppEarthdataUsernameElt.value,
-                    password: pppEarthdataPasswordElt.value
-                })
-            })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        pppEarthdataSaveStatusElt.textContent = "Saved";
-                        pppEarthdataSaveStatusElt.className = "small ml-2 text-success";
-                        pppEarthdataPasswordElt.value = "";
-                        loadPppEarthdataStatus();
-                    } else {
-                        pppEarthdataSaveStatusElt.textContent = "Error: " + (data.error || "unknown");
-                        pppEarthdataSaveStatusElt.className = "small ml-2 text-danger";
-                    }
-                })
-                .catch(function(err) {
-                    pppEarthdataSaveStatusElt.textContent = "Save request failed";
-                    pppEarthdataSaveStatusElt.className = "small ml-2 text-danger";
-                    console.log("Earthdata credential save failed: " + err);
-                });
-        });
-    }
-
-    loadPppEarthdataStatus();
 
     // Show current state on page load (in case a survey is already running)
     pollAutoSurveyStatus();

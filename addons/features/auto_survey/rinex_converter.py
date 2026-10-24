@@ -110,24 +110,18 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
 
     antenna_type (Part 6a): if given, passed as convbin's "-ha ant" (RINEX
     header "ANT # / TYPE" field). Confirmed this field was previously
-    LEFT BLANK by this project's RINEX conversion entirely (see
-    ppp_processor.py's "NO RECEIVER ANTENNA PCV" section - the exact gap
-    this closes) - without it, neither rnx2rtkp nor pdp3 (which reads
-    ANT # / TYPE directly from the obs header, unlike rnx2rtkp's own -k
-    conf override) has any antenna type string to attempt an ANTEX
-    lookup against, from either backend. Callers MUST have already
+    LEFT BLANK by this project's RINEX conversion - without it, pdp3 (which
+    reads ANT # / TYPE directly from the obs header) has no antenna type
+    string to attempt an ANTEX lookup against. Callers MUST have already
     verified this string against the ANTEX file in use (see
-    ppp_processor.py's antenna_type_in_antex()) - this function does not
+    antex_support.py's antenna_type_in_antex()) - this function does not
     re-verify it, it only passes through whatever it is given. None
     (uncalibrated / not yet configured) omits -ha entirely, leaving the
-    field blank exactly as before Part 6a - for the rnx2rtkp path this
-    is harmless (ant1-anttype=NONE is set independently in its own -k
-    conf, not read from this header), but for the PRIDE-PPPAR path, an
-    omitted -ha means pdp3's own CheckAntennaInAtx pre-flight check logs
-    its own "ZERO antenna model" warning rather than finding the
-    calibration pdp3_processor.py's caller already confirmed exists -
-    always pass antenna_type here when it IS calibrated, for both
-    backends, not only for rnx2rtkp.
+    field blank exactly as before Part 6a - an omitted -ha means pdp3's own
+    CheckAntennaInAtx pre-flight check logs its own "ZERO antenna model"
+    warning rather than finding the calibration the caller already
+    confirmed exists - always pass antenna_type here when it IS
+    calibrated.
 
     receiver_type (Part 6a): convbin's "-hr rec" (RINEX header "REC # /
     TYPE / VERS" field) - number/type/version separated by "/", per
@@ -141,17 +135,12 @@ def build_convbin_args(convbin: Path, raw_file: Path, output_dir: Path, receiver
 
     zero_antenna_delta (Part 6a): if True, adds "-hd 0/0/0" (RINEX header
     "ANTENNA: DELTA H/E/N"). Part 6a's "always process at the ARP"
-    convention sets the antenna delta via the rnx2rtkp "-k" conf's own
-    ant1-antdel{e,n,u}=0 for that path (see ppp_processor.py's
-    _generate_ppp_conf(), which takes precedence over whatever this
-    header says per RTKLIB's own documented CLI-over-conf-file
-    precedence) - so rnx2rtkp callers should leave this False, the
-    header value is irrelevant to that path. pdp3 has NO separate
+    convention requires the antenna delta to be zero. pdp3 has NO separate
     antenna-delta override mechanism at all (confirmed: its CLI only
-    takes -m/-frq/-sys plus the obs file) - for PRIDE-PPPAR, the RINEX
-    header's own delta genuinely IS what pdp3 uses (SITE%enu0 in its own
-    output header, read directly from this field), so
-    pride_pppar_processor.py's caller MUST pass True here, or pdp3 would
+    takes -m/-frq/-sys plus the obs file) - the RINEX header's own delta
+    genuinely IS what pdp3 uses (SITE%enu0 in its own output header, read
+    directly from this field), so the PRIDE-PPPAR caller MUST pass True
+    here, or pdp3 would
     otherwise process at whatever stale/wrong delta (commonly 0.0000 by
     coincidence, per this project's prior confirmed-live inspection, but
     never guaranteed) happens to already be in the header.
@@ -222,7 +211,7 @@ def find_rtklib_tool(tool_name: str) -> Optional[Path]:
     Auto-discover RTKLIB tool location
     
     Args:
-        tool_name: Name of the tool (convbin, rnx2rtkp, etc.)
+        tool_name: Name of the tool (convbin, etc.)
         
     Returns:
         Path to tool or None if not found
@@ -271,73 +260,6 @@ class RINEXConverter:
             self.convbin = Path(convbin_path)
             if not self.convbin.exists():
                 raise FileNotFoundError(f"convbin not found at {convbin_path}")
-    
-    def convert_to_rinex(self, 
-                        input_file: Path, 
-                        output_dir: Optional[Path] = None,
-                        receiver_type: str = "ubx") -> Optional[Path]:
-        """
-        Convert raw GNSS log to RINEX observation file
-        
-        Args:
-            input_file: Path to raw data file (.ubx, .rtcm3, .log)
-            output_dir: Output directory (default: same as input)
-            receiver_type: Receiver format (ubx, rtcm3, etc.)
-            
-        Returns:
-            Path to generated RINEX .obs file or None on failure
-        """
-        if not input_file.exists():
-            logger.error(f"Input file not found: {input_file}")
-            return None
-        
-        # Determine output directory
-        if output_dir is None:
-            output_dir = input_file.parent
-        else:
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Output file will be auto-named by convbin based on input
-        # Format: XXXX_DDDH.YYo where DDD=day-of-year, H=hour, YY=year
-        
-        try:
-            # Run convbin
-            # By default convbin generates both .obs and .nav files
-            # No need for -o or -n flags
-            cmd = build_convbin_args(self.convbin, input_file, output_dir, receiver_type)
-            
-            logger.info(f"Converting {input_file.name} to RINEX...")
-            logger.debug(f"Command: {' '.join(cmd)}")
-            
-            result = run_in_process_group(cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
-            
-            if result.returncode != 0:
-                logger.error(f"convbin failed: {result.stderr}")
-                return None
-            
-            # Find the generated RINEX file
-            # convbin creates files like: XXXX_DDDH.YYo
-            rinex_files = list(output_dir.glob("*.obs")) + \
-                         list(output_dir.glob("*.[0-9][0-9]o"))
-            
-            if not rinex_files:
-                logger.error("No RINEX file generated")
-                logger.debug(f"convbin output: {result.stdout}")
-                return None
-            
-            # Get the newest RINEX file
-            rinex_file = max(rinex_files, key=lambda p: p.stat().st_mtime)
-            
-            logger.info(f"✓ Created RINEX: {rinex_file.name}")
-            return rinex_file
-            
-        except subprocess.TimeoutExpired:
-            logger.error("convbin timeout (>5 minutes)")
-            return None
-        except Exception as e:
-            logger.error(f"Conversion failed: {e}", exc_info=True)
-            return None
     
     def convert_raw_to_rinex_obs(self,
                                  raw_file: Path,

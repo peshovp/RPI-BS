@@ -27,6 +27,7 @@ import importlib.abc
 import importlib.machinery
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime
 import unittest.mock
 
 REPO = sys.argv[1]
@@ -74,14 +75,13 @@ def make_controller(run_result, ctx, fix_rate_ok=True, apply_ok=True):
         record_update_failure=lambda text: failures.append(text),
         get_status=lambda: {}
     )
-    c._run_ppp_ar = lambda slot_label=None: run_result
+    c._run_ppp_ar = lambda slot_label=None, window_end=None: run_result
     c._last_ppp_ar_run_context = ctx
     c._ppp_ar_fix_rate_ok = lambda r: fix_rate_ok
     c._apply_geodetic_position = lambda **kw: apply_ok
     c._ppp_ar_extra_position_fields = lambda r: {}
     c.ppp_tier = 'rapid'
     c._last_ppp_ar_attempt_summary = None
-    c._last_ppp_ar_failure_info = None
     return (c, attempts, failures)
 
 SUCCESS_RESULT = {
@@ -93,10 +93,10 @@ SUCCESS_RESULT = {
     'frequency_selection': None
 }
 
-# Case A: pdp3_failed with product_download -> error_class 'product', max_attempts 5
+# Case A: pdp3_failed with product_download -> error_class 'product'
 try:
     c, attempts, failures = make_controller(None, {'stage': 'pdp3_failed', 'failure_kind': 'product_download'})
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is False:
         ok("A: returns False on product download failure")
     else:
@@ -109,17 +109,13 @@ try:
         ok("A: failure text mentions precise products and slot")
     else:
         bad(f"A: failure text is {failures[0] if failures else 'missing'}")
-    if c._last_ppp_ar_failure_info['max_attempts'] == 5:
-        ok("A: max_attempts is 5 for product failure")
-    else:
-        bad(f"A: max_attempts is {c._last_ppp_ar_failure_info['max_attempts']}")
 except Exception as e:
     bad(f"A: exception: {e}")
 
-# Case B: rinex_conversion_failed -> error_class 'conversion', max_attempts 1
+# Case B: rinex_conversion_failed -> error_class 'conversion'
 try:
     c, attempts, failures = make_controller(None, {'stage': 'rinex_conversion_failed', 'failure_kind': None})
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is False:
         ok("B: returns False on conversion failure")
     else:
@@ -128,10 +124,6 @@ try:
         ok("B: attempt record has error_class 'conversion'")
     else:
         bad(f"B: attempt record error_class is {attempts[0]['error_class'] if attempts else 'missing'}")
-    if c._last_ppp_ar_failure_info['max_attempts'] == 1:
-        ok("B: max_attempts is 1 for conversion failure")
-    else:
-        bad(f"B: max_attempts is {c._last_ppp_ar_failure_info['max_attempts']}")
     if len(failures) == 1:
         ok("B: one failure recorded")
     else:
@@ -139,10 +131,10 @@ try:
 except Exception as e:
     bad(f"B: exception: {e}")
 
-# Case C: pdp3_failed with timeout -> error_class 'pdp3_timeout', max_attempts 2
+# Case C: pdp3_failed with timeout -> error_class 'pdp3_timeout'
 try:
     c, attempts, failures = make_controller(None, {'stage': 'pdp3_failed', 'failure_kind': 'timeout'})
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is False:
         ok("C: returns False on pdp3 timeout")
     else:
@@ -151,17 +143,13 @@ try:
         ok("C: attempt record has error_class 'pdp3_timeout'")
     else:
         bad(f"C: attempt record error_class is {attempts[0]['error_class'] if attempts else 'missing'}")
-    if c._last_ppp_ar_failure_info['max_attempts'] == 2:
-        ok("C: max_attempts is 2 for pdp3 timeout")
-    else:
-        bad(f"C: max_attempts is {c._last_ppp_ar_failure_info['max_attempts']}")
 except Exception as e:
     bad(f"C: exception: {e}")
 
-# Case D: fix rate not ok -> error_class 'fix_rate', max_attempts 1
+# Case D: fix rate not ok -> error_class 'fix_rate'
 try:
     c, attempts, failures = make_controller(SUCCESS_RESULT, {'stage': 'completed', 'failure_kind': None}, fix_rate_ok=False)
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is False:
         ok("D: returns False on fix rate failure")
     else:
@@ -170,10 +158,6 @@ try:
         ok("D: attempt record has error_class 'fix_rate'")
     else:
         bad(f"D: attempt record error_class is {attempts[0]['error_class'] if attempts else 'missing'}")
-    if c._last_ppp_ar_failure_info['max_attempts'] == 1:
-        ok("D: max_attempts is 1 for fix rate failure")
-    else:
-        bad(f"D: max_attempts is {c._last_ppp_ar_failure_info['max_attempts']}")
     if len(failures) == 1 and 'WL=95.0' in failures[0]:
         ok("D: failure text mentions WL fix rate")
     else:
@@ -184,7 +168,7 @@ except Exception as e:
 # Case E: apply fails -> error_class 'apply'
 try:
     c, attempts, failures = make_controller(SUCCESS_RESULT, {'stage': 'completed', 'failure_kind': None}, fix_rate_ok=True, apply_ok=False)
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is False:
         ok("E: returns False on apply failure")
     else:
@@ -203,7 +187,7 @@ except Exception as e:
 # Case F: success -> returns True, no failures, error_class None
 try:
     c, attempts, failures = make_controller(SUCCESS_RESULT, {'stage': 'completed', 'failure_kind': None}, fix_rate_ok=True, apply_ok=True)
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is True:
         ok("F: returns True on success")
     else:
@@ -222,7 +206,7 @@ except Exception as e:
 # Case G: failure_kind only matters for pdp3_failed
 try:
     c, attempts, failures = make_controller(None, {'stage': 'no_raw_data', 'failure_kind': 'timeout'})
-    result = c._run_ppp_ar_interim(4.0, 4)
+    result = c._attempt_final_ppp_ar(datetime(2026, 10, 21, 0, 0, 0))
     if result is False:
         ok("G: returns False on no_raw_data")
     else:
@@ -233,21 +217,6 @@ try:
         bad(f"G: attempt record error_class is {attempts[0]['error_class'] if attempts else 'missing'}")
 except Exception as e:
     bad(f"G: exception: {e}")
-
-# Case H: source check for retry loop
-try:
-    src_path = Path(REPO) / 'addons' / 'features' / 'auto_survey' / ('survey_controller' + '.py')
-    src = src_path.read_text()
-    if 'should_retry(failure_info, attempt_num)' in src:
-        ok("H: source contains should_retry call")
-    else:
-        bad("H: source missing should_retry call")
-    if 'self._last_ppp_ar_failure_info = None' in src:
-        ok("H: source resets _last_ppp_ar_failure_info")
-    else:
-        bad("H: source missing _last_ppp_ar_failure_info reset")
-except Exception as e:
-    bad(f"H: exception: {e}")
 
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 sys.exit(FAIL)

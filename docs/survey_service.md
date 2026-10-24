@@ -84,8 +84,9 @@ grep -E 'survey_service_|recovered|self_heal' /var/lib/rtkbase/audit.log | tail
   (written at most once a minute by the survey loop and during the retry waits).
 - The loop only exits early when the survey is stopped/paused/reset or the service shuts
   down; the state then stays `running`, so a restart resumes the retry.
-- The 540-minute "no successful update" watchdog is no longer fatal in PPP-AR mode (an
-  hourly warning instead); it still applies to the non-PPP-AR (rnx2rtkp) path.
+- The 540-minute "no successful update" watchdog was removed with the old loop in the
+  2026-10-24 cleanup (the final result is retried indefinitely instead).
+  PRIDE-PPPAR is the only backend.
 - Not done: the Settings UI does not display the new indicators yet (they are in
   `/api/auto_survey/status`).
 

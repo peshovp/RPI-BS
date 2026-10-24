@@ -1,7 +1,7 @@
 """
 bgs2005_transformer.py
 ========================
-Трансформира ITRF2020 (динамична) координата, получена от PPPProcessor,
+Трансформира ITRF2020 (динамична) координата, получена от PRIDE-PPPAR,
 в BGS2005 координата - официалната референтна система, изисквана за
 координатите на GNSS базови станции в България съгласно Инструкция №
 РД-02-20-25 от 20.09.2011 г. (МРРБ), Чл.22, ал.1: "Изходни данни са
@@ -483,11 +483,9 @@ def verify_rtcm_broadcast_ecef(point: GeodeticPoint, bgs2005: dict,
     PART 6a RESOLUTION of the "future extension" note this comment used
     to carry: the ARP/antenna offset was deliberately designed to NEVER
     enter this chain at all, rather than being inserted into it. The
-    PPP/PPP-AR result is processed AT THE ARP from the start (rnx2rtkp's
-    -k conf sets ant1-antdel{e,n,u}=0 explicitly; pdp3 reads a RINEX
-    header zeroed the same way via convbin -hd 0/0/0 - see
-    ppp_processor.py's _generate_ppp_conf()/rinex_converter.py's
-    build_convbin_args() for both halves), so `point` here already IS
+    PPP-AR result is processed AT THE ARP from the start (pdp3 reads a
+    RINEX header zeroed via convbin -hd 0/0/0 - see rinex_converter.py's
+    build_convbin_args()), so `point` here already IS
     the ARP, and this function's existing PPP-AR-ECEF -> BGS2005-
     transform -> written-values chain already covers the broadcast path
     end to end exactly as originally envisioned - there is no separate

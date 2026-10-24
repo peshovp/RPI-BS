@@ -2,43 +2,38 @@
 Auto Survey-In Feature for RTKBase
 ==================================
 
-Automated 24-hour survey with hourly coordinate updates.
+Automated survey-in with PRIDE-PPPAR ambiguity-resolved PPP.
 
 Features:
 - RTKBase auto-integration (discovers paths automatically)
-- RINEX conversion from raw GNSS logs (UBX/RTCM)
-- SPP positioning with RTKLIB rnx2rtkp
-- Weighted averaging with outlier rejection
-- Geoid height correction from EGM96/EGM2008
-- Hourly coordinate updates to minimize service interruption
+- RINEX conversion from raw GNSS logs (UBX/RTCM) at 30 s intervals
+- PRIDE-PPPAR ambiguity-resolved PPP computed once for the whole
+  survey window when precise products are published
+- ITRF2020 -> ETRF2000/BGS2005 transformation with epoch reduction
+- Ellipsoidal broadcast height (geoid correction for display only)
+- Survey runs as its own systemd service (survey_runner) with
+  reconcile/resume capability
+- File service is survey-only
 - State persistence for restart recovery
-- Quality monitoring (stddev, satellites, epochs)
 
 Author: GeoMaxima Team
-Version: 1.2.1
+Version: 2.0.0
 """
 
-__version__ = "1.3.1"
+__version__ = "2.0.0"
 
 from .survey_controller import SurveyController
 from .rtkbase_config import RTKBaseConfig
 from .rinex_converter import RINEXConverter
-from .spp_processor import SPPProcessor
-from .position_estimator import PositionEstimator, PositionEstimate
 from .geoid_corrector import GeoidCorrector, GeoidModel
-from .config_manager import ConfigManager
 from .state_manager import StateManager, SurveyState
 
 __all__ = [
     "SurveyController",
     "RTKBaseConfig",
     "RINEXConverter",
-    "SPPProcessor",
-    "PositionEstimator",
-    "PositionEstimate",
     "GeoidCorrector",
     "GeoidModel",
-    "ConfigManager",
     "StateManager",
     "SurveyState"
 ]
