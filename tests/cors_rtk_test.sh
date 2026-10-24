@@ -59,7 +59,7 @@ def run(tmp, *, mode="vrs", mountpoint="MP1", user="u1", password="p1",
         "nmea_port": receiver.nmea_port,
         "convbin_path": convbin,
         "rnx2rtkp_path": rnx2rtkp,
-        "min_used": 60,
+        "min_used": 60, "ubx_timeout": 1.0,
     }
     params.update(extra)
     try:
@@ -359,7 +359,7 @@ def test_i():
             "nmea_port": receiver.nmea_port,
             "convbin_path": convbin,
             "rnx2rtkp_path": rnx2rtkp,
-            "min_used": 60,
+            "min_used": 60, "ubx_timeout": 1.0,
         }
         start = time.time()
         result = cr.compute_position(

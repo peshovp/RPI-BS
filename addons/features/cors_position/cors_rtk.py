@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import socket
+import struct
 import threading
 import time
 from datetime import datetime, timezone
@@ -30,6 +31,105 @@ class CorsRtkError(Exception):
         super().__init__(message)
         self.stage = stage
         self.kind = kind
+
+
+def _iter_ubx_frames(buf: bytes):
+    """Parse UBX frames from a byte buffer.
+
+    Returns (frames, rest) where frames is a list of (cls, msg_id, payload)
+    and rest is the unparsed remainder.
+    """
+    frames = []
+    i = 0
+    while i < len(buf):
+        # Look for sync bytes
+        if buf[i] != 0xB5:
+            i += 1
+            continue
+        if i + 1 >= len(buf):
+            break
+        if buf[i + 1] != 0x62:
+            i += 1
+            continue
+        # Found sync, check we have enough for header
+        if i + 6 > len(buf):
+            break
+        cls = buf[i + 2]
+        msg_id = buf[i + 3]
+        length = struct.unpack_from('<H', buf, i + 4)[0]
+        # Validate length
+        if length > 4096:
+            i += 1
+            continue
+        # Check we have the full frame
+        frame_end = i + 6 + length + 2
+        if frame_end > len(buf):
+            break
+        payload = buf[i + 6:frame_end - 2]
+        # Validate checksum
+        ck_a = 0
+        ck_b = 0
+        for b in [cls, msg_id, buf[i + 4], buf[i + 5]] + list(payload):
+            ck_a = (ck_a + b) & 0xFF
+            ck_b = (ck_b + ck_a) & 0xFF
+        if buf[frame_end - 2] != ck_a or buf[frame_end - 1] != ck_b:
+            i += 1
+            continue
+        frames.append((cls, msg_id, payload))
+        i = frame_end
+    return frames, buf[i:]
+
+
+def read_approx_from_ubx(
+    host: str, port: int, timeout: float = 60.0
+) -> Tuple[float, float, float]:
+    """Read approximate position from receiver UBX stream (NAV-PVT)."""
+    start = time.monotonic()
+    try:
+        sock = socket.create_connection((host, port), timeout=5.0)
+    except (OSError, socket.timeout) as e:
+        raise CorsRtkError(
+            "approx", "no_approx_position",
+            "no approximate position from the receiver"
+        ) from e
+
+    try:
+        sock.settimeout(1.0)
+        buf = b""
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                raise CorsRtkError(
+                    "approx", "no_approx_position",
+                    "no approximate position from the receiver"
+                )
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            buf += chunk
+            # Keep buffer bounded
+            if len(buf) > 65536:
+                buf = buf[-8192:]
+            frames, buf = _iter_ubx_frames(buf)
+            for cls, msg_id, payload in frames:
+                if cls == 0x01 and msg_id == 0x07 and len(payload) >= 92:
+                    fix_type = payload[20]
+                    flags = payload[21]
+                    if fix_type >= 3 and (flags & 1) == 1:
+                        lon = struct.unpack_from('<i', payload, 24)[0] * 1e-7
+                        lat = struct.unpack_from('<i', payload, 28)[0] * 1e-7
+                        height = struct.unpack_from('<i', payload, 32)[0] / 1000.0
+                        return (lat, lon, height)
+    finally:
+        sock.close()
+
+    raise CorsRtkError(
+        "approx", "no_approx_position",
+        "no approximate position from the receiver"
+    )
 
 
 def read_approx_from_nmea(
@@ -76,6 +176,21 @@ def read_approx_from_nmea(
         "approx", "no_approx_position",
         "no approximate position from the receiver"
     )
+
+
+def _read_approx(
+    rover_host: str, rover_port: int, rover_suffix: str,
+    nmea_host: str, nmea_port: int, ubx_timeout: float = 10.0
+) -> Tuple[float, float, float]:
+    """Read approximate position, trying UBX first if applicable."""
+    if rover_suffix == ".ubx":
+        try:
+            return read_approx_from_ubx(rover_host, rover_port, timeout=ubx_timeout)
+        except CorsRtkError:
+            pass
+        return read_approx_from_nmea(nmea_host, nmea_port, timeout=30.0)
+    else:
+        return read_approx_from_nmea(nmea_host, nmea_port, timeout=60.0)
 
 
 def capture_local_raw(
@@ -210,7 +325,12 @@ def compute_position(
     progress: Optional[Callable[[str, str], None]] = None,
     stop_event: Optional[threading.Event] = None
 ) -> Dict[str, Any]:
-    """Compute position using CORS RTK. Never raises."""
+    """Compute position using CORS RTK. Never raises.
+
+    params keys: duration_s, rover_host, rover_port, rover_suffix, nmea_host,
+    nmea_port, approx, sample_interval, frequencies, navsys, convbin_path,
+    rnx2rtkp_path, cleanup, min_used, min_fix_ratio, max_std_m, ubx_timeout.
+    """
     if params is None:
         params = {}
 
@@ -230,6 +350,7 @@ def compute_position(
     min_used = params.get("min_used", 60)
     min_fix_ratio = params.get("min_fix_ratio", 0.5)
     max_std_m = params.get("max_std_m", 0.05)
+    ubx_timeout = params.get("ubx_timeout", 10.0)
 
     result = {
         "ok": False,
@@ -281,7 +402,7 @@ def compute_position(
         if progress:
             progress("approx", "reading approximate position")
         if approx is None:
-            approx = read_approx_from_nmea(nmea_host, nmea_port)
+            approx = _read_approx(rover_host, rover_port, rover_suffix, nmea_host, nmea_port, ubx_timeout=ubx_timeout)
         result["approx"] = list(approx)
         lat, lon, h = approx
 

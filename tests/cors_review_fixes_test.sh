@@ -436,7 +436,7 @@ def test_l():
             "nmea_port": receiver.nmea_port,
             "convbin_path": convbin,
             "rnx2rtkp_path": rnx2rtkp,
-            "min_used": 60
+            "min_used": 60, "ubx_timeout": 1.0
         })
         elapsed = time.time() - start
         assert elapsed < 8, f"Expected < 8s, got {elapsed}s"
@@ -478,7 +478,7 @@ def test_m():
                 "nmea_port": nmea_port,
                 "convbin_path": None,
                 "rnx2rtkp_path": None,
-                "min_used": 60
+                "min_used": 60, "ubx_timeout": 1.0
             }
         )
         elapsed = time.time() - start
@@ -519,7 +519,7 @@ def test_n():
             "nmea_port": receiver.nmea_port,
             "convbin_path": convbin,
             "rnx2rtkp_path": rnx2rtkp,
-            "min_used": 60
+            "min_used": 60, "ubx_timeout": 1.0
         }, progress=progress, stop_event=stop_event)
         assert result["ok"] == False, "Expected ok=False"
         assert result["kind"] == "cancelled", f"Expected cancelled, got {result['kind']}"
