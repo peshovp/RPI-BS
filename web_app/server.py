@@ -112,6 +112,12 @@ except ImportError as e:
     print(f"Watchdog feature unavailable (addons import failed): {e}")
     watchdog_controller = None
 
+try:
+    from addons.features.cors_position.cors_routes import cors_bp
+    app.register_blueprint(cors_bp)
+except ImportError as e:
+    print(f"CORS accounts feature unavailable (addons import failed): {e}")
+
 login=LoginManager(app)
 login.login_view = 'login_page'
 socketio = SocketIO(app, async_mode = 'gevent')
