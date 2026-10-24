@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_ACCOUNTS_FILE = "/var/lib/rtkbase/cors_accounts.json"
 MAX_ACCOUNTS = 10
-FRAMES = ("ETRF2000@2005.0", "ETRF2000@epoch", "ITRF2020@epoch", "WGS84-approx")
+FRAMES = ("ETRF2000@2005.0", "ETRF2000@epoch", "ITRF2020@epoch", "ITRF2020@date", "WGS84-approx")
 MODES = ("vrs", "single_base")
 
 try:

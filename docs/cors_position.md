@@ -87,3 +87,41 @@ New package `addons/features/cors_position/` (not part of `auto_survey`):
 - Which networks Pesho can use for the first live test (host, mountpoint, VRS or single base,
   frame/epoch). Credentials are entered by Pesho in the UI, never in the repo or chat.
 - UM980: the capture/convert path must work with its RTCM3 MSM7 log as well.
+
+## Findings: coordinate system of the XAG (XGEO) network, 2026-10-24
+
+First live run on Topolchane (account on the XGEO caster, mountpoint AUTO, base station
+8.04 km from the rover, 179 of 180 epochs fixed, sigma N/E/U 1.1/0.9/5.0 mm).
+
+What the vendor documents say: only "The coordinates align with the CORS service's coordinate
+system". No datum, frame or epoch is named in the base station manual, the maintenance guide,
+the portable base guide or the XGEO RTK platform manual. The caster distributes the data of XAG
+fixed bases whose coordinates come from each base's own "coordinate source" (GPS, CORS or manual).
+
+Hypotheses tested against independent PPP-AR solutions of the same antenna (pdp3, IGS20 =
+ITRF2020 frame; 9 h session 2026-10-19 with RAP products, and a 1 h session 2026-09-24; the two
+agree to 2 cm in 3D). CORS position (raw, as received) minus the PPP position propagated to the
+hypothesised network epoch with the ITRF2020 velocity (SOFI, 24.3 E / 11.2 N mm/yr):
+
+| Hypothesis | 9 h session: E / N / hor | 1 h session: E / N / hor |
+|---|---|---|
+| ITRF2020 at the date of the data | -2.9 / -3.8 / 4.8 cm | -2.0 / -5.7 / 6.0 cm |
+| ITRF2020 @ 2020.0 | +13.6 / +3.9 / 14.1 cm | +14.3 / +1.8 / 14.5 cm |
+| ITRF2020 @ 2015.0 | 27.4 cm | 27.5 cm |
+| ITRF2020 @ 2025.0 | 2.3 cm | 4.4 cm |
+| best-fit network epoch | 2025.22 (2.2 cm) | 2025.16 (4.3 cm) |
+
+Sensitivity is 26.7 mm per year of epoch, so ITRF2020 @ 2020.0 would need an unexplained
+14 cm error against sessions that agree to 2 cm: it is not supported. The data fit an ITRF-type
+frame at a recent epoch (date of observation, within roughly +-1 year). The vertical difference
+(CORS lower by 10-11 cm in both comparisons) is not a frame effect and is unexplained
+(antenna phase centre, or the height of the XAG base).
+
+An earlier inference of "ITRF2020 @ 2020.0" (1.9 cm fit) used the broadcast position of
+Topolchane as reference. That reference is itself about 14 cm horizontally (N -5, E -13 cm) and
+11 cm vertically away from a fresh PPP-AR position converted with our own chain, so the fit was
+circular and is withdrawn. The broadcast position of Topolchane is not ground truth until a
+proper 24 h PPP-AR survey replaces it.
+
+Consequence: the account frame option "ITRF2020 at the date of observation" (`ITRF2020@date`)
+exists; the observation epoch is taken from the run.

@@ -5,6 +5,7 @@ root-only JSON file, compares the proposal with the current broadcast
 position, and applies it only after an explicit confirmation.
 """
 
+import calendar
 import json
 import logging
 import math
@@ -46,6 +47,25 @@ SAFE_RESULT_KEYS = [
     "lat", "lon", "h", "rover_bytes", "base_bytes",
     "started_at", "finished_at",
 ]
+
+
+def _decimal_year(iso_text):
+    """Parse an ISO 8601 UTC timestamp string and return the decimal year.
+
+    Returns None for None or unparsable text.
+    """
+    if iso_text is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        day_of_year = dt.timetuple().tm_yday
+        seconds_of_day = (dt.hour * 3600 + dt.minute * 60 + dt.second)
+        days_in_year = 366 if calendar.isleap(dt.year) else 365
+        return dt.year + (day_of_year - 1 + seconds_of_day / 86400) / days_in_year
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def load_job(path: str = DEFAULT_JOB_FILE) -> Optional[Dict[str, Any]]:
@@ -223,6 +243,7 @@ class CorsJobManager:
                 "comparison": None,
                 "converted": None,
                 "conversion_error": None,
+                "conversion_epoch": None,
                 "applied_at": None,
                 "apply_result": None,
                 "last_apply_error": None,
@@ -291,11 +312,14 @@ class CorsJobManager:
             # Convert to BGS2005 if we have a position
             converted = None
             conversion_error = None
+            conv_epoch = account["epoch"]
             if result.get("lat") is not None:
+                if account["frame"].endswith("@date"):
+                    conv_epoch = _decimal_year(result.get("finished_at")) or _decimal_year(datetime.now(timezone.utc).isoformat())
                 try:
                     converted = self._convert_fn(
                         result["lat"], result["lon"], result["h"],
-                        account["frame"], account["epoch"]
+                        account["frame"], conv_epoch
                     )
                 except cors_frame.FrameError as e:
                     conversion_error = str(e)
@@ -326,7 +350,7 @@ class CorsJobManager:
             safe_converted = None
             if converted is not None:
                 safe_converted = {
-                    k: converted[k] for k in (
+                    k: converted.get(k) for k in (
                         "lat", "lon", "h", "method", "shift_m",
                         "shift_n_m", "shift_e_m", "shift_u_m",
                         "provisional", "provisional_reason"
@@ -352,6 +376,7 @@ class CorsJobManager:
                     "comparison": comparison,
                     "converted": safe_converted,
                     "conversion_error": conversion_error,
+                    "conversion_epoch": conv_epoch,
                     "applied_at": None,
                     "apply_result": None,
                     "last_apply_error": None,
@@ -365,6 +390,7 @@ class CorsJobManager:
                 job["comparison"] = comparison
                 job["converted"] = safe_converted
                 job["conversion_error"] = conversion_error
+                job["conversion_epoch"] = conv_epoch
 
             save_job(job, self._job_path)
 
@@ -406,6 +432,7 @@ class CorsJobManager:
                     "comparison": None,
                     "converted": None,
                     "conversion_error": None,
+                    "conversion_epoch": None,
                     "applied_at": None,
                     "apply_result": None,
                     "last_apply_error": None,
@@ -418,6 +445,7 @@ class CorsJobManager:
                 job["result"] = None
                 job["converted"] = None
                 job["conversion_error"] = None
+                job["conversion_epoch"] = None
             save_job(job, self._job_path)
 
     def cancel(self) -> bool:
@@ -508,13 +536,16 @@ class CorsJobManager:
 
             # Build metadata for apply
             summary = result.get("summary") or {}
+            frame_epoch = job.get("conversion_epoch")
+            if frame_epoch is None:
+                frame_epoch = job.get("epoch")
             meta = {
                 "account_name": job.get("account_name"),
                 "frame": result.get("frame"),
-                "frame_epoch": job.get("epoch"),
-                "conversion": converted["method"],
-                "frame_shift_m": converted["shift_m"],
-                "provisional": converted["provisional"],
+                "frame_epoch": frame_epoch,
+                "conversion": converted.get("method"),
+                "frame_shift_m": converted.get("shift_m"),
+                "provisional": converted.get("provisional", False),
                 "fixed": summary.get("fixed"),
                 "used": summary.get("used"),
                 "fix_ratio": summary.get("fix_ratio"),

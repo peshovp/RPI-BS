@@ -40,12 +40,24 @@ def to_bgs2005(
 ) -> Dict[str, Any]:
     """Convert a position to BGS2005 (ETRF2000 at epoch 2005.0).
 
+    Supported frames:
+        - "ETRF2000@2005.0" (BGS2005): already in target frame; epoch ignored.
+        - "ITRF2020@epoch": ITRF2020 coordinates at the given coordinate epoch;
+          epoch is the epoch of the coordinates.
+        - "ETRF2000@epoch": ETRF2000 coordinates at the given coordinate epoch;
+          epoch is the epoch of the coordinates.
+        - "ITRF2020@date": ITRF2020 coordinates at the observation date;
+          epoch is the observation epoch (decimal year).
+        - "WGS84-approx": not supported (raises FrameError).
+
     Args:
         lat: Latitude in degrees.
         lon: Longitude in degrees.
         h: Ellipsoidal height in metres.
         frame: Source coordinate frame.
-        epoch: Epoch of the source coordinates (float year), or None.
+        epoch: For "@epoch" frames, the epoch of the coordinates (float year).
+            For "@date" frames, the observation epoch (float year). Ignored for
+            BGS2005.
         itrf_fn: Optional injected ITRF2020->BGS2005 conversion function.
         epoch_fn: Optional injected epoch reduction function.
         velocity_fn: Optional injected velocity loader function.
@@ -61,7 +73,7 @@ def to_bgs2005(
         raise FrameError("invalid position")
 
     # Validate frame
-    if frame not in ("ETRF2000@2005.0", "ITRF2020@epoch", "ETRF2000@epoch", "WGS84-approx"):
+    if frame not in ("ETRF2000@2005.0", "ITRF2020@epoch", "ETRF2000@epoch", "ITRF2020@date", "WGS84-approx"):
         raise FrameError("unknown coordinate system")
 
     # Validate epoch for epoch-dependent frames
@@ -70,6 +82,11 @@ def to_bgs2005(
             raise FrameError("the coordinate epoch of the account is required")
         if not (1990.0 <= float(epoch) <= 2100.0):
             raise FrameError("the coordinate epoch of the account is required")
+    elif frame == "ITRF2020@date":
+        if not _is_finite_number(epoch):
+            raise FrameError("the observation epoch is required")
+        if not (1990.0 <= float(epoch) <= 2100.0):
+            raise FrameError("the observation epoch is required")
 
     if frame == "WGS84-approx":
         raise FrameError(
@@ -83,7 +100,7 @@ def to_bgs2005(
         method = "none"
         provisional = False
         provisional_reason = None
-    elif frame == "ITRF2020@epoch":
+    elif frame in ("ITRF2020@epoch", "ITRF2020@date"):
         try:
             if itrf_fn is not None:
                 r = itrf_fn(lat, lon, h, epoch)
