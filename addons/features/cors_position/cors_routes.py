@@ -35,3 +35,27 @@ def update_account_route(account_id):
 @login_required
 def delete_account_route(account_id):
     return _respond(cors_api.handle_delete(account_id))
+
+
+@cors_bp.route("/accounts/<account_id>/compute", methods=["POST"])
+@login_required
+def compute_route(account_id):
+    return _respond(cors_api.handle_compute(account_id))
+
+
+@cors_bp.route("/job", methods=["GET"])
+@login_required
+def job_route():
+    return _respond(cors_api.handle_job())
+
+
+@cors_bp.route("/job/cancel", methods=["POST"])
+@login_required
+def cancel_route():
+    return _respond(cors_api.handle_cancel())
+
+
+@cors_bp.route("/job/apply", methods=["POST"])
+@login_required
+def apply_route():
+    return _respond(cors_api.handle_apply(request.get_json(silent=True)))
