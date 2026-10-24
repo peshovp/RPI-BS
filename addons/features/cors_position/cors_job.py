@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -160,6 +161,28 @@ class CorsJobManager:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._applied_job_ids = set()
+
+        # Reconcile stale running job from previous service instance
+        try:
+            self.status()
+        except Exception:
+            logger.exception("Failed to reconcile stale CORS job on init")
+
+        # Clean up leftover work directories from previous runs
+        try:
+            if os.path.exists(self._work_root):
+                for entry in os.listdir(self._work_root):
+                    entry_path = os.path.join(self._work_root, entry)
+                    try:
+                        if os.path.isdir(entry_path):
+                            shutil.rmtree(entry_path)
+                        else:
+                            os.remove(entry_path)
+                    except Exception:
+                        logger.exception("Failed to clean up work entry: %s", entry_path)
+        except Exception:
+            logger.exception("Failed to clean up CORS work root: %s", self._work_root)
 
     def start(
         self,
@@ -190,6 +213,7 @@ class CorsJobManager:
                 "frame": account["frame"],
                 "epoch": account["epoch"],
                 "mode": account["mode"],
+                "arp_corrected": False,
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "finished_at": None,
                 "result": None,
@@ -287,6 +311,7 @@ class CorsJobManager:
                     "frame": account["frame"],
                     "epoch": account["epoch"],
                     "mode": account["mode"],
+                    "arp_corrected": False,
                     "started_at": job.get("started_at") if job else None,
                     "finished_at": datetime.now(timezone.utc).isoformat(),
                     "result": safe_result,
@@ -336,6 +361,7 @@ class CorsJobManager:
                     "frame": account["frame"],
                     "epoch": account["epoch"],
                     "mode": account["mode"],
+                    "arp_corrected": False,
                     "started_at": job.get("started_at") if job else None,
                     "finished_at": datetime.now(timezone.utc).isoformat(),
                     "result": None,
@@ -406,6 +432,13 @@ class CorsJobManager:
                 })
                 return {"ok": False, "reason": "no such computation", "apply_result": None}
 
+            if job_id in self._applied_job_ids:
+                self._audit("cors", "apply_refused", {
+                    "job_id": job_id,
+                    "reason": "computation not finished successfully",
+                })
+                return {"ok": False, "reason": "computation not finished successfully", "apply_result": None}
+
             result = job.get("result") or {}
             if job.get("status") != "done" or not result.get("ok"):
                 self._audit("cors", "apply_refused", {
@@ -440,6 +473,8 @@ class CorsJobManager:
                 "std_e_m": summary.get("std_e_m"),
                 "std_u_m": summary.get("std_u_m"),
                 "job_id": job_id,
+                "arp_corrected": False,
+                "note": "antenna phase centre position, not corrected to the ARP",
             }
 
             res = self._apply_fn(
@@ -454,10 +489,14 @@ class CorsJobManager:
             )
 
             if res.get("ok"):
+                self._applied_job_ids.add(job_id)
                 job["status"] = "applied"
                 job["applied_at"] = datetime.now(timezone.utc).isoformat()
                 job["apply_result"] = res
-                save_job(job, self._job_path)
+                try:
+                    save_job(job, self._job_path)
+                except Exception:
+                    logger.exception("Failed to save applied job state for %s", job_id)
                 return {"ok": True, "reason": None, "apply_result": res}
             else:
                 job["last_apply_error"] = res.get("reason")

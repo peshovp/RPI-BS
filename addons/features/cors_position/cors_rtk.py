@@ -261,6 +261,23 @@ def compute_position(
         base_dir.mkdir(exist_ok=True)
         rover_dir.mkdir(exist_ok=True)
 
+        # FIX 1: Locate tools first, before any capture
+        if convbin_path is None:
+            convbin_path = rc.find_rtklib_tool("convbin")
+            if convbin_path is None:
+                result["stage"] = "tools"
+                result["kind"] = "tool_missing"
+                result["reason"] = "convbin not found"
+                return result
+
+        if rnx2rtkp_path is None:
+            rnx2rtkp_path = rc.find_rtklib_tool("rnx2rtkp")
+            if rnx2rtkp_path is None:
+                result["stage"] = "tools"
+                result["kind"] = "tool_missing"
+                result["reason"] = "rnx2rtkp not found"
+                return result
+
         if progress:
             progress("approx", "reading approximate position")
         if approx is None:
@@ -279,9 +296,14 @@ def compute_position(
                     account["username"], account["password"],
                     tls=account["tls"]
                 )
-                picked = nc.pick_mountpoint(
-                    entries, lat, lon, need_nmea=(account["mode"] == "vrs")
-                )
+                # FIX 4: For single_base mode, exclude VRS mountpoints that need NMEA
+                if account["mode"] == "single_base":
+                    filtered = [e for e in entries if not e.get("nmea")]
+                    picked = nc.pick_mountpoint(filtered, lat, lon, need_nmea=False)
+                else:
+                    picked = nc.pick_mountpoint(
+                        entries, lat, lon, need_nmea=(account["mode"] == "vrs")
+                    )
                 if picked is None:
                     result["stage"] = "mountpoint"
                     result["kind"] = "not_found"
@@ -305,6 +327,9 @@ def compute_position(
         rover_result = [None]
         rover_error = [None]
 
+        # FIX 2: Create abort event for capture threads
+        abort = threading.Event()
+
         def capture_base():
             try:
                 gga_provider = None
@@ -316,30 +341,39 @@ def compute_position(
                     str(base_file), duration_s,
                     tls=account["tls"],
                     gga_provider=gga_provider,
-                    stop_event=stop_event
+                    stop_event=abort
                 )
             except nc.NtripError as e:
+                abort.set()
                 base_error[0] = e
             except Exception as e:
+                abort.set()
                 base_error[0] = e
 
         def capture_rover():
             try:
                 rover_result[0] = capture_local_raw(
                     rover_host, rover_port, str(rover_file),
-                    duration_s, stop_event=stop_event
+                    duration_s, stop_event=abort
                 )
             except CorsRtkError as e:
+                abort.set()
                 rover_error[0] = e
             except Exception as e:
+                abort.set()
                 rover_error[0] = e
 
         t_base = threading.Thread(target=capture_base)
         t_rover = threading.Thread(target=capture_rover)
         t_base.start()
         t_rover.start()
-        t_base.join()
-        t_rover.join()
+
+        # FIX 2: Wait for both threads, propagating caller cancel
+        while t_base.is_alive() or t_rover.is_alive():
+            if stop_event is not None and stop_event.is_set():
+                abort.set()
+            t_base.join(0.2)
+            t_rover.join(0.2)
 
         if stop_event and stop_event.is_set():
             result["stage"] = "capture"
@@ -374,24 +408,15 @@ def compute_position(
         result["base_bytes"] = base_result[0]["bytes"]
         result["rover_bytes"] = rover_result[0]["bytes"]
 
+        # FIX 3: Check for cancel before convert
+        if stop_event is not None and stop_event.is_set():
+            result["stage"] = "convert"
+            result["kind"] = "cancelled"
+            result["reason"] = "cancelled"
+            return result
+
         if progress:
             progress("convert", "converting to RINEX")
-
-        if convbin_path is None:
-            convbin_path = rc.find_rtklib_tool("convbin")
-            if convbin_path is None:
-                result["stage"] = "tools"
-                result["kind"] = "tool_missing"
-                result["reason"] = "convbin not found"
-                return result
-
-        if rnx2rtkp_path is None:
-            rnx2rtkp_path = rc.find_rtklib_tool("rnx2rtkp")
-            if rnx2rtkp_path is None:
-                result["stage"] = "tools"
-                result["kind"] = "tool_missing"
-                result["reason"] = "rnx2rtkp not found"
-                return result
 
         rover_format = rc.receiver_format_for(rover_file)
         rover_obs, rover_nav = convert_obs(
@@ -411,6 +436,13 @@ def compute_position(
             return result
         result["base_xyz"] = list(base_xyz)
 
+        # FIX 3: Check for cancel before solve
+        if stop_event is not None and stop_event.is_set():
+            result["stage"] = "solve"
+            result["kind"] = "cancelled"
+            result["reason"] = "cancelled"
+            return result
+
         if progress:
             progress("solve", "solving RTK baseline")
 
@@ -420,6 +452,13 @@ def compute_position(
             str(rnx2rtkp_path), rover_obs, base_obs,
             rover_nav + base_nav, conf, pos_file
         )
+
+        # FIX 3: Check for cancel before evaluate
+        if stop_event is not None and stop_event.is_set():
+            result["stage"] = "evaluate"
+            result["kind"] = "cancelled"
+            result["reason"] = "cancelled"
+            return result
 
         if progress:
             progress("evaluate", "evaluating solution")

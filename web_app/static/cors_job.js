@@ -26,6 +26,7 @@
     var currentJobId = null;
     var forceNeeded = false;
     var panelShownByStart = false;
+    var pollErrors = 0;
 
     function clearPoll() {
         if (pollTimer) {
@@ -141,7 +142,7 @@
             if (summary) {
                 var fixed = summary.fixed !== null ? summary.fixed : "-";
                 var total = summary.total !== null ? summary.total : "-";
-                var fixRatio = summary.fix_ratio !== null ? fmtNum(summary.fix_ratio, 1) + " %" : "-";
+                var fixRatio = summary.fix_ratio !== null ? fmtNum(summary.fix_ratio * 100, 1) + " %" : "-";
                 var used = summary.used !== null ? summary.used : "-";
                 var sigmaN = summary.std_n_m !== null ? fmtNum(summary.std_n_m * 1000, 1) : "-";
                 var sigmaE = summary.std_e_m !== null ? fmtNum(summary.std_e_m * 1000, 1) : "-";
@@ -215,6 +216,7 @@
             }
             return resp.json();
         }).then(function (data) {
+            pollErrors = 0;
             if (!data.ok) {
                 throw new Error(data.error || "API error");
             }
@@ -224,8 +226,13 @@
                 schedulePoll();
             }
         }).catch(function (err) {
+            pollErrors += 1;
             setStatus("Could not read the job state", "small mb-2 text-danger");
-            clearPoll();
+            if (pollErrors < 5) {
+                schedulePoll();
+            } else {
+                clearPoll();
+            }
         });
     }
 
@@ -301,6 +308,9 @@
                 }
 
                 var confirmText = "Apply this position as the broadcast position?\n" + posText + "\nDifference: " + diffText;
+                if (forceCheckbox.checked) {
+                    confirmText = confirmText + "\nFORCED: the difference to the current position is large.";
+                }
                 if (!window.confirm(confirmText)) {
                     return null;
                 }

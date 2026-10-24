@@ -78,6 +78,24 @@ def _read_headers(sock: socket.socket, timeout: float) -> Tuple[str, Dict[str, s
             data += chunk
             if len(data) > 16384:
                 raise NtripError("protocol", "response headers too large")
+
+            # NTRIP 1.0: "ICY 200 OK\r\n" with no blank line, binary follows immediately
+            if data.startswith(b"ICY 200") and b"\r\n" in data:
+                first_crlf = data.find(b"\r\n")
+                status_line = data[:first_crlf].decode("utf-8", errors="replace")
+                leftover = data[first_crlf + 2:]
+                if leftover.startswith(b"\r\n"):
+                    leftover = leftover[2:]
+                return status_line, {}, leftover
+
+            # NTRIP 1.0 auth errors: check as soon as first line is complete
+            if b"\r\n" in data:
+                first_line = data.split(b"\r\n")[0]
+                if first_line.lower().startswith(b"error - bad password"):
+                    raise NtripError("auth", "authentication failed")
+                if first_line.startswith(b"ICY 401") or first_line.startswith(b"ICY 403"):
+                    raise NtripError("auth", "authentication failed")
+
     except (socket.timeout, TimeoutError) as e:
         raise NtripError("timeout", "timed out reading headers") from e
 
@@ -127,6 +145,9 @@ class _ChunkedDecoder:
                 break
 
             size_line = self._buffer[:crlf].decode("ascii", errors="replace").strip()
+            # Chunk size may have extensions: "1a;name=value"
+            if ";" in size_line:
+                size_line = size_line.split(";")[0].strip()
             try:
                 chunk_size = int(size_line, 16)
             except ValueError:
@@ -279,21 +300,21 @@ def make_gga(lat: float, lon: float, height: float,
     lon_m = (lon_deg - lon_d) * 60
     lon_ew = "E" if lon >= 0 else "W"
 
-    # Guard against minutes rounding to 60
-    lat_m_str = f"{lat_m:010.7f}"
-    if lat_m_str.startswith("60"):
+    # Apply carry before formatting
+    lat_m = round(lat_m, 7)
+    if lat_m >= 60.0:
         lat_d += 1
-        lat_m_str = "0000000.000"
+        lat_m = 0.0
 
-    lon_m_str = f"{lon_m:010.7f}"
-    if lon_m_str.startswith("60"):
+    lon_m = round(lon_m, 7)
+    if lon_m >= 60.0:
         lon_d += 1
-        lon_m_str = "0000000.000"
+        lon_m = 0.0
 
     sentence = (
         f"$GPGGA,{time_str},"
-        f"{lat_d:02d}{lat_m_str},{lat_ns},"
-        f"{lon_d:03d}{lon_m_str},{lon_ew},"
+        f"{lat_d:02d}{lat_m:010.7f},{lat_ns},"
+        f"{lon_d:03d}{lon_m:010.7f},{lon_ew},"
         f"1,10,1.0,{height:.3f},M,0.0,M,,"
     )
 

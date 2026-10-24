@@ -238,8 +238,11 @@ def apply_position(
 
         if restart is not None:
             try:
-                restart()
-                result["restart_ok"] = True
+                rv = restart()
+                if isinstance(rv, dict):
+                    result["restart_ok"] = bool(rv.get("success", True)) and not rv.get("failed")
+                else:
+                    result["restart_ok"] = True
             except Exception:
                 result["restart_ok"] = False
                 logger.error("Failed to restart streaming services")

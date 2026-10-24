@@ -37,6 +37,31 @@ except ImportError:  # loaded standalone (tests): load the sibling module by pat
 logger = logging.getLogger("autosurvey.runner")
 
 
+def cors_apply_blocked(survey_state):
+    """Return True if a CORS position should not be applied because a survey is active.
+
+    Blocks when the survey is RUNNING, FINALIZING or PAUSED. A position may only
+    be applied when no survey is in progress, so that the broadcast position is
+    changed only by a newly applied survey (CLAUDE.md rule).
+    """
+    from .state_manager import SurveyState
+    return survey_state in (SurveyState.RUNNING, SurveyState.FINALIZING, SurveyState.PAUSED)
+
+
+def build_cors_manager(controller):
+    """Build the CORS job manager with the controller's dependencies."""
+    from ..cors_position.cors_job import CorsJobManager
+    from .rtkbase_config import RTKBaseConfig
+    from .state_manager import SurveyState
+    from .survey_controller import _announce_planned_disconnect
+
+    return CorsJobManager(
+        rtkbase_factory=lambda: RTKBaseConfig(str(controller.rtkbase.settings_file)),
+        restart=controller.restart_rtkbase_services,
+        announce=lambda: _announce_planned_disconnect(controller.rtkbase, "cors_position"),
+        survey_running=lambda: cors_apply_blocked(controller.state.survey_state))
+
+
 class SurveyRunner:
     """Polls the request directory and drives the survey controller."""
 
@@ -141,6 +166,8 @@ class SurveyRunner:
 
         except Exception as e:
             logger.exception("error handling request %s", action)
+            if action in ("cors_compute", "cors_cancel", "cors_apply"):
+                return {"ok": False, "message": "internal error", "data": None}
             return {"ok": False, "message": f"{type(e).__name__}: {e}", "data": None}
 
     def run_once(self):
@@ -213,20 +240,7 @@ def main(argv=None):
     # Lazy import of the survey controller
     from .survey_controller import SurveyController
 
-    def cors_manager_factory(controller):
-        """Build the CORS job manager with the controller's dependencies."""
-        from ..cors_position.cors_job import CorsJobManager
-        from .rtkbase_config import RTKBaseConfig
-        from .state_manager import SurveyState
-        from .survey_controller import _announce_planned_disconnect
-
-        return CorsJobManager(
-            rtkbase_factory=lambda: RTKBaseConfig(str(controller.rtkbase.settings_file)),
-            restart=controller.restart_rtkbase_services,
-            announce=lambda: _announce_planned_disconnect(controller.rtkbase, "cors_position"),
-            survey_running=lambda: controller.state.survey_state == SurveyState.RUNNING)
-
-    runner = SurveyRunner(SurveyController, cors_manager_factory=cors_manager_factory)
+    runner = SurveyRunner(SurveyController, cors_manager_factory=build_cors_manager)
     stop_event = threading.Event()
 
     def handle_signal(signum, frame):

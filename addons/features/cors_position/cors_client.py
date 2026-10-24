@@ -17,9 +17,12 @@ def runner_active():
         return False
 
 
-def request(action, params=None, timeout=30.0, request_dir=None, start_service=None):
+def request(action, params=None, timeout=None, request_dir=None, start_service=None):
     """Submit a request to the survey runner and wait for the result."""
     from ..auto_survey import survey_requests
+
+    if timeout is None:
+        timeout = 150.0 if action == "cors_apply" else 30.0
 
     if start_service is None:
         def start_service():
