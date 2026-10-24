@@ -73,6 +73,7 @@ class FakeState:
         self.calls = []
         self.status_dict = {}
         self.survey_state = None
+        self.reasons = []
 
     def get_status(self):
         return dict(self.status_dict)
@@ -82,6 +83,7 @@ class FakeState:
 
     def record_final_attempt(self, attempt, reason, nxt):
         self.calls.append(('final_attempt', attempt))
+        self.reasons.append(reason)
 
     def clear_final_attempts(self):
         self.calls.append('clear')
@@ -136,6 +138,7 @@ def make_final(ppp_ar_enabled=True):
         return False
 
     c._attempt_final_ppp_ar = fake_attempt
+    c._final_products_status = lambda start, end: {'available': True, 'missing': [], 'error': None}
 
     return c, stops, fails, delays, updates, windows, results
 
@@ -377,6 +380,134 @@ try:
         ctrl_mod.log_event = orig_log
 except Exception as e:
     bad(f"H: exception: {e}")
+
+# Case I: waiting for products
+try:
+    c, stops, fails, delays, updates, windows, results = make_final(True)
+    call_count = [0]
+    def products_waiting(start, end):
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            return {'available': False, 'missing': ['2026 DOY 297: ERP', '2026 DOY 297: orbit'], 'error': None}
+        return {'available': True, 'missing': [], 'error': None}
+    c._final_products_status = products_waiting
+    results.extend([True])
+
+    orig_sleep = ctrl_mod.time.sleep
+    orig_announce = ctrl_mod._announce_planned_disconnect
+    orig_log = ctrl_mod.log_event
+    ctrl_mod.time.sleep = lambda s: None
+    ctrl_mod._announce_planned_disconnect = lambda *a, **k: None
+    ctrl_mod.log_event = lambda *a, **k: None
+
+    try:
+        c._finalize_survey()
+        if len(windows) == 1:
+            ok("I: exactly 1 real attempt made")
+        else:
+            bad(f"I: {len(windows)} real attempts made, expected 1")
+        if delays == [600, 600]:
+            ok("I: delays are [600, 600]")
+        else:
+            bad(f"I: delays are {delays}, expected [600, 600]")
+        waiting_reasons = [r for r in c.state.reasons if 'waiting for precise products' in r and '2026 DOY 297' in r]
+        if len(waiting_reasons) == 2:
+            ok("I: two record_final_attempt entries with waiting reasons")
+        else:
+            bad(f"I: {len(waiting_reasons)} waiting reasons, expected 2")
+        if 'complete' in c.state.calls:
+            ok("I: complete_survey called")
+        else:
+            bad("I: complete_survey not called")
+    finally:
+        ctrl_mod.time.sleep = orig_sleep
+        ctrl_mod._announce_planned_disconnect = orig_announce
+        ctrl_mod.log_event = orig_log
+except Exception as e:
+    bad(f"I: exception: {e}")
+
+# Case J: blind attempt
+try:
+    c, stops, fails, delays, updates, windows, results = make_final(True)
+    c._final_products_status = lambda start, end: {'available': False, 'missing': ['x'], 'error': None}
+    results.extend([True])
+
+    monotonic_calls = [0]
+    def fake_monotonic():
+        monotonic_calls[0] += 1
+        if monotonic_calls[0] == 1:
+            return 0.0
+        return (monotonic_calls[0] - 1) * 7 * 3600
+    orig_monotonic = ctrl_mod.time.monotonic
+    ctrl_mod.time.monotonic = fake_monotonic
+
+    orig_sleep = ctrl_mod.time.sleep
+    orig_announce = ctrl_mod._announce_planned_disconnect
+    orig_log = ctrl_mod.log_event
+    ctrl_mod.time.sleep = lambda s: None
+    ctrl_mod._announce_planned_disconnect = lambda *a, **k: None
+    ctrl_mod.log_event = lambda *a, **k: None
+
+    try:
+        c._finalize_survey()
+        if len(windows) == 1:
+            ok("J: exactly 1 real attempt made (blind attempt due)")
+        else:
+            bad(f"J: {len(windows)} real attempts made, expected 1")
+        if 'complete' in c.state.calls:
+            ok("J: complete_survey called")
+        else:
+            bad("J: complete_survey not called")
+    finally:
+        ctrl_mod.time.monotonic = orig_monotonic
+        ctrl_mod.time.sleep = orig_sleep
+        ctrl_mod._announce_planned_disconnect = orig_announce
+        ctrl_mod.log_event = orig_log
+except Exception as e:
+    bad(f"J: exception: {e}")
+
+# Case K: unknown availability proceeds
+try:
+    c, stops, fails, delays, updates, windows, results = make_final(True)
+    c._final_products_status = lambda start, end: {'available': None, 'missing': [], 'error': 'OSError: no route'}
+    results.extend([True])
+
+    orig_sleep = ctrl_mod.time.sleep
+    orig_announce = ctrl_mod._announce_planned_disconnect
+    orig_log = ctrl_mod.log_event
+    ctrl_mod.time.sleep = lambda s: None
+    ctrl_mod._announce_planned_disconnect = lambda *a, **k: None
+    ctrl_mod.log_event = lambda *a, **k: None
+
+    try:
+        c._finalize_survey()
+        if len(windows) == 1:
+            ok("K: exactly 1 real attempt made")
+        else:
+            bad(f"K: {len(windows)} real attempts made, expected 1")
+        if delays == []:
+            ok("K: no delays")
+        else:
+            bad(f"K: delays are {delays}, expected []")
+    finally:
+        ctrl_mod.time.sleep = orig_sleep
+        ctrl_mod._announce_planned_disconnect = orig_announce
+        ctrl_mod.log_event = orig_log
+except Exception as e:
+    bad(f"K: exception: {e}")
+
+# Case L: _compute_ppp_ar_slots returns []
+try:
+    for target in [6, 24]:
+        c = SC.__new__(SC)
+        c.target_hours = target
+        slots = c._compute_ppp_ar_slots()
+        if slots == []:
+            ok(f"L: _compute_ppp_ar_slots returns [] for target_hours={target}")
+        else:
+            bad(f"L: _compute_ppp_ar_slots returns {slots} for target_hours={target}, expected []")
+except Exception as e:
+    bad(f"L: exception: {e}")
 
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 sys.exit(FAIL)

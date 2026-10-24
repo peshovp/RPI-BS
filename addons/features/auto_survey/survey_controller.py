@@ -46,6 +46,7 @@ from .pride_pppar_processor import (
     PPP_AR_SAMPLE_INTERVAL_S,
 )
 from .ppp_ar_failure import describe_failure, should_retry, STAGE_PDP3_FAILED, STAGE_FIX_RATE_BELOW_THRESHOLD, STAGE_APPLY_FAILED
+from .product_availability import check_products_available
 from .bgs2005_transformer import GeodeticPoint, itrf2020_to_bgs2005, extract_observation_epoch, extract_observation_duration_minutes, verify_rtcm_broadcast_ecef, arp_to_marker, verify_arp_to_marker_offset
 from .position_estimator import PositionEstimator
 from .geoid_corrector import GeoidCorrector
@@ -866,12 +867,14 @@ class SurveyController:
         Returns:
             Sorted list of slot_hours floats.
         """
-        slots = []
-        slot = 0.0
-        while slot < self.target_hours:
-            slots.append(slot)
-            slot += self.PPP_AR_SLOT_INTERVAL_HOURS
-        return slots
+        # NO INTERIM SLOTS (owner's decision, 2026-10-24): the precise products
+        # (orbit/ERP) of an observation day are published ~13-19 h after the
+        # day ends, so an interim PPP-AR run on the day's own data cannot
+        # complete (confirmed live: pdp3 aborts in sp3orb, read_igserp). Only the
+        # FINAL result is computed, automatically, once the products exist
+        # (see _finalize_survey()/product_availability.py). The slot machinery
+        # below stays but receives an empty schedule.
+        return []
 
     def _survey_loop(self):
         """
@@ -2922,6 +2925,21 @@ class SurveyController:
     FINAL_RETRY_FAST_SECONDS = 600
     FINAL_RETRY_SLOW_SECONDS = 3600
     HEARTBEAT_INTERVAL_SECONDS = 60
+    # Before each real attempt the products server is listed (cheap); while the
+    # required daily products are not published the loop only polls every
+    # FINAL_PRODUCT_POLL_SECONDS. A real pdp3 attempt is still made at least
+    # every FINAL_BLIND_ATTEMPT_SECONDS regardless of the listing, so a wrong
+    # file-name assumption or a server layout change can never block the final
+    # result forever.
+    FINAL_PRODUCT_POLL_SECONDS = 600
+    FINAL_BLIND_ATTEMPT_SECONDS = 6 * 3600
+
+    def _final_products_status(self, window_start: datetime, window_end: datetime) -> Dict:
+        """check_products_available() for the window, never raising (unknown -> None)."""
+        try:
+            return check_products_available(window_start, window_end)
+        except Exception as e:
+            return {'available': None, 'missing': [], 'error': f"{type(e).__name__}: {e}"}
 
     def _final_retry_delay_seconds(self, attempt: int) -> int:
         """Delay before the next final attempt after `attempt` failed ones."""
@@ -3062,13 +3080,31 @@ class SurveyController:
                 logger.info(f"Final window frozen at {window_end.isoformat()} (UTC)")
                 attempt = 0
                 final_applied = False
+                window_start = (datetime.fromisoformat(start_raw) if start_raw
+                                else window_end - timedelta(hours=self.target_hours))
+                last_real_attempt = time.monotonic()
                 # INFINITE RETRY until the final position is accepted (policy);
                 # leaves the loop early only when the survey is stopped/paused/
                 # reset or the service is shutting down (state stays 'running'
-                # so a restart resumes the retry).
+                # so a restart resumes the retry). A real pdp3 attempt is made only
+                # when the precise products of every UTC day of the window are
+                # published (cheap server listing) - or, as a safety net, at least
+                # every FINAL_BLIND_ATTEMPT_SECONDS.
                 while self._running and self.state.survey_state == SurveyState.RUNNING:
-                    attempt += 1
                     self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
+                    products = self._final_products_status(window_start, window_end)
+                    blind_due = (time.monotonic() - last_real_attempt) >= self.FINAL_BLIND_ATTEMPT_SECONDS
+                    if products.get('available') is False and not blind_due:
+                        missing = ", ".join(products.get('missing') or []) or "unknown"
+                        reason = f"waiting for precise products to be published: {missing}"
+                        poll = self.FINAL_PRODUCT_POLL_SECONDS
+                        next_check = (datetime.utcnow() + timedelta(seconds=poll)).isoformat()
+                        self.state.record_final_attempt(attempt, reason, next_check)
+                        logger.info(f"FINAL result waiting: {reason} (checking again in {poll // 60} min)")
+                        self._wait_while_running(poll)
+                        continue
+                    attempt += 1
+                    last_real_attempt = time.monotonic()
                     final_applied = self._attempt_final_ppp_ar(window_end)
                     if final_applied:
                         break
@@ -3132,7 +3168,6 @@ class SurveyController:
                         })
                         
                         # CRITICAL: Wait for filesystem to stabilize (settings.conf is flushed)
-                        import time
                         logger.info("Waiting 2 seconds for settings.conf to stabilize...")
                         time.sleep(2)
                         
