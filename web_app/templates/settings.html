@@ -748,6 +748,36 @@
     <div id="cors-message" class="alert d-none" role="alert"></div>
     <div id="cors-accounts-list" class="mb-3"></div>
     <button id="cors-add-btn" class="btn btn-sm btn-outline-primary mb-3" type="button">Add account</button>
+    <div id="cors-job-panel" class="card card-body mb-3 d-none">
+      <h6 class="mb-2">CORS position <span id="cors-job-badge" class="badge badge-secondary">idle</span></h6>
+      <div id="cors-job-status" class="small text-muted mb-2"></div>
+      <div id="cors-job-result" class="d-none">
+        <table class="table table-sm mb-2">
+          <tbody>
+            <tr><th scope="row">Proposed position (network coordinates)</th><td id="cors-res-position"></td></tr>
+            <tr><th scope="row">Current broadcast position</th><td id="cors-res-current"></td></tr>
+            <tr><th scope="row">Difference (N / E / U)</th><td id="cors-res-diff"></td></tr>
+            <tr><th scope="row">Quality</th><td id="cors-res-quality"></td></tr>
+            <tr><th scope="row">Coordinate system of the account</th><td id="cors-res-frame"></td></tr>
+          </tbody>
+        </table>
+        <div id="cors-res-hint" class="alert alert-info py-1 small"></div>
+      </div>
+      <div id="cors-job-apply" class="d-none">
+        <div class="form-check mb-2">
+          <input id="cors-confirm" type="checkbox" class="form-check-input">
+          <label for="cors-confirm" class="form-check-label">I confirm that this position becomes the broadcast position of this base station.</label>
+        </div>
+        <div id="cors-force-row" class="form-check mb-2 d-none">
+          <input id="cors-force" type="checkbox" class="form-check-input">
+          <label for="cors-force" class="form-check-label">Apply even though it differs a lot from the current position.</label>
+        </div>
+        <button id="cors-apply-btn" type="button" class="btn btn-sm btn-warning" disabled>Apply position...</button>
+      </div>
+      <div>
+        <button id="cors-cancel-job-btn" type="button" class="btn btn-sm btn-outline-secondary d-none">Cancel computation</button>
+      </div>
+    </div>
     <form id="cors-form" class="card card-body mb-3 d-none" autocomplete="off" novalidate>
       <input type="hidden" id="cors-id" value="">
       <div class="form-group row">
@@ -1446,4 +1476,5 @@
 <script type="text/javascript" src="{{ url_for('static', filename='settings.js', v=g.version) }}" charset="utf-8"></script>
 <script type="text/javascript" src="{{ url_for('static', filename='file_logging_status.js', v=g.version) }}" charset="utf-8"></script>
 <script type="text/javascript" src="{{ url_for('static', filename='cors_accounts.js', v=g.version) }}" charset="utf-8"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='cors_job.js', v=g.version) }}" charset="utf-8"></script>
 {% endblock %}

@@ -325,6 +325,22 @@
             })(account));
             buttons.appendChild(editBtn);
 
+            var computeBtn = document.createElement("button");
+            computeBtn.className = "btn btn-sm btn-outline-primary mr-1";
+            computeBtn.textContent = "Compute position";
+            if (!account.enabled) {
+                computeBtn.disabled = true;
+                computeBtn.title = "Account is disabled";
+            }
+            computeBtn.addEventListener("click", (function (a) {
+                return function () {
+                    if (typeof window.corsJobStart === "function") {
+                        window.corsJobStart(a);
+                    }
+                };
+            })(account));
+            buttons.appendChild(computeBtn);
+
             var delBtn = document.createElement("button");
             delBtn.className = "btn btn-sm btn-outline-danger";
             delBtn.textContent = "Delete";
