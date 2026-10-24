@@ -15,6 +15,7 @@
     var resQuality = document.getElementById("cors-res-quality");
     var resFrame = document.getElementById("cors-res-frame");
     var resHint = document.getElementById("cors-res-hint");
+    var resConverted = document.getElementById("cors-res-converted");
     var applyBlock = document.getElementById("cors-job-apply");
     var confirmCheckbox = document.getElementById("cors-confirm");
     var forceRow = document.getElementById("cors-force-row");
@@ -158,6 +159,20 @@
             }
             resFrame.textContent = frameText;
 
+            if (job.converted) {
+                var convText = "lat " + fmtNum(job.converted.lat, 8) + ", lon " + fmtNum(job.converted.lon, 8) + ", h " + fmtNum(job.converted.h, 3) + " m (via " + job.converted.method + ", shift " + fmtNum(job.converted.shift_m, 2) + " m)";
+                if (job.converted.provisional) {
+                    convText = convText + " - provisional: " + (job.converted.provisional_reason || "see documentation");
+                }
+                resConverted.textContent = convText;
+            } else {
+                var notAvail = "not available";
+                if (job.conversion_error) {
+                    notAvail = notAvail + ": " + job.conversion_error;
+                }
+                resConverted.textContent = notAvail;
+            }
+
             if (comparison) {
                 resHint.classList.remove("d-none");
                 if (comparison.within_threshold) {
@@ -173,18 +188,14 @@
             resultEl.classList.add("d-none");
         }
 
-        var applicable = status === "done" && result && result.ok;
-        if (applicable) {
-            if (job.frame !== "ETRF2000@2005.0") {
-                applyBlock.classList.add("d-none");
-                if (resHint) {
-                    resHint.classList.remove("d-none");
-                    resHint.className = "alert alert-warning py-1 small";
-                    resHint.textContent = "The coordinate system of this account is not set to ETRF2000 @ 2005.0, so the position cannot be applied. Check the difference above and edit the account if it matches.";
-                }
-            } else {
-                applyBlock.classList.remove("d-none");
-            }
+        var applicable = status === "done" && result && result.ok && job.converted !== null;
+        if (status === "done" && result && result.ok && job.converted === null) {
+            applyBlock.classList.add("d-none");
+            resHint.classList.remove("d-none");
+            resHint.className = "alert alert-warning py-1 small";
+            resHint.textContent = "Cannot be applied: " + (job.conversion_error || "no BGS2005 position could be derived") + ". Check the coordinate system and epoch of the account.";
+        } else if (applicable) {
+            applyBlock.classList.remove("d-none");
         } else {
             applyBlock.classList.add("d-none");
         }
@@ -277,7 +288,7 @@
             }).then(function (data) {
                 if (data.ok) {
                     job = data.job;
-                    var applicable = job.status === "done" && job.result && job.result.ok && job.frame === "ETRF2000@2005.0";
+                    var applicable = job.status === "done" && job.result && job.result.ok && job.converted !== null;
                     updateApplyButton(applicable);
                 }
             }).catch(function () {});
@@ -297,17 +308,17 @@
                     throw new Error(data.error || "API error");
                 }
                 job = data.job;
-                if (!job.result || job.result.lat === null) {
-                    throw new Error("No result to apply");
+                if (!job.converted) {
+                    throw new Error("No BGS2005 position to apply");
                 }
 
-                var posText = "lat " + fmtNum(job.result.lat, 8) + ", lon " + fmtNum(job.result.lon, 8) + ", h " + fmtNum(job.result.h, 3) + " m (ellipsoidal)";
+                var posText = "lat " + fmtNum(job.converted.lat, 8) + ", lon " + fmtNum(job.converted.lon, 8) + ", h " + fmtNum(job.converted.h, 3) + " m (ellipsoidal)";
                 var diffText = "no current position";
                 if (job.comparison) {
                     diffText = "N " + fmtNum(job.comparison.d_north_m, 3) + " m / E " + fmtNum(job.comparison.d_east_m, 3) + " m / U " + fmtNum(job.comparison.d_up_m, 3) + " m (horizontal " + fmtNum(job.comparison.horizontal_m, 3) + " m, vertical " + fmtNum(job.comparison.vertical_m, 3) + " m)";
                 }
 
-                var confirmText = "Apply this position as the broadcast position?\n" + posText + "\nDifference: " + diffText;
+                var confirmText = "Apply this position as the broadcast position (BGS2005)?\n" + posText + "\nDifference: " + diffText;
                 if (forceCheckbox.checked) {
                     confirmText = confirmText + "\nFORCED: the difference to the current position is large.";
                 }

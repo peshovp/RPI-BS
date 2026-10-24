@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from . import cors_accounts as accounts
 from . import cors_rtk
 from . import cors_apply
+from . import cors_frame
 
 try:
     from audit_logger import log_event
@@ -143,6 +144,7 @@ class CorsJobManager:
         work_root: str = DEFAULT_WORK_ROOT,
         compute_fn: Optional[Callable] = None,
         apply_fn: Optional[Callable] = None,
+        convert_fn: Optional[Callable] = None,
         restart: Optional[Callable] = None,
         announce: Optional[Callable] = None,
         survey_running: Optional[Callable[[], bool]] = None,
@@ -154,6 +156,7 @@ class CorsJobManager:
         self._work_root = work_root
         self._compute_fn = compute_fn or cors_rtk.compute_position
         self._apply_fn = apply_fn or cors_apply.apply_position
+        self._convert_fn = convert_fn or cors_frame.to_bgs2005
         self._restart = restart
         self._announce = announce
         self._survey_running = survey_running or (lambda: False)
@@ -218,6 +221,8 @@ class CorsJobManager:
                 "finished_at": None,
                 "result": None,
                 "comparison": None,
+                "converted": None,
+                "conversion_error": None,
                 "applied_at": None,
                 "apply_result": None,
                 "last_apply_error": None,
@@ -283,9 +288,27 @@ class CorsJobManager:
             except Exception:
                 pass
 
+            # Convert to BGS2005 if we have a position
+            converted = None
+            conversion_error = None
+            if result.get("lat") is not None:
+                try:
+                    converted = self._convert_fn(
+                        result["lat"], result["lon"], result["h"],
+                        account["frame"], account["epoch"]
+                    )
+                except cors_frame.FrameError as e:
+                    conversion_error = str(e)
+                except Exception:
+                    conversion_error = "the frame conversion failed"
+
+            # Use converted position for comparison when available
             comparison = None
             if result.get("lat") is not None:
-                proposal = (result["lat"], result["lon"], result["h"])
+                if converted is not None:
+                    proposal = (converted["lat"], converted["lon"], converted["h"])
+                else:
+                    proposal = (result["lat"], result["lon"], result["h"])
                 comparison = compare_positions(proposal, current)
 
             # Determine status
@@ -298,6 +321,17 @@ class CorsJobManager:
 
             # Store only safe keys from result
             safe_result = {k: result.get(k) for k in SAFE_RESULT_KEYS if k in result}
+
+            # Store only safe keys from converted
+            safe_converted = None
+            if converted is not None:
+                safe_converted = {
+                    k: converted[k] for k in (
+                        "lat", "lon", "h", "method", "shift_m",
+                        "shift_n_m", "shift_e_m", "shift_u_m",
+                        "provisional", "provisional_reason"
+                    )
+                }
 
             job = load_job(self._job_path)
             if job is None or job.get("job_id") != job_id:
@@ -316,6 +350,8 @@ class CorsJobManager:
                     "finished_at": datetime.now(timezone.utc).isoformat(),
                     "result": safe_result,
                     "comparison": comparison,
+                    "converted": safe_converted,
+                    "conversion_error": conversion_error,
                     "applied_at": None,
                     "apply_result": None,
                     "last_apply_error": None,
@@ -327,6 +363,8 @@ class CorsJobManager:
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
                 job["result"] = safe_result
                 job["comparison"] = comparison
+                job["converted"] = safe_converted
+                job["conversion_error"] = conversion_error
 
             save_job(job, self._job_path)
 
@@ -366,6 +404,8 @@ class CorsJobManager:
                     "finished_at": datetime.now(timezone.utc).isoformat(),
                     "result": None,
                     "comparison": None,
+                    "converted": None,
+                    "conversion_error": None,
                     "applied_at": None,
                     "apply_result": None,
                     "last_apply_error": None,
@@ -376,6 +416,8 @@ class CorsJobManager:
                 job["info"] = "internal error"
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
                 job["result"] = None
+                job["converted"] = None
+                job["conversion_error"] = None
             save_job(job, self._job_path)
 
     def cancel(self) -> bool:
@@ -447,12 +489,15 @@ class CorsJobManager:
                 })
                 return {"ok": False, "reason": "computation not finished successfully", "apply_result": None}
 
-            if result.get("frame") != BGS2005_FRAME:
+            # Check for converted BGS2005 position
+            converted = job.get("converted")
+            if not converted:
+                reason = "no BGS2005 position could be derived: " + (job.get("conversion_error") or "unknown reason")
                 self._audit("cors", "apply_refused", {
                     "job_id": job_id,
-                    "reason": "the coordinate system of this network is not confirmed as BGS2005 (ETRF2000@2005.0)",
+                    "reason": reason,
                 })
-                return {"ok": False, "reason": "the coordinate system of this network is not confirmed as BGS2005 (ETRF2000@2005.0)", "apply_result": None}
+                return {"ok": False, "reason": reason, "apply_result": None}
 
             if self._survey_running():
                 self._audit("cors", "apply_refused", {
@@ -466,6 +511,10 @@ class CorsJobManager:
             meta = {
                 "account_name": job.get("account_name"),
                 "frame": result.get("frame"),
+                "frame_epoch": job.get("epoch"),
+                "conversion": converted["method"],
+                "frame_shift_m": converted["shift_m"],
+                "provisional": converted["provisional"],
                 "fixed": summary.get("fixed"),
                 "used": summary.get("used"),
                 "fix_ratio": summary.get("fix_ratio"),
@@ -479,7 +528,7 @@ class CorsJobManager:
 
             res = self._apply_fn(
                 self._rtkbase_factory(),
-                result["lat"], result["lon"], result["h"],
+                converted["lat"], converted["lon"], converted["h"],
                 source="cors",
                 meta=meta,
                 restart=self._restart,
