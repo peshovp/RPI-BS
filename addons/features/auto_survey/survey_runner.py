@@ -12,6 +12,9 @@ survey that was interrupted by a crash, reboot or restart), then serves
 requests. If the receiver is not yet ready, the survey stays 'running' and the
 loop retries recovery periodically. The persisted survey state is never stopped
 or modified on shutdown, so the survey resumes on the next start.
+
+The runner also hosts the CORS position job, handling cors_compute, cors_cancel
+and cors_apply requests from the web app.
 """
 
 import logging
@@ -39,19 +42,29 @@ class SurveyRunner:
 
     def __init__(self, controller_factory, request_dir=None,
                  poll_interval=1.0, status_interval=30.0, cleanup_interval=600.0,
-                 recover_retry_interval=30.0):
+                 recover_retry_interval=30.0, cors_manager_factory=None):
         self.controller_factory = controller_factory
         self.request_dir = request_dir or survey_requests.DEFAULT_REQUEST_DIR
         self.poll_interval = poll_interval
         self.status_interval = status_interval
         self.cleanup_interval = cleanup_interval
         self.recover_retry_interval = recover_retry_interval
+        self.cors_manager_factory = cors_manager_factory
+        self.cors = None
         self.controller = None
 
     def startup(self):
         """Create the controller and reconcile any interrupted survey."""
         self.controller = self.controller_factory()
         self.controller.is_runner = True
+
+        # Create CORS job manager if factory provided
+        if self.cors_manager_factory is not None:
+            try:
+                self.cors = self.cors_manager_factory(self.controller)
+            except Exception:
+                logger.exception("CORS job manager unavailable")
+                self.cors = None
 
         try:
             resumed = self.controller.recover_survey()
@@ -90,6 +103,38 @@ class SurveyRunner:
             elif action == "reset":
                 self.controller.reset_survey()
                 return {"ok": True, "message": "reset", "data": None}
+
+            elif action == "cors_compute":
+                account_id = params.get("account_id")
+                if not isinstance(account_id, str):
+                    return {"ok": False, "message": "account_id must be a string", "data": None}
+                if self.cors is None:
+                    return {"ok": False, "message": "CORS feature unavailable", "data": None}
+                ok, msg = self.cors.start(account_id)
+                if ok:
+                    return {"ok": True, "message": "started", "data": {"job_id": msg}}
+                return {"ok": False, "message": msg, "data": None}
+
+            elif action == "cors_cancel":
+                if self.cors is None:
+                    return {"ok": False, "message": "CORS feature unavailable", "data": None}
+                cancelled = self.cors.cancel()
+                if cancelled:
+                    return {"ok": True, "message": "cancel requested", "data": None}
+                return {"ok": True, "message": "nothing was running", "data": None}
+
+            elif action == "cors_apply":
+                job_id = params.get("job_id")
+                if not isinstance(job_id, str):
+                    return {"ok": False, "message": "job_id must be a string", "data": None}
+                confirmed = params.get("confirmed") is True
+                force = params.get("force") is True
+                if self.cors is None:
+                    return {"ok": False, "message": "CORS feature unavailable", "data": None}
+                res = self.cors.apply(job_id, confirmed, force)
+                if res["ok"]:
+                    return {"ok": True, "message": "applied", "data": res.get("apply_result")}
+                return {"ok": False, "message": res["reason"] or "apply failed", "data": res.get("apply_result")}
 
             else:
                 return {"ok": False, "message": f"unknown action: {action}", "data": None}
@@ -168,7 +213,20 @@ def main(argv=None):
     # Lazy import of the survey controller
     from .survey_controller import SurveyController
 
-    runner = SurveyRunner(SurveyController)
+    def cors_manager_factory(controller):
+        """Build the CORS job manager with the controller's dependencies."""
+        from ..cors_position.cors_job import CorsJobManager
+        from .rtkbase_config import RTKBaseConfig
+        from .state_manager import SurveyState
+        from .survey_controller import _announce_planned_disconnect
+
+        return CorsJobManager(
+            rtkbase_factory=lambda: RTKBaseConfig(str(controller.rtkbase.settings_file)),
+            restart=controller.restart_rtkbase_services,
+            announce=lambda: _announce_planned_disconnect(controller.rtkbase, "cors_position"),
+            survey_running=lambda: controller.state.survey_state == SurveyState.RUNNING)
+
+    runner = SurveyRunner(SurveyController, cors_manager_factory=cors_manager_factory)
     stop_event = threading.Event()
 
     def handle_signal(signum, frame):

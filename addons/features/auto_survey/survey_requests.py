@@ -16,7 +16,7 @@ import uuid
 from typing import Optional
 
 DEFAULT_REQUEST_DIR = "/var/lib/rtkbase/survey_requests"
-ALLOWED_ACTIONS = ("start", "stop", "reset")
+ALLOWED_ACTIONS = ("start", "stop", "reset", "cors_compute", "cors_cancel", "cors_apply")
 
 
 def _ensure_dirs(request_dir: str) -> None:
