@@ -1,0 +1,89 @@
+# CORS position (quick start position + cross-check)
+
+Status: DESIGN, agreed with Pesho on 2026-10-24. Nothing is implemented yet.
+Triggered by a vendor screen (XGEO "Set Up Base Station": coordinate source GPS / CORS / Manual).
+
+## Decisions (Pesho, 2026-10-24)
+
+1. **PPP-AR stays the only method for the final position.** CORS never replaces it.
+2. **Quick CORS position** at first start of a station: applied **automatically, but only if
+   there is no broadcast position** (empty/zero `position` in settings.conf). It is a temporary
+   position until the first PPP-AR survey replaces it. An existing position is never touched
+   (the "OTA/anything else never changes the broadcast position" rule holds).
+3. **Cross-check**: after every PPP-AR final result the CORS position is compared with it.
+   Threshold **3 cm horizontal / 5 cm vertical**. Exceeding it is a **warning only** (UI +
+   audit.log); it never blocks or changes the PPP-AR result.
+4. **Provider independence**: the user can create **several CORS accounts**, each a rover
+   account on a different network (like the vendor screen). Nothing is hardwired to one
+   provider.
+
+## Account model
+
+Stored OUTSIDE the repo and OUTSIDE settings.conf: `/var/lib/rtkbase/cors_accounts.json`
+(root, 0600, atomic writes). One record per account:
+
+| Field | Meaning |
+|---|---|
+| `id`, `name` | stable id, display name (e.g. "Sofia") |
+| `host`, `port`, `mountpoint` | NTRIP caster; mountpoint may be `AUTO` (sourcetable pick) |
+| `username`, `password` | NTRIP credentials; **never returned by any API** (write-only, UI shows a mask) |
+| `tls` | bool |
+| `mode` | `vrs` (needs our approximate position as NMEA GGA) or `single_base` |
+| `frame` | coordinate system of the network's coordinates: `ETRF2000@2005.0` (BGS2005, no transform), `ETRF2000@epoch`, `ITRF2020@epoch`, `WGS84-approx` |
+| `epoch` | decimal year when `frame` needs one |
+| `enabled`, `use_for_crosscheck`, `use_for_quick_start` | selection |
+
+Audit: create/edit/delete/test/compute events, **without** credentials. Logs and API responses
+must never contain the password or the user name together with the host.
+
+## Computation
+
+New package `addons/features/cors_position/` (not part of `auto_survey`):
+
+1. Capture the CORS stream with `str2str -in ntrip://...` into a raw RTCM3 file while the
+   receiver's raw log (File service) covers the same window; for `vrs` a GGA is sent
+   (`str2str -p lat lon hgt -n <ms>`), the approximate position coming from the receiver's
+   own PVT (never from a stale file).
+2. Convert both with convbin (30 s), solve the baseline with `rnx2rtkp` (kinematic/static RTK,
+   fix-and-hold) against the CORS reference coordinate from RTCM 1005/1006 (VRS: the virtual
+   reference position).
+3. Accept the result only with a fixed solution, enough epochs and a sane sigma; otherwise
+   report why (no fix, no stream, auth failure, ...). Classified failures like `ppp_ar_failure.py`.
+4. Convert the coordinate to **ETRF2000@2005.0** with the existing `bgs2005_transformer.py`
+   (frame/epoch of the account), keeping the **ellipsoidal height** for the broadcast and the
+   ECEF invariant (0.01 m) before anything is applied.
+5. The computation runs in `geomaxima_survey.service` as a new request type (the file request
+   protocol), in its own process group with a hard timeout, so a web restart or OTA cannot
+   kill it. The File service ownership rule is unchanged: a quick-start run owns
+   `str2str_file` for its duration and stops it afterwards (survey-only policy).
+
+## Behaviour
+
+- **Quick start**: runner start-up / first web start checks `position`. If empty and an account is
+  marked `use_for_quick_start`, it runs the computation and applies the result through the same
+  `_apply_geodetic_position` path (state, audit.log, RTCM restart). If it fails it retries with
+  backoff and shows an ERROR in the UI; it never invents a position.
+- **Cross-check**: at the end of `_finalize_survey` (after PPP-AR is applied) a CORS computation
+  over the same window is started for each account with `use_for_crosscheck`; the result is stored
+  in the survey state (`crosscheck`: account, dN, dE, dU, horizontal, vertical, verdict) and
+  shown in Settings. Verdict `warning` over 3 cm / 5 cm, `ok` otherwise, `unavailable` if no
+  fix. It is advisory only.
+
+## Task split (one concern per spec)
+
+1. `cors_accounts.py`: store, validation, masking, audit events (no network).
+2. UI + API: list/create/edit/delete/test-connection (sourcetable only), password write-only.
+3. Capture + RTK computation module (str2str/convbin/rnx2rtkp wrappers, classification).
+4. Frame conversion to BGS2005 + ECEF invariant check.
+5. Runner request type + quick start (applies only with an empty position).
+6. Cross-check at survey finalization + UI/state fields + warning.
+7. Live validation on Topolchane (compute-only, then cross-check against the 1 h smoke survey;
+   the quick-start apply path is exercised by tests only, Topolchane already has a position).
+
+## Open points that need real data
+
+- Does `rnx2rtkp` (installed by `tools/install.sh`) give a reliable fix on a short window on the
+  Raspberry Pi (RAM/time)? To be measured on Topolchane.
+- Which networks Pesho can use for the first live test (host, mountpoint, VRS or single base,
+  frame/epoch). Credentials are entered by Pesho in the UI, never in the repo or chat.
+- UM980: the capture/convert path must work with its RTCM3 MSM7 log as well.
