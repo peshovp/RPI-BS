@@ -1830,9 +1830,10 @@ def _self_heal_unit_reload():
 def _self_heal_survey_service(state_file="/var/lib/rtkbase/survey_state.json"):
     """
         GeoMaxima - 2026-10-23: start-up self-heal for the survey runner
-        service. If the persisted survey state says a survey is running but
-        the service is not active, start it so the runner can resume. A
-        paused survey was stopped by the user and must not be resumed.
+        service. If the persisted survey state says a survey is running or
+        finalizing but the service is not active, start it so the runner can
+        resume (a finalizing survey is resumed until its final result exists).
+        A paused survey was stopped by the user and must not be resumed.
         Idempotent; silent when nothing is wrong.
     """
     try:
@@ -1842,7 +1843,7 @@ def _self_heal_survey_service(state_file="/var/lib/rtkbase/survey_state.json"):
         with open(state_path, "r") as f:
             data = json.load(f)
         survey_state = data.get("survey_state") if isinstance(data, dict) else None
-        if survey_state != "running":
+        if survey_state not in ("running", "finalizing"):
             return
         active = subprocess.run(
             ["systemctl", "is-active", "--quiet", SURVEY_SERVICE_UNIT],

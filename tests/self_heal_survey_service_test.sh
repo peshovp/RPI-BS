@@ -165,6 +165,30 @@ def case_d2():
     assert len(calls) == 0, f"Expected no subprocess calls, got {len(calls)}"
     assert len(log_events) == 0, f"Expected no log events, got {len(log_events)}"
 
+def case_d3():
+    global log_events, calls
+    log_events = []
+    calls = []
+    fake_subprocess.run = make_fake_run({
+        "is-active": {"returncode": 3},
+        "start": {"returncode": 0}
+    })
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_file = os.path.join(tmpdir, "state.json")
+        with open(state_file, "w") as f:
+            json.dump({"survey_state": "finalizing"}, f)
+        self_heal_survey_service(state_file)
+    
+    assert len(calls) == 2, f"Expected 2 calls, got {len(calls)}"
+    assert calls[0][1] == "is-active", f"First call should be is-active"
+    assert calls[1][1] == "start", f"Second call should be start"
+    assert "geomaxima_survey.service" in calls[1], f"Unit name not in start call"
+    assert len(log_events) == 1, f"Expected 1 log event"
+    cat, event, details = log_events[0]
+    assert event == "self_heal_survey_service", f"Wrong event"
+    assert details["survey_state"] == "finalizing", f"Wrong survey_state in details"
+
 def case_e():
     global log_events, calls
     log_events = []
@@ -259,6 +283,7 @@ run_case("B: idle/completed/failed states", case_b)
 run_case("C: running and active", case_c)
 run_case("D: running and inactive", case_d)
 run_case("D2: paused survey is not resumed", case_d2)
+run_case("D3: finalizing survey is resumed", case_d3)
 run_case("E: start fails", case_e)
 run_case("F: corrupt state file", case_f)
 run_case("G: state file is list", case_g)

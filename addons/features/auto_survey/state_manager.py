@@ -24,6 +24,7 @@ class SurveyState(Enum):
     """Survey process states"""
     IDLE = "idle"
     RUNNING = "running"
+    FINALIZING = "finalizing"
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -547,6 +548,9 @@ class StateManager:
         if self.survey_state == SurveyState.RUNNING:
             logger.warning("Survey already running")
             return False
+        if self.survey_state == SurveyState.FINALIZING:
+            logger.warning("Survey already finalizing")
+            return False
 
         now = datetime.utcnow().isoformat()
         self._state.update({
@@ -658,9 +662,9 @@ class StateManager:
         Returns:
             True if completed successfully
         """
-        # Allow completion from PAUSED as well (e.g. user pauses right at the end)
-        if self.survey_state not in (SurveyState.RUNNING, SurveyState.PAUSED):
-            logger.warning("Cannot complete: survey not running/paused")
+        # Allow completion from PAUSED or FINALIZING as well
+        if self.survey_state not in (SurveyState.RUNNING, SurveyState.PAUSED, SurveyState.FINALIZING):
+            logger.warning("Cannot complete: survey not running/paused/finalizing")
             return False
         
         self._state.update({
@@ -693,8 +697,8 @@ class StateManager:
         return self.save_state()
     
     def pause_survey(self) -> bool:
-        """Pause running survey"""
-        if self.survey_state != SurveyState.RUNNING:
+        """Pause running or finalizing survey"""
+        if self.survey_state not in (SurveyState.RUNNING, SurveyState.FINALIZING):
             return False
         
         self.survey_state = SurveyState.PAUSED
@@ -709,6 +713,23 @@ class StateManager:
         self.survey_state = SurveyState.RUNNING
         logger.info("Survey resumed")
         return True
+
+    def begin_finalizing(self) -> bool:
+        """
+        Transition a running survey to the finalizing state.
+
+        Data collection has ended but the final position has not yet been
+        computed (waiting for precise products). The survey is not "running"
+        (no data is collected, File service is off) but is not finished and
+        must be resumed automatically after a restart.
+        """
+        if self.survey_state == SurveyState.RUNNING:
+            self.survey_state = SurveyState.FINALIZING
+            logger.info("Survey entered finalizing state (waiting for precise products)")
+            return self.save_state()
+        if self.survey_state == SurveyState.FINALIZING:
+            return True
+        return False
     
     def reset_survey(self) -> bool:
         """Reset to idle state (clear all data)"""
@@ -747,9 +768,13 @@ class StateManager:
         Check if survey can be recovered after restart
         
         Returns:
-            True if the survey was running and can be resumed; a paused survey
-            was stopped by the user and is never resumed automatically
+            True if the survey was running or finalizing and can be resumed;
+            a paused survey was stopped by the user and is never resumed
+            automatically. A finalizing survey is always recoverable (no
+            grace period) until its final result is computed.
         """
+        if self.survey_state == SurveyState.FINALIZING:
+            return self._state['start_time'] is not None
         if self.survey_state == SurveyState.RUNNING:
             if self._state['start_time']:
                 start = datetime.fromisoformat(self._state['start_time'])

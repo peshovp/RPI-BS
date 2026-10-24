@@ -867,8 +867,8 @@ $(document).ready(function () {
 
     function setAutoSurveyBadge(state) {
         var el = document.getElementById("auto-survey-badge");
-        el.classList.remove("badge-success", "badge-warning", "badge-danger", "badge-secondary");
-        var badgeClass = { running: "badge-warning", completed: "badge-success", failed: "badge-danger", idle: "badge-secondary" }[state] || "badge-secondary";
+        el.classList.remove("badge-success", "badge-warning", "badge-danger", "badge-secondary", "badge-info");
+        var badgeClass = { running: "badge-warning", finalizing: "badge-info", completed: "badge-success", failed: "badge-danger", idle: "badge-secondary" }[state] || "badge-secondary";
         el.classList.add(badgeClass);
         el.textContent = state.charAt(0).toUpperCase() + state.slice(1);
     }
@@ -976,6 +976,33 @@ $(document).ready(function () {
                         autoSurveyCountdownInterval = setInterval(autoSurveyTickCountdown, 1000);
                         autoSurveyTickCountdown();
                     }
+                } else if (state === "finalizing") {
+                    // Data collection is over (File service off); the final position is
+                    // computed automatically once the precise products are published.
+                    autoSurveyStatusTextElt.textContent = "Status: Data collection finished - waiting for the precise products / computing the final position";
+                    setAutoSurveyBadge("finalizing");
+                    autoSurveySwitch.bootstrapToggle("on", true);
+                    if (autoSurveyPollInterval === null) {
+                        autoSurveyPollInterval = setInterval(pollAutoSurveyStatus, 20000);
+                    }
+                    if (autoSurveyCountdownInterval !== null) {
+                        clearInterval(autoSurveyCountdownInterval);
+                        autoSurveyCountdownInterval = null;
+                    }
+                    var finalDetails = "";
+                    if (status.final_last_reason) {
+                        finalDetails += status.final_last_reason;
+                    }
+                    if (status.final_next_retry_at) {
+                        finalDetails += " - next check: " + status.final_next_retry_at.replace("T", " ").substring(0, 19) + " UTC";
+                    }
+                    if (status.final_attempts) {
+                        finalDetails += " - computation attempts: " + status.final_attempts;
+                    }
+                    autoSurveyDetailsElt.textContent = finalDetails;
+                    autoSurveyProgressBarElt.style.width = "100%";
+                    autoSurveyProgressBarElt.setAttribute("aria-valuenow", 100);
+                    autoSurveyProgressBarElt.textContent = "100%";
                 } else if (state === "completed") {
                     autoSurveyStatusTextElt.textContent = "Status: Completed";
                     setAutoSurveyBadge("completed");
@@ -1031,7 +1058,7 @@ $(document).ready(function () {
                         detailsText += " - Final accuracy: ±" + (status.position_std.std_h_meters * 100).toFixed(1) + "cm horizontal, ±" + (status.position_std.std_height * 100).toFixed(1) + "cm vertical";
                     }
                     autoSurveyDetailsElt.textContent = detailsText;
-                } else if (state !== "running") {
+                } else if (state !== "running" && state !== "finalizing") {
                     autoSurveyDetailsElt.textContent = "";
                 }
 

@@ -94,6 +94,13 @@ class FakeState:
     def mark_applied(self, pos):
         self.calls.append('mark_applied')
 
+    def begin_finalizing(self):
+        self.calls.append('begin_finalizing')
+        if self.survey_state == ctrl_mod.SurveyState.RUNNING:
+            self.survey_state = ctrl_mod.SurveyState.FINALIZING
+            return True
+        return self.survey_state == ctrl_mod.SurveyState.FINALIZING
+
 def make_final(ppp_ar_enabled=True):
     c = SC.__new__(SC)
     c.ppp_ar_enabled = ppp_ar_enabled
@@ -130,6 +137,7 @@ def make_final(ppp_ar_enabled=True):
 
     def fake_attempt(window_end):
         windows.append(window_end)
+        c.state.calls.append('attempt')
         if results:
             r = results.pop(0)
             if r:
@@ -186,10 +194,19 @@ try:
             ok("A: all windows equal datetime(2026, 10, 21, 0, 0, 0)")
         else:
             bad(f"A: windows are {windows}")
-        if stops == ['survey_completed']:
-            ok("A: _stop_file_logging called with 'survey_completed'")
+        if stops == ['data_collection_complete', 'survey_completed']:
+            ok("A: _stop_file_logging called with 'data_collection_complete' then 'survey_completed'")
         else:
             bad(f"A: stops are {stops}")
+        if 'begin_finalizing' in c.state.calls:
+            bi = c.state.calls.index('begin_finalizing')
+            ai = c.state.calls.index('attempt')
+            if bi < ai:
+                ok("A: begin_finalizing called before first attempt")
+            else:
+                bad(f"A: begin_finalizing at {bi}, first attempt at {ai}")
+        else:
+            bad("A: begin_finalizing not called")
     finally:
         ctrl_mod.time.sleep = orig_sleep
         ctrl_mod._announce_planned_disconnect = orig_announce
@@ -255,8 +272,8 @@ try:
             ok("C: no failures recorded")
         else:
             bad(f"C: failures recorded: {fails}")
-        if stops == []:
-            ok("C: _stop_file_logging not called")
+        if stops == ['data_collection_complete']:
+            ok("C: _stop_file_logging called with 'data_collection_complete'")
         else:
             bad(f"C: stops are {stops}")
     finally:

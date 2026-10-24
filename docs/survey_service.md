@@ -104,3 +104,16 @@ after the day ends (see `docs/autosurvey_status.md`, 2026-10-24):
   completes the survey. A real pdp3 attempt is still made at least every 6 h regardless of the
   listing (safety net against a wrong file-name assumption).
 - Expected latency of a survey result: ~13-19 h after the end of the last UTC day of the window.
+
+## The `finalizing` state (2026-10-24)
+
+When the survey duration is over, data collection STOPS: `_finalize_survey` freezes the
+window, moves the survey to the new state `finalizing` (`StateManager.begin_finalizing()`) and
+stops the File service. `finalizing` is not `running` (no raw data is collected; the watchdog
+does not expect raw data and the Settings page shows "Data collection finished - waiting for the
+precise products / computing the final position", with the reason, the next check and the number
+of computation attempts). It is resumed automatically after any restart (always recoverable, no
+grace period; the File service is NOT started again for it), may be stopped by the user, and ends
+in `completed` once the final position has been computed and applied (or `failed` only for
+non-retryable problems of the surrounding machinery). The web self-heal restarts the runner for
+`running` and `finalizing` surveys.

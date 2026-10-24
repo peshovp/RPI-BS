@@ -946,7 +946,7 @@ class SurveyController:
         try:
             while self._running:
                 # Stop doing work if state is not RUNNING (e.g., paused/reset from UI)
-                if self.state.survey_state != SurveyState.RUNNING:
+                if self.state.survey_state not in (SurveyState.RUNNING, SurveyState.FINALIZING):
                     time.sleep(2)
                     continue
 
@@ -2951,7 +2951,7 @@ class SurveyController:
         survey is stopped/paused/reset; keeps the heartbeat fresh meanwhile."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if not self._running or self.state.survey_state != SurveyState.RUNNING:
+            if not self._running or self.state.survey_state not in (SurveyState.RUNNING, SurveyState.FINALIZING):
                 return
             self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
             time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
@@ -3078,6 +3078,14 @@ class SurveyController:
                 window_end = (datetime.fromisoformat(start_raw) if start_raw else datetime.utcnow()) \
                     + timedelta(hours=self.target_hours)
                 logger.info(f"Final window frozen at {window_end.isoformat()} (UTC)")
+                # The survey duration is over: data collection STOPS now (the
+                # File service is survey-only) and the survey enters the
+                # 'finalizing' state - it is not 'running' any more, but it is
+                # resumed automatically after a restart until its final result
+                # has been computed and applied.
+                self.state.begin_finalizing()
+                if self.auto_mode:
+                    self._stop_file_logging(reason="data_collection_complete")
                 attempt = 0
                 final_applied = False
                 window_start = (datetime.fromisoformat(start_raw) if start_raw
@@ -3090,7 +3098,7 @@ class SurveyController:
                 # when the precise products of every UTC day of the window are
                 # published (cheap server listing) - or, as a safety net, at least
                 # every FINAL_BLIND_ATTEMPT_SECONDS.
-                while self._running and self.state.survey_state == SurveyState.RUNNING:
+                while self._running and self.state.survey_state in (SurveyState.RUNNING, SurveyState.FINALIZING):
                     self.state.record_heartbeat(self.HEARTBEAT_INTERVAL_SECONDS)
                     products = self._final_products_status(window_start, window_end)
                     blind_due = (time.monotonic() - last_real_attempt) >= self.FINAL_BLIND_ATTEMPT_SECONDS
@@ -3257,7 +3265,8 @@ class SurveyController:
         # In the runner the survey thread is authoritative; in the web
         # application (no thread of its own) the persisted state is.
         status['is_running'] = (self._running if self.is_runner
-                                else status.get('survey_state') == SurveyState.RUNNING.value)
+                                else status.get('survey_state') in (SurveyState.RUNNING.value,
+                                                                    SurveyState.FINALIZING.value))
 
         # Part 6a: current antenna calibration status, for the Autosurvey
         # page's uncalibrated-antenna note - resolved fresh on every
@@ -3406,7 +3415,11 @@ class SurveyController:
         # SURVEY-ONLY File service policy: the survey owns str2str_file for its
         # whole duration, so a resumed survey (after a crash, reboot or
         # service restart) must make sure it is running again.
-        if not self._ensure_file_logging():
+        # (Not for a FINALIZING survey: its data collection is over, the File
+        # service must stay off while it waits for the precise products.)
+        if self.state.survey_state == SurveyState.FINALIZING:
+            logger.info("Recovered survey is finalizing: File service stays off")
+        elif not self._ensure_file_logging():
             logger.warning("Recovered survey: File service could not be started; "
                            "the file-logging health check will keep retrying")
 

@@ -369,6 +369,32 @@ try:
             bad(f"J2: result={r} calls={c.state.calls}")
     except Exception as e:
         bad(f"J: exception: {e}")
+
+    # Case M: recover_survey does not restart the File service for a FINALIZING survey
+    try:
+        ctrl_mod.subprocess.run = with_receiver([0])
+        ensured = []
+        c = make_recoverable(True, ctrl_mod.SurveyState.FINALIZING)
+        c._ensure_file_logging = lambda: ensured.append('ensure')
+        r = c.recover_survey()
+        if c._thread is not None:
+            c._thread.join(timeout=2)
+        if r is True and ensured == [] and 'record_resume' in c.state.calls:
+            ok("M1: FINALIZING survey resumed without restarting File service")
+        else:
+            bad(f"M1: result={r} ensured={ensured} calls={c.state.calls}")
+        ensured = []
+        c = make_recoverable(True, ctrl_mod.SurveyState.RUNNING)
+        c._ensure_file_logging = lambda: ensured.append('ensure')
+        r = c.recover_survey()
+        if c._thread is not None:
+            c._thread.join(timeout=2)
+        if r is True and ensured == ['ensure']:
+            ok("M2: RUNNING survey recovery ensures File service")
+        else:
+            bad(f"M2: result={r} ensured={ensured}")
+    except Exception as e:
+        bad(f"M: exception: {e}")
 finally:
     ctrl_mod.subprocess.run = orig_run
     ctrl_mod.log_event = orig_log
