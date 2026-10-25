@@ -1,27 +1,25 @@
 {
   "_provenance": {
-    "purpose": "Part 10b: intraplate velocity used to reduce ETRF2000 coordinates to BGS2005's legal reference epoch (2005.0), per Инструкция № РД-02-20-12/2012 чл.20 + Приложение 6.",
-    "source": "EUREF Permanent Network (EPN) multi-year combined solution, official reference frame product",
-    "source_url": "https://epncb.oma.be/pub/product/referenceframe/latest/EUR0OPSSNX_1996001_00U_SOL.VEL",
-    "source_crd_url": "https://epncb.oma.be/pub/product/referenceframe/latest/EUR0OPSSNX_1996001_00U_SOL.CRD",
-    "release": "C2415 (cumulative solution of GPS weeks 0834-2415)",
-    "release_date": "2026-09-21",
-    "fetched_date": "2026-10-05",
+    "purpose": "Part 10b: intraplate velocity used to reduce ETRF2000 coordinates to BGS2005's legal reference epoch (2005.0), per Инструкция № РД-02-20-12/2012 чл.20 + Приложение 6. Still a PROXY for stations other than SOFI.",
+    "source": "EUREF Permanent Network (EPN) station page of SOFI00BGR, 'published by EUREF' tab: positions and velocities from the multi-year solution C2415 expressed in ETRF2000, solution number 4, valid 2023-02-07 to 2026-04-25, epoch t0 2020-01-01",
+    "source_url": "https://epncb.oma.be/_networkdata/siteinfo4onestation.php?station=SOFI00BGR (section Position, Velocity & Time Series)",
+    "release": "C2415 (cumulative solution of GPS weeks 0834-2415, covering 1996-01-01 to 2026-04-26)",
+    "fetched_date": "2026-10-25",
     "station": "SOFI",
     "domes": "11101M002",
-    "native_frame": "ITRF2020",
-    "native_velocity_xyz_m_per_yr": {"vx": -0.01742, "vy": 0.01844, "vz": 0.00841},
-    "native_position_xyz_m_epoch_2020_0": {"x": 4319371.83995, "y": 1868688.05885, "z": 4292064.06761},
-    "conversion_method": "ITRF2020 cartesian velocity converted to ETRF2000 (Eurasian-plate-fixed) velocity using EUREF Technical Note 1 (Altamimi & Collilieux, IGN, 4 March 2024 release) Table 4 ITRF2020-row rotation RATES and translation RATES (eq. 2): V_ETRF2000 = V_ITRF2020 - dT - dD*P + Ω×P, where Ω=(drx,dry,drz) are the Table 4 rotation rates converted from mas/yr to rad/yr, dT is the Table 4 translation rate (mm/yr), dD is the Table 4 scale rate (1e-9/yr), and P is SOFI's own ITRF2020 position vector.",
-    "conversion_params_source": "EUREF Technical Note 1, Table 4 (ITRF2020 row): dT1=0.1 dT2=0.0 dT3=-1.7 mm/yr, dD=0.11e-9/yr, dR1=0.081 dR2=0.490 dR3=-0.792 mas/yr",
-    "checksum_note": "No single-file checksum published by EPNCB for .VEL/.CRD (plain-text ASCII products, regenerated each GPS week under the same filename) - provenance is the dated URL + release name (C2415) above, not a content hash.",
-    "cross_check": "Horizontal magnitude (0.52 mm/yr) falls within the independently-published Bulgarian GNSS/EPN intraplate velocity range of 0.2-3.8 mm/yr (BULREF 1993/2003 campaigns; Vassileva 2013 and related Balkan geodynamics studies) used in docs/part10_bgs2005_report.md - consistent, though smaller than that report's unconfirmed ~2mm/yr SOFI-specific figure, which this file now supersedes as SOFI's own, directly-sourced, current EPN velocity."
+    "etrf2000_position_xyz_m_epoch_2020_0": {"x": 4319372.4449, "y": 1868687.5495, "z": 4292063.6936},
+    "etrf2000_velocity_xyz_m_per_yr": {"vx": 0.0005, "vy": 0.0004, "vz": -0.0023},
+    "etrf2000_velocity_xyz_uncertainty_m_per_yr": 0.0001,
+    "conversion_method": "Cartesian ETRF2000 velocity (as published) rotated to the local north/east/up frame at SOFI (lat 42.56, lon 23.39): E = -sin(lon)*vx + cos(lon)*vy; N = -sin(lat)*cos(lon)*vx - sin(lat)*sin(lon)*vy + cos(lat)*vz; U = cos(lat)*cos(lon)*vx + cos(lat)*sin(lon)*vy + sin(lat)*vz.",
+    "supersedes": "north +0.4772 / east +0.2144 / up -0.3590 mm/yr derived on 2026-10-05 from the ITRF2020 velocity (vx -0.01742, vy 0.01844, vz 0.00841 m/yr, EPN SOL.VEL C2415) with the EUREF TN1 Table 4 rates. That conversion was wrong: it disagrees with the ITRF2020 -> ETRF2000 Helmert used by itrf2020_to_bgs2005() (whose time derivative gives north -2.16 / east +0.09 / up -1.13 mm/yr) and with the published ETRF2000 velocity above.",
+    "validation": "2026-10-25: PPP-AR of the SOFI00BGR daily RINEX of 2026-10-20 (WL 98.2 %, NL 97.2 %) through itrf2020_to_bgs2005() with this velocity differs from the national official ETRS89 position of SOFI (ETRF2000, epoch 2005.0, BAS/MGS, X 4319372.4257 Y 1868687.5403 Z 4292063.7260) by E -3.1 / N -5.7 / U +13.4 mm; with the superseded values it was N -62 mm. See docs/cors_position.md.",
+    "limitations": "A single-station velocity. The ETRF2000 velocity of the Topolchane area can differ by about 1-2 mm/yr (about 2-4 cm over 21.8 years); a station-specific or national velocity model is still needed."
   },
   "station": "SOFI",
   "frame": "ETRF2000",
   "velocity_neu_mm_per_yr": {
-    "north": 0.4772,
-    "east": 0.2144,
-    "up": -0.3590
+    "north": -2.11,
+    "east": 0.17,
+    "up": -1.10
   }
 }

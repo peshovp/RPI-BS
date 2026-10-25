@@ -176,3 +176,28 @@ the cause is open (BGS2005 realisation, velocity of Topolchane, or the 2025 meas
 
 Open: which SOFI velocity is right for the 2005-2026 reduction (long-term vs the last segment)
 and the real BGS2005 offset: both need the АГКК data requested above.
+
+## Correction of the SOFI velocity and validation against the national coordinates (2026-10-25)
+
+Two more tables from the EPN station page were used: the EUREF C2415 positions/velocities
+(ITRF2020 and ETRF2000, solution 4 valid 2023-02-07 to 2026-04-25) and the "published by the
+country" tab: the official ETRS89 coordinates of SOFI used in Bulgaria, maintained by BAS/MGS,
+ETRF2000, epoch 2005-01-01, valid from 2006-01-01 to now: X 4319372.4257 Y 1868687.5403
+Z 4292063.7260 m.
+
+- The Helmert ITRF2020 -> ETRF2000 in `bgs2005_transformer.py` reproduces the EUREF ETRF2000 position
+  of SOFI at 2020.0 to 0.1 mm and implies the velocity E +0.09 / N -2.16 / U -1.13 mm/yr, i.e. the
+  published EUREF value (E +0.17 / N -2.11 / U -1.10).
+- The velocity file used for the reduction to 2005.0 said N +0.48 / E +0.21 / U -0.36 mm/yr: wrong
+  (the conversion of 2026-10-05 was faulty). It costs 5.7 cm in the north and 1.8 cm in height at
+  21.8 years. The file now holds the published EUREF ETRF2000 velocity (commit of this section).
+- The national ETRS89 coordinates of SOFI at 2005.0 agree with the EUREF position propagated back to
+  2005.0 within E +1.7 / N +6.6 / U -10.3 mm: at Sofia, BGS2005 equals ETRF2000 @ 2005.0 to about 1 cm.
+- PPP-AR of SOFI (DOY 293) through the chain with the corrected velocity differs from the national
+  coordinates by E -3.1 / N -5.7 / U +13.4 mm (with the old velocity N -62 mm).
+
+Consequence for Topolchane: the north part (-5.4 cm) of the discrepancy to the 2025 BGS2005
+position is explained by the velocity error. The east part (-13 cm) and height (+9 cm) are not
+explained by the chain (it is right to about 6 mm at SOFI) or by the BGS2005 realisation at Sofia
+(about 1 cm): they point to the 2025 measurement itself, the local velocity or BGS2005 distortions
+near Topolchane. A 24 h PPP-AR survey of Topolchane and АГКК CORS coordinates near it can separate them.
