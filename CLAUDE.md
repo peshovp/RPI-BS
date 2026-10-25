@@ -100,7 +100,7 @@ User on every station: `peshovp`. Repo: `/home/peshovp/RPI-BS`. `rtkbase` inside
 ### Geodesy
 - **An OTA must never change the currently broadcast position.** Only a newly applied survey may change it. Check `grep '^position' settings.conf` before and after every OTA.
 - The broadcast position (RTCM 1005/1006) uses **ellipsoidal height**. BGR2005 normal height is for display and reports only. The end-to-end **ECEF invariant (0.01 m, `RTCM_ECEF_SANITY_THRESHOLD_M`)** guards this.
-- Reference frame: **ETRF2000. BGS2005 = ETRS89/ETRF2000 at epoch 2005.0** (АГКК; Наредба 2/2010 чл.8). Epoch reduction uses velocities (РД-02-20-12 чл.20 + Прил.6).
+- Reference frame: **ETRF2000. BGS2005 = ETRS89/ETRF2000 at epoch 2005.0** (АГКК; Наредба 2/2010 чл.8). Epoch reduction to 2005.0 uses velocities (our interpretation, supported by НИГГГ: ETRF2000 + velocities; РД-02-20-12 чл.20 + Прил.6 only describe ITRS→ETRS89 via epoch 1989.0 and Прил.7 is printed wrong). АГКК itself rates a formula-based ETRS89→BGS2005 conversion at 10–15 cm (РД-12 чл.39–40); 5 mm needs a tie to ≥3 State GPS points within 50 km (чл.36). See `docs/agkk_review.md`.
 - АГКК РД-02-20-25: чл.7 requires **5 mm horizontal / 10 mm vertical**; чл.49 requires **calibrated antennas** (the K700 cannot be certified); чл.54–56 cover conformity assessment (valid 2 years); чл.57 requires 30 s RINEX submission, and АГКК monitors time series.
 
 ### Autosurvey
