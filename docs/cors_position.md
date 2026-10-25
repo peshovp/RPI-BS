@@ -201,3 +201,31 @@ position is explained by the velocity error. The east part (-13 cm) and height (
 explained by the chain (it is right to about 6 mm at SOFI) or by the BGS2005 realisation at Sofia
 (about 1 cm): they point to the 2025 measurement itself, the local velocity or BGS2005 distortions
 near Topolchane. A 24 h PPP-AR survey of Topolchane and АГКК CORS coordinates near it can separate them.
+
+## Reference position of Topolchane (decision of 2026-10-25)
+
+Until everything is finalised the reference ("100 %") position of BS-Topolchane is the 2025
+measurement in BGS2005 taken through an АГКК-certified CORS network:
+`position='42.65236966 26.43258495 208.145'` (ellipsoidal height). It must not be overwritten
+by an automatic survey result or a CORS proposal without an explicit decision. The 1 h smoke survey
+(window 2026-10-23 21:06-22:06) was therefore reset instead of letting its final result be
+applied.
+
+Realistic accuracy of the reference itself: network RTK, about 2-3 cm horizontal and 4-6 cm
+vertical; it is the best control we have, not an infinitely accurate one.
+
+Our independent PPP-AR sessions of the same antenna, through the chain with the corrected velocity,
+minus the reference (cm):
+
+| Session | N | E | U |
+|---|---|---|---|
+| 9 h, 2026-10-19, RAP products | -1.8 | -12.2 | +13.6 |
+| 1 h, 2026-09-24, RTS products | +0.3 | -13.0 | +12.4 |
+
+The two sessions agree with each other to about 2 cm, the chain is correct to about 6 mm at SOFI,
+so the east offset (about -12.5 cm) and the height offset (about +13 cm) are specific to Topolchane.
+Candidate causes: the uncalibrated K700 (the PPP height refers to the phase centre while the
+network RTK agrees with the reference vertically to 1 cm), the local velocity or the local
+realisation of BGS2005 (east), or the reference itself. A longer XAG/CORS observation does not
+help: its random noise is already about 1 mm after 15 minutes; the limits are systematic (frame and
+epoch of the network, the coordinates of its base station).
