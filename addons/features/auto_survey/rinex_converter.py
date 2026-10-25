@@ -37,6 +37,11 @@ RINEX_VERSION = "3.04"
 # timestamps jitter around the whole second; 0.05 s keeps them.
 SAMPLE_EPOCH_TOLERANCE_S = 0.05
 
+# Maximum gap (seconds) between the survey window start and the next
+# segment's start that allows skipping a leading segment with no data
+# inside the window (e.g. an older segment selected by mistake).
+SKIP_MAX_LEADING_GAP_S = 120.0
+
 # convbin -r format by log file extension. RTKBase names its raw logs
 # "<name>.<receiver_format>" (run_cast.sh out_file), so the extension IS the
 # format settings.conf configured.
@@ -380,7 +385,10 @@ class RINEXConverter:
 
         A single raw_files entry (the common case - no rotation in the
         window) skips merging entirely and returns that segment's own
-        convert_raw_to_rinex_obs() result directly.
+        convert_raw_to_rinex_obs() result directly. A leading segment
+        that holds no data inside the window (e.g. an older segment
+        selected by mistake) is skipped if the next segment starts within
+        SKIP_MAX_LEADING_GAP_S of the window start.
 
         Args:
             raw_files: raw log segments, in ANY order (sorted here by
@@ -431,6 +439,7 @@ class RINEXConverter:
                     f"spanning a rotation: {[p.name for p in ordered]}")
 
         segment_results = []
+        skipped = 0
         for i, raw_file in enumerate(ordered):
             segment_dir = output_dir / f"_segment_{i}"
             result = self.convert_raw_to_rinex_obs(raw_file, segment_dir, marker_name=marker_name,
@@ -439,11 +448,44 @@ class RINEXConverter:
                                                    time_start=time_start, time_end=time_end,
                                                    sample_interval=sample_interval)
             if not result:
+                # Check if this leading segment can be skipped: it holds no
+                # data inside the window and the next segment starts soon
+                # after the window start (within SKIP_MAX_LEADING_GAP_S).
+                can_skip = (time_start is not None
+                            and i < len(ordered) - 1
+                            and parse_log_start_time(ordered[i + 1]) is not None)
+                if can_skip:
+                    next_start = parse_log_start_time(ordered[i + 1])
+                    # Compare using naive UTC values
+                    if time_start.tzinfo is not None:
+                        ts_naive = time_start.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        ts_naive = time_start
+                    gap = (next_start - ts_naive).total_seconds()
+                    if gap <= SKIP_MAX_LEADING_GAP_S:
+                        logger.warning(f"convert_raw_files_to_rinex_obs: segment {i} "
+                                       f"({raw_file.name}) holds no data inside the window "
+                                       f"(next segment starts {gap:.0f}s after window start) - "
+                                       f"skipping")
+                        skipped += 1
+                        continue
                 logger.error(f"convert_raw_files_to_rinex_obs: segment {i} ({raw_file.name}) "
                             f"failed to convert - aborting merge (a partial/wrong-window obs "
                             f"file is worse than no result at all)")
                 return None
             segment_results.append(result)
+
+        if skipped > 0:
+            logger.info(f"convert_raw_files_to_rinex_obs: skipped {skipped} leading segment(s) "
+                        f"with no data inside the window")
+
+        if not segment_results:
+            logger.error("convert_raw_files_to_rinex_obs: all segments failed or were skipped")
+            return None
+
+        if len(segment_results) == 1:
+            logger.info(f"✓ OBS (single successful segment): {segment_results[0][0].name}")
+            return segment_results[0]
 
         segment_obs_files = [obs for obs, _nav in segment_results]
         merged_obs = merge_rinex_obs(segment_obs_files, output_dir / (segment_obs_files[-1].name))
@@ -451,7 +493,7 @@ class RINEXConverter:
             return None
 
         nav_file = next((nav for _obs, nav in segment_results if nav is not None), None)
-        logger.info(f"✓ Merged OBS ({len(ordered)} segments): {merged_obs.name}")
+        logger.info(f"✓ Merged OBS ({len(segment_results)} segments): {merged_obs.name}")
         return (merged_obs, nav_file)
 
 
