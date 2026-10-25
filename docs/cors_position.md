@@ -131,14 +131,17 @@ exists; the observation epoch is taken from the run.
 Context: our chain (ITRF2020 -> ETRF2000 -> epoch 2005.0, proxy velocity of SOFI) places a fresh
 PPP-AR position of Topolchane about 14 cm horizontally and 11 cm vertically away from the
 broadcast position that was measured in 2025 in BGS2005 through an АГКК-certified CORS network.
-The EPN monitor also reports that the RTCM 1006 coordinates of SOFI00BGR differ from the official
-ETRS89 position by 0.135 m, which points at the BGS2005 realisation itself.
+(Correction 2026-10-25: SOFI00BGR is an EPN station whose responsible agency is BKG, not АГКК.
+The EPN monitor remark that its RTCM 1006 coordinates differ from the ETRS89 position by 0.135 m
+concerns BKG's own stream and says nothing about BGS2005; an earlier reading as a BGS2005 offset
+is withdrawn.)
 
 Requested from АГКК (most important first):
 1. Official BGS2005 coordinates (geographic or ECEF, ellipsoidal height, with the stated frame and
-   epoch) of the permanent station SOFI00BGR (and, if available, of the CORS stations nearest to
-   Topolchane, e.g. in the Stara Zagora / Sliven direction) - to measure the offset between
-   BGS2005 and ETRF2000/EPN directly.
+   epoch) of the AGKK CORS stations nearest to Topolchane (e.g. in the Stara Zagora / Sliven
+   direction) and, if АГКК publishes them, of the EPN stations in Bulgaria (SOFI00BGR is run by
+   BKG, so АГКК may not hold BGS2005 values for it) - to measure the offset between BGS2005 and
+   ETRF2000/EPN directly.
 2. The velocities / epoch-reduction model to epoch 2005.0 that АГКК uses (РД-02-20-12 чл.20 and
    Приложение 6): station velocities or the velocity grid for the Topolchane area - to replace the
    SOFI proxy velocity.
@@ -169,8 +172,7 @@ latest segment (valid 2023-02-07 to 2025-09-27), N -2.19 / E +0.17 / U -1.17 mm/
 difference over 21.8 years is 5.8 cm north: exactly the north part (-5.4 cm) of the
 14 cm discrepancy between our chain and the 2025 BGS2005 position of Topolchane. The east
 part (-13 cm) and the height (+11 cm, of which about 2 cm velocity) are not explained by velocity;
-the EPN monitor reports that the RTCM 1006 coordinates of SOFI differ from the official ETRS89
-position by 0.135 m, which suggests an offset of the BGS2005 realisation of that size.
+the cause is open (BGS2005 realisation, velocity of Topolchane, or the 2025 measurement).
 
 Open: which SOFI velocity is right for the 2005-2026 reduction (long-term vs the last segment)
 and the real BGS2005 offset: both need the АГКК data requested above.
