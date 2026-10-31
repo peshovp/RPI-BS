@@ -654,13 +654,35 @@ def auto_survey_start():
                 return jsonify({"error": "target_hours must be between 1 and 168"}), 400
         except (ValueError, TypeError):
             return jsonify({"error": "target_hours must be a valid integer"}), 400
-        result = _survey_request("start", {"target_hours": target_hours})
+        apply_mode = data.get('apply_mode', 'apply')
+        if apply_mode not in ('apply', 'propose'):
+            return jsonify({"error": "apply_mode must be 'apply' or 'propose'"}), 400
+        result = _survey_request("start", {"target_hours": target_hours, "apply_mode": apply_mode})
         if result is None:
             return jsonify({"error": f"The survey service ({SURVEY_SERVICE_UNIT}) did not answer in time"}), 504
         if result.get("ok"):
             return jsonify({"status": "started"})
         message = result.get("message") or "Survey could not be started"
         return jsonify({"error": f"Survey could not be started: {message}"}), (409 if "already running" in message else 400)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auto_survey/apply_proposal', methods=['POST'])
+@login_required
+def auto_survey_apply_proposal():
+    """Apply the stored proposal of a finished 'propose' survey (explicit confirmation required)"""
+    try:
+        if SurveyController is None:
+            return jsonify({"error": "Auto Survey-In feature unavailable"}), 503
+        data = request.get_json(silent=True) or {}
+        if data.get('confirm') is not True:
+            return jsonify({"error": "confirmation required"}), 400
+        result = _survey_request("apply_proposal", {"confirmed": True, "force": data.get('force') is True}, 180)
+        if result is None:
+            return jsonify({"error": f"The survey service ({SURVEY_SERVICE_UNIT}) did not answer in time"}), 504
+        if not result.get("ok"):
+            return jsonify({"error": result.get("message") or "apply failed", "details": result.get("data")}), 400
+        return jsonify({"status": "applied", "details": result.get("data")})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

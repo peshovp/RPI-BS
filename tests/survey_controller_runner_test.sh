@@ -95,6 +95,9 @@ class FakeState:
         self.calls.append('pause')
         return True
 
+    def get_apply_mode(self):
+        return 'apply'
+
 class FakeRtkbase:
     def __init__(self):
         self.position_updates = []

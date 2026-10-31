@@ -57,7 +57,7 @@ class FakeController:
     def get_status(self):
         self.calls.append('status')
         return {}
-    def start_survey(self, target_hours=24):
+    def start_survey(self, target_hours=24, apply_mode='apply'):
         self.calls.append(('start', target_hours))
         return True
     def stop_survey(self):

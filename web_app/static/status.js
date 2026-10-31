@@ -32,7 +32,7 @@ $(document).ready(function () {
     fetch('/api/auto_survey/status')
         .then(function(response) { return response.json(); })
         .then(function(data) {
-            var pos = data && (data.applied_position || data.final_position);
+            var pos = data && (data.applied_position || (data.apply_mode !== 'propose' ? data.final_position : null));
             if (pos && typeof pos.lat === "number" && typeof pos.lon === "number") {
                 document.getElementById('msl_lat_value').textContent = pos.lat.toFixed(8);
                 document.getElementById('msl_lon_value').textContent = pos.lon.toFixed(8);

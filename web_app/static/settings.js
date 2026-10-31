@@ -907,6 +907,57 @@ $(document).ready(function () {
         autoSurveySwitch.bootstrapToggle("disable");
     }
 
+    function renderAutoSurveyProposal(status) {
+        var box = document.getElementById("auto-survey-proposal");
+        var proposal = status && status.proposal;
+        if (!box || !proposal || !proposal.position || proposal.applied) {
+            if (box) { box.hidden = true; }
+            return;
+        }
+        var p = proposal.position;
+        var text = "BGS2005: " + p.lat.toFixed(8) + " " + p.lon.toFixed(8) + " " + p.height.toFixed(3) + " m (ellipsoidal)";
+        var ref = proposal.reference;
+        if (ref) {
+            text += " | vs current broadcast position: N " + (ref.north_m * 100).toFixed(1) + " cm, E " +
+                (ref.east_m * 100).toFixed(1) + " cm, U " + (ref.up_m * 100).toFixed(1) + " cm (horizontal " +
+                (ref.horizontal_m * 100).toFixed(1) + " cm)";
+        }
+        document.getElementById("auto-survey-proposal-text").textContent = text;
+        box.hidden = false;
+    }
+
+    $("#auto-survey-proposal-confirm").on("change", function() {
+        $("#auto-survey-proposal-apply-btn").prop("disabled", !this.checked);
+    });
+
+    $("#auto-survey-proposal-apply-btn").on("click", function() {
+        var statusElt = document.getElementById("auto-survey-proposal-status");
+        if (!$("#auto-survey-proposal-confirm").prop("checked")) {
+            return;
+        }
+        if (!window.confirm("Replace the broadcast position with the proposed one? Connected rovers will be disconnected briefly.")) {
+            return;
+        }
+        statusElt.textContent = "Applying...";
+        fetch("/api/auto_survey/apply_proposal", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm: true })
+        })
+            .then(function(response) { return response.json(); })
+            .then(function(result) {
+                if (result.error) {
+                    statusElt.textContent = "Error: " + result.error;
+                    return;
+                }
+                statusElt.textContent = "Applied.";
+                $("#auto-survey-proposal-confirm").prop("checked", false);
+                $("#auto-survey-proposal-apply-btn").prop("disabled", true);
+                pollAutoSurveyStatus();
+            })
+            .catch(function(err) { statusElt.textContent = "Error: " + err; });
+    });
+
     function pollAutoSurveyStatus() {
         fetch("/api/auto_survey/status")
             .then(function(response) {
@@ -924,6 +975,8 @@ $(document).ready(function () {
                     autoSurveyStatusTextElt.textContent = "Status: Error - " + status.error;
                     return;
                 }
+
+                renderAutoSurveyProposal(status);
 
                 var state = status.survey_state || "idle";
                 var numEpochs = status.num_epochs || 0;
@@ -1052,7 +1105,8 @@ $(document).ready(function () {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    target_hours: parseInt($("#auto-survey-target-hours").val())
+                    target_hours: parseInt($("#auto-survey-target-hours").val()),
+                    apply_mode: $("#auto-survey-propose-only").prop("checked") ? "propose" : "apply"
                 })
             })
                 .then(function(response) {

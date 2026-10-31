@@ -114,7 +114,11 @@ class SurveyRunner:
                 if not (1 <= target_hours <= 168):
                     return {"ok": False, "message": "target_hours must be between 1 and 168", "data": None}
 
-                started = self.controller.start_survey(target_hours=target_hours)
+                apply_mode = params.get("apply_mode", "apply")
+                if apply_mode not in ("apply", "propose"):
+                    return {"ok": False, "message": "apply_mode must be 'apply' or 'propose'", "data": None}
+
+                started = self.controller.start_survey(target_hours=target_hours, apply_mode=apply_mode)
                 if started:
                     return {"ok": True, "message": "started", "data": None}
                 return {"ok": False, "message": "survey could not be started (already running?)", "data": None}
@@ -157,6 +161,14 @@ class SurveyRunner:
                 if self.cors is None:
                     return {"ok": False, "message": "CORS feature unavailable", "data": None}
                 res = self.cors.apply(job_id, confirmed, force)
+                if res["ok"]:
+                    return {"ok": True, "message": "applied", "data": res.get("apply_result")}
+                return {"ok": False, "message": res["reason"] or "apply failed", "data": res.get("apply_result")}
+
+            elif action == "apply_proposal":
+                confirmed = params.get("confirmed") is True
+                force = params.get("force") is True
+                res = self.controller.apply_proposal(confirmed, force)
                 if res["ok"]:
                     return {"ok": True, "message": "applied", "data": res.get("apply_result")}
                 return {"ok": False, "message": res["reason"] or "apply failed", "data": res.get("apply_result")}

@@ -21,6 +21,7 @@ retried by the final loop; it never silently degrades.
 """
 
 import logging
+import math
 import re
 import shutil
 import time
@@ -614,7 +615,7 @@ class SurveyController:
             logger.error(f"Failed to stop file logging: {e}")
             return False
     
-    def start_survey(self, target_hours: int = 24) -> bool:
+    def start_survey(self, target_hours: int = 24, apply_mode: str = 'apply') -> bool:
         """
         Start new survey session
 
@@ -623,6 +624,9 @@ class SurveyController:
                 over, data collection stops and the final PRIDE-PPPAR position
                 is computed automatically once the precise products are
                 published (see _finalize_survey()).
+            apply_mode: 'apply' (default) applies the final result to the
+                broadcast position; 'propose' only stores it as a proposal
+                (the broadcast position is never changed by the survey).
 
         Returns:
             True if started successfully
@@ -639,7 +643,7 @@ class SurveyController:
 
         # Initialize state
         self.target_hours = target_hours
-        if not self.state.start_survey(target_hours):
+        if not self.state.start_survey(target_hours, apply_mode=apply_mode):
             logger.error("Failed to initialize survey state")
             return False
         
@@ -649,7 +653,7 @@ class SurveyController:
         self._thread.start()
         
         logger.info(f"✓ Started {target_hours}-hour auto survey")
-        log_event("auto_survey", "start", {"target_hours": target_hours})
+        log_event("auto_survey", "start", {"target_hours": target_hours, "apply_mode": self.state.get_apply_mode()})
         return True
     
     def stop_survey(self) -> bool:
@@ -867,6 +871,71 @@ class SurveyController:
             'arp_offset': self.rtkbase.get_antenna_arp_offset(),
         }
 
+    def _proposal_reference(self, position: Dict) -> Optional[Dict]:
+        """
+        The CURRENT broadcast position (settings.conf) and the local
+        north/east/up offset of a proposed position from it, for the owner's
+        decision. Flat-earth metres, accurate to far better than a
+        millimetre at the sub-metre distances this is used for.
+        """
+        try:
+            current = self.rtkbase.get_position()
+            if not current:
+                return None
+            lat0, lon0, h0 = current
+            north = (position['lat'] - lat0) * 111132.92
+            east = (position['lon'] - lon0) * 111412.84 * math.cos(math.radians(lat0))
+            up = position['height'] - h0
+            return {
+                'lat': lat0, 'lon': lon0, 'height': h0,
+                'north_m': north, 'east_m': east, 'up_m': up,
+                'horizontal_m': math.hypot(north, east),
+            }
+        except Exception as e:
+            logger.warning(f"_proposal_reference: could not compare with the current position: {e}")
+            return None
+
+    def apply_proposal(self, confirmed: bool, force: bool = False) -> Dict:
+        """
+        Apply the stored proposal of a finished 'propose' survey to the
+        broadcast position, after the owner's explicit confirmation. Uses the
+        same guarded apply (bounds, jump guard, read-back verification,
+        restore on failure, audit) as the CORS position. Returns
+        {'ok': bool, 'reason': str|None, 'apply_result': dict|None}.
+        """
+        if not confirmed:
+            return {'ok': False, 'reason': 'confirmation required', 'apply_result': None}
+        if self.state.survey_state in (SurveyState.RUNNING, SurveyState.FINALIZING, SurveyState.PAUSED):
+            return {'ok': False, 'reason': 'a survey is in progress', 'apply_result': None}
+        proposal = self.state.get_status().get('proposal')
+        if not isinstance(proposal, dict) or not isinstance(proposal.get('position'), dict):
+            return {'ok': False, 'reason': 'no proposal', 'apply_result': None}
+        if proposal.get('applied'):
+            return {'ok': False, 'reason': 'proposal already applied', 'apply_result': None}
+        pos = proposal['position']
+
+        from ..cors_position.cors_apply import apply_position
+
+        result = apply_position(
+            self.rtkbase, pos['lat'], pos['lon'], pos['height'],
+            source='survey_proposal',
+            meta={'created_at': proposal.get('created_at')},
+            restart=self.restart_rtkbase_services,
+            announce=lambda: _announce_planned_disconnect(self.rtkbase, "auto_survey"),
+            force=force,
+        )
+        if result.get('ok'):
+            self.state.mark_proposal_applied()
+            self.state.mark_applied({
+                'lat': pos['lat'], 'lon': pos['lon'], 'height': pos['height'],
+                'broadcast_height_type': pos.get('broadcast_height_type', 'ellipsoidal'),
+                'height_ellipsoidal': pos.get('height_ellipsoidal'),
+                'height_msl': pos.get('height_msl'),
+                'coordinate_system': pos.get('coordinate_system', 'BGS2005'),
+            })
+            return {'ok': True, 'reason': None, 'apply_result': result}
+        return {'ok': False, 'reason': result.get('reason') or 'apply failed', 'apply_result': result}
+
     def _apply_geodetic_position(self,
                                   lat: float, lon: float, height: float,
                                   obs_file: Path,
@@ -1054,9 +1123,18 @@ class SurveyController:
                 self.state.record_update_failure(error_msg)
                 return False
 
-            logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
+            propose_only = self.state.get_apply_mode() == 'propose'
+            if propose_only:
+                logger.info("🎯 FINAL RESULT (propose mode) - the broadcast position is NOT changed; "
+                            "the result is stored as a proposal awaiting the owner's confirmation")
+                update_ok = True
+            else:
+                logger.info("🎯 FINAL UPDATE - Applying permanent coordinates (BGS2005)...")
+                update_ok = self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height)
 
-            if self.rtkbase.update_position(bgs2005['lat_dd'], bgs2005['lon_dd'], broadcast_height):
+            if propose_only:
+                pass
+            elif update_ok:
                 logger.info(f"✓ RTCM broadcast: final configuration applied successfully "
                             f"(lat={bgs2005['lat_dd']:.8f}, lon={bgs2005['lon_dd']:.8f}, height={broadcast_height:.3f})")
 
@@ -1164,6 +1242,9 @@ class SurveyController:
                 num_epochs=num_epochs,
                 quality_metrics=quality_metrics
             )
+
+            if propose_only:
+                self.state.record_proposal(position, self._proposal_reference(position))
 
             # Protect the slot dir(s) that produced this ACCEPTED result
             # from _cleanup_old_ppp_ar_slot_dirs()'s count-based pruning -
@@ -2143,10 +2224,18 @@ class SurveyController:
                 # (pos already holds the correct broadcast coordinate/height
                 # type for this survey - see comment above)
                 try:
-                    logger.info(f"✓ Applying coordinates to RTKBase (BGS2005, "
-                                f"{pos.get('broadcast_height_type', 'ellipsoidal')} height): "
-                                f"{pos['lat']:.8f} {pos['lon']:.8f} {pos['height']:.3f}")
-                    if self.rtkbase.update_position(pos['lat'], pos['lon'], pos['height']):
+                    if self.state.get_apply_mode() == 'propose':
+                        logger.info("Propose mode: the final position is stored as a proposal; "
+                                    "settings.conf is NOT changed")
+                        update_applied = False
+                    else:
+                        logger.info(f"✓ Applying coordinates to RTKBase (BGS2005, "
+                                    f"{pos.get('broadcast_height_type', 'ellipsoidal')} height): "
+                                    f"{pos['lat']:.8f} {pos['lon']:.8f} {pos['height']:.3f}")
+                        update_applied = self.rtkbase.update_position(pos['lat'], pos['lon'], pos['height'])
+                    if self.state.get_apply_mode() == 'propose':
+                        pass
+                    elif update_applied:
                         logger.info("✓ RTKBase configuration updated successfully")
                         # Persist that coordinates were applied
                         self.state.mark_applied({
@@ -2227,7 +2316,8 @@ class SurveyController:
         # application would otherwise race the runner on the same state).
         try:
             if (self.is_runner and status.get('survey_state') == SurveyState.COMPLETED.value
-                    and not status.get('applied')):
+                    and not status.get('applied')
+                    and self.state.get_apply_mode() != 'propose'):
                 pos = status.get('final_position') or status.get('current_position')
                 if pos:
                     logger.info("Auto-applying completed survey coordinates to RTKBase (previously unapplied)")

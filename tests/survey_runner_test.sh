@@ -75,7 +75,7 @@ class FakeController:
             raise RuntimeError("recover failed")
         return self.recover_result
 
-    def start_survey(self, target_hours):
+    def start_survey(self, target_hours, apply_mode='apply'):
         self.calls.append(('start', target_hours))
         return self.start_result
 

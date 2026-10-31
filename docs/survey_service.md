@@ -118,3 +118,19 @@ grace period; the File service is NOT started again for it), may be stopped by t
 in `completed` once the final position has been computed and applied (or `failed` only for
 non-retryable problems of the surrounding machinery). The web self-heal restarts the runner for
 `running` and `finalizing` surveys.
+
+## Propose mode: the survey does not overwrite a reference position (2026-10-31)
+
+A survey can be started with `apply_mode='propose'` (Settings: "Propose only", checked by
+default; request parameter `apply_mode`, default `apply` for API compatibility). The survey then
+runs exactly as before, but its final PPP-AR result is only stored in the state as `proposal`
+(`position`, `reference` = the current broadcast position with the N/E/U offset in metres,
+`created_at`, `applied`). Nothing is written to settings.conf, no service is restarted, and
+`get_status()` does not auto-apply a completed propose survey. The Settings page shows the
+proposal with the offset from the broadcast position. Applying it needs the explicit
+`apply_proposal` request (checkbox + browser confirmation); it uses the same guarded apply as the
+CORS position (bounds, 1 m / 2 m jump guard unless forced, read-back verification with restore,
+audit event `survey_proposal`) and is refused while a survey is active. Reason: the Topolchane
+position `42.65236966 26.43258495 208.145` (BGS2005, measured 2025 through an АГКК-certified CORS
+network) is the reference until Pesho decides otherwise (docs/cors_position.md).
+The state keys `apply_mode` and `proposal` are backfilled for older state files.

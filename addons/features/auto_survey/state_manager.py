@@ -106,6 +106,10 @@ class StateManager:
                 state['last_ppp_ar_attempt'] = None
             if 'ppp_ar_attempts' not in state:
                 state['ppp_ar_attempts'] = []
+            if state.get('apply_mode') not in ('apply', 'propose'):
+                state['apply_mode'] = 'apply'
+            if 'proposal' not in state:
+                state['proposal'] = None
 
             logger.info(f"Loaded state: {state['survey_state']} since {state['start_time']}")
             return state
@@ -172,8 +176,13 @@ class StateManager:
             # frequency combination) - see record_ppp_ar_attempt().
             'last_ppp_ar_attempt': None,
             'ppp_ar_attempts': [],
+            # 'apply' (default): the final result is applied to the broadcast
+            # position. 'propose': it is stored in 'proposal' and NOT applied
+            # until the owner confirms (reference stations).
+            'apply_mode': 'apply',
+            'proposal': None,
         }
-    
+
     def _convert_numpy(self, obj):
         """Recursively convert numpy types to Python natives for JSON serialization"""
         if isinstance(obj, dict):
@@ -259,6 +268,30 @@ class StateManager:
         except Exception as e:
             logger.warning(f"Failed to reload state: {e}")
             return False
+
+    def get_apply_mode(self) -> str:
+        """'propose' if the survey must not apply its final result, else 'apply'."""
+        return 'propose' if self._state.get('apply_mode') == 'propose' else 'apply'
+
+    def record_proposal(self, position: Dict[str, Any],
+                        reference: Optional[Dict[str, Any]] = None) -> bool:
+        """Store the final result of a 'propose' survey (not applied)."""
+        self._state['proposal'] = {
+            'position': position,
+            'reference': reference,
+            'created_at': datetime.utcnow().isoformat(),
+            'applied': False,
+        }
+        return self.save_state()
+
+    def mark_proposal_applied(self) -> bool:
+        """Record that the stored proposal was applied by the owner."""
+        proposal = self._state.get('proposal')
+        if not isinstance(proposal, dict):
+            return False
+        proposal['applied'] = True
+        proposal['applied_at'] = datetime.utcnow().isoformat()
+        return self.save_state()
 
     def mark_applied(self, position: Optional[Dict[str, Any]] = None):
         """Mark that final coordinates were applied to RTKBase"""
@@ -471,12 +504,15 @@ class StateManager:
         return self.save_state()
 
 
-    def start_survey(self, target_hours: int = 24) -> bool:
+    def start_survey(self, target_hours: int = 24, apply_mode: str = 'apply') -> bool:
         """
         Start new survey session
 
         Args:
             target_hours: Survey duration in hours (default: 24)
+            apply_mode: 'apply' (default) or 'propose' - in 'propose' mode the
+                final result is stored as a proposal and never applied
+                automatically
 
         Returns:
             True if started successfully
@@ -488,12 +524,18 @@ class StateManager:
             logger.warning("Survey already finalizing")
             return False
 
+        if apply_mode not in ('apply', 'propose'):
+            logger.warning(f"Unknown apply_mode {apply_mode!r}, using 'apply'")
+            apply_mode = 'apply'
+
         now = datetime.utcnow().isoformat()
         self._state.update({
             'survey_state': SurveyState.RUNNING.value,
             'start_time': now,
             'end_time': None,
             'target_hours': target_hours,
+            'apply_mode': apply_mode,
+            'proposal': None,
             'completed_hours': 0,
             'num_epochs': 0,
             'num_updates': 0,
@@ -546,10 +588,12 @@ class StateManager:
         Returns:
             True if updated successfully
         """
-        if self.survey_state != SurveyState.RUNNING:
+        # The final result is computed while the survey is FINALIZING (data
+        # collection over), so that state must accept it too.
+        if self.survey_state not in (SurveyState.RUNNING, SurveyState.FINALIZING):
             logger.warning("Cannot update: survey not running")
             return False
-        
+
         now = datetime.utcnow()
         start_time = datetime.fromisoformat(self._state['start_time'])
         elapsed_hours = (now - start_time).total_seconds() / 3600
